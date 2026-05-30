@@ -1,0 +1,35 @@
+# Auto-format C++, CMake, and Python on commit. Hooks call the system
+# tools (no version pinning) so commit-time formatting matches whatever
+# `./reformat.sh` would produce.
+#
+# Setup (once per checkout):
+#     pre-commit install
+# Run against the whole tree on demand:
+#     pre-commit run --all-files
+# Equivalent to:
+#     ./reformat.sh --check
+#
+# A hook that rewrites a file makes pre-commit fail the commit with a
+# "files were modified by this hook" message; `git add` the changes and
+# re-commit.
+
+repos:
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: clang-format
+        entry: clang-format -i
+        language: system
+        types_or: [c, c++]
+
+      - id: cmake-format
+        name: cmake-format
+        entry: cmake-format -i
+        language: system
+        files: '(^|/)(CMakeLists\.txt|.*\.cmake)$'
+
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format
+        language: system
+        types: [python]
