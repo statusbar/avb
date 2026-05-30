@@ -1,0 +1,83 @@
+// Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+// SPDX-License-Identifier: MIT
+
+#include "statusbar/nanoavb/nanoavb_supervisor_sm.hpp"
+
+#include "statusbar/sm/sm_core.hpp"
+
+#include <functional>
+#include <string>
+
+namespace statusbar::nanoavb::supervisor_sm {
+
+void init_iface(Context& ctx, TimePoint time)
+{
+    ctx.last_action = "init_iface";
+    if (ctx.callbacks.init_iface) {
+        ctx.callbacks.init_iface(ctx, time);
+    }
+}
+
+void start_protocols(Context& ctx, TimePoint time)
+{
+    ctx.last_action = "start_protocols";
+    if (ctx.callbacks.start_protocols) {
+        ctx.callbacks.start_protocols(ctx, time);
+    }
+}
+
+void enter_wait_vlan(Context& ctx, TimePoint time)
+{
+    ctx.last_action = "enter_wait_vlan";
+    if (ctx.callbacks.enter_wait_vlan) {
+        ctx.callbacks.enter_wait_vlan(ctx, time);
+    }
+}
+
+void enter_ready(Context& ctx, TimePoint time)
+{
+    ctx.last_action = "enter_ready";
+    if (ctx.callbacks.enter_ready) {
+        ctx.callbacks.enter_ready(ctx, time);
+    }
+}
+
+void degrade_stop_streams(Context& ctx, TimePoint time)
+{
+    ctx.last_action = "degrade_stop_streams";
+    if (ctx.callbacks.degrade_stop_streams) {
+        ctx.callbacks.degrade_stop_streams(ctx, time);
+    }
+}
+
+void stop_all(Context& ctx, TimePoint time)
+{
+    ctx.last_action = "stop_all";
+    if (ctx.callbacks.stop_all) {
+        ctx.callbacks.stop_all(ctx, time);
+    }
+}
+
+void timeout_gptp(Context& ctx, TimePoint time)
+{
+    ctx.last_action = "timeout_gptp";
+    if (ctx.callbacks.timeout_gptp) {
+        ctx.callbacks.timeout_gptp(ctx, time);
+    }
+    if (ctx.callbacks.stop_all) {
+        ctx.callbacks.stop_all(ctx, time);
+    }
+}
+
+void timeout_vlan(Context& ctx, TimePoint time)
+{
+    ctx.last_action = "timeout_vlan";
+    if (ctx.callbacks.timeout_vlan) {
+        ctx.callbacks.timeout_vlan(ctx, time);
+    }
+    if (ctx.callbacks.degrade_stop_streams) {
+        ctx.callbacks.degrade_stop_streams(ctx, time);
+    }
+}
+
+}  // namespace statusbar::nanoavb::supervisor_sm
