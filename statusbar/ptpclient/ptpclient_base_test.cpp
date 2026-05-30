@@ -1,0 +1,193 @@
+// Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+// SPDX-License-Identifier: MIT
+
+// Unit tests for ptpclient_base: PtpErrorCategory::message and fit_time_mapping
+
+#include "statusbar/ptpclient/ptpclient.hpp"
+#include "statusbar/test/test.hpp"
+
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <string>
+#include <system_error>
+
+using namespace statusbar::ptpclient;
+
+//
+// Tests: PtpErrorCategory::message
+//
+
+TEST(ptp_error_category, device_not_found)
+{
+    auto ec = make_error_code(PtpError::device_not_found);
+    EXPECT_EQ(ec.message(), std::string("PTP device not found"));
+}
+
+TEST(ptp_error_category, device_open_failed)
+{
+    auto ec = make_error_code(PtpError::device_open_failed);
+    EXPECT_EQ(ec.message(), std::string("Failed to open PTP device"));
+}
+
+TEST(ptp_error_category, device_not_open)
+{
+    auto ec = make_error_code(PtpError::device_not_open);
+    EXPECT_EQ(ec.message(), std::string("PTP device not open"));
+}
+
+TEST(ptp_error_category, permission_denied)
+{
+    auto ec = make_error_code(PtpError::permission_denied);
+    EXPECT_EQ(ec.message(), std::string("Permission denied accessing PTP device"));
+}
+
+TEST(ptp_error_category, bridge_not_running)
+{
+    auto ec = make_error_code(PtpError::bridge_not_running);
+    EXPECT_EQ(ec.message(), std::string("PTP time bridge not running"));
+}
+
+TEST(ptp_error_category, bridge_not_healthy)
+{
+    auto ec = make_error_code(PtpError::bridge_not_healthy);
+    EXPECT_EQ(ec.message(), std::string("PTP time bridge mapping not healthy"));
+}
+
+TEST(ptp_error_category, unknown_error)
+{
+    std::error_code ec{999, ptp_error_category()};
+    EXPECT_EQ(ec.message(), std::string("Unknown PTP error"));
+}
+
+TEST(ptp_error_category, category_name)
+{
+    EXPECT_EQ(std::string(ptp_error_category().name()), std::string("statusbar.ptpclient"));
+}
+
+//
+// Tests: fit_time_mapping
+//
+
+TEST(ptp_fit_time, insufficient_samples)
+{
+    // 0 or 1 samples should return invalid result
+    auto result0 = fit_time_mapping(nullptr, 0, 200.0);
+    EXPECT_FALSE(result0.valid);
+
+    TimeSample single{.monotonic_ns = 1000, .ptp_ns = 2000, .bracket_ns = 10};
+    auto result1 = fit_time_mapping(&single, 1, 200.0);
+    EXPECT_FALSE(result1.valid);
+}
+
+TEST(ptp_fit_time, perfect_linear_unity_slope)
+{
+    // PTP = monotonic + offset (slope = 1.0, offset = 1000)
+    constexpr int64_t offset = 1000;
+    std::array<TimeSample, 10> samples{};
+    for (int i = 0; i < 10; ++i) {
+        int64_t mono = static_cast<int64_t>(i) * 1'000'000LL;
+        samples[i] = {.monotonic_ns = mono, .ptp_ns = mono + offset, .bracket_ns = 10};
+    }
+
+    auto result = fit_time_mapping(samples.data(), samples.size(), 200.0);
+
+    EXPECT_TRUE(result.valid);
+    EXPECT_TRUE(std::fabs(result.slope - 1.0) < 1e-6);
+    // Residuals should be near zero for perfect linear data
+    EXPECT_TRUE(result.rms_residual < 1.0);
+}
+
+TEST(ptp_fit_time, slope_with_rate_offset)
+{
+    // PTP runs slightly faster: slope = 1.0001 (100 ppm fast)
+    constexpr double rate = 1.0001;
+    constexpr int64_t base_offset = 500'000;
+    std::array<TimeSample, 20> samples{};
+    for (int i = 0; i < 20; ++i) {
+        int64_t mono = static_cast<int64_t>(i) * 1'000'000LL;
+        int64_t ptp = static_cast<int64_t>(static_cast<double>(mono) * rate) + base_offset;
+        samples[i] = {.monotonic_ns = mono, .ptp_ns = ptp, .bracket_ns = 10};
+    }
+
+    auto result = fit_time_mapping(samples.data(), samples.size(), 200.0);
+
+    EXPECT_TRUE(result.valid);
+    // Slope should be close to 1.0001
+    EXPECT_TRUE(std::fabs(result.slope - rate) < 1e-5);
+    EXPECT_TRUE(result.rms_residual < 10.0);
+}
+
+TEST(ptp_fit_time, slope_clamped_to_max_ppm)
+{
+    // Extreme slope (500 ppm) should be clamped to max_rate_ppm (200 ppm)
+    constexpr double extreme_rate = 1.0005;  // 500 ppm
+    std::array<TimeSample, 10> samples{};
+    for (int i = 0; i < 10; ++i) {
+        int64_t mono = static_cast<int64_t>(i) * 1'000'000LL;
+        int64_t ptp = static_cast<int64_t>(static_cast<double>(mono) * extreme_rate);
+        samples[i] = {.monotonic_ns = mono, .ptp_ns = ptp, .bracket_ns = 10};
+    }
+
+    auto result = fit_time_mapping(samples.data(), samples.size(), 200.0);
+
+    EXPECT_TRUE(result.valid);
+    // Slope should be clamped: 1.0 + 200ppm = 1.0002
+    EXPECT_TRUE(result.slope <= 1.0 + 200.0e-6 + 1e-9);
+}
+
+TEST(ptp_fit_time, large_timestamps)
+{
+    // Simulate realistic timestamps (~1.7e18 ns, about 2 years since epoch)
+    constexpr int64_t base_mono = 1'700'000'000'000'000'000LL;
+    constexpr int64_t base_ptp = 1'700'000'000'500'000'000LL;
+    std::array<TimeSample, 10> samples{};
+    for (int i = 0; i < 10; ++i) {
+        int64_t mono = base_mono + (static_cast<int64_t>(i) * 2'000'000LL);  // 2ms apart
+        int64_t ptp = base_ptp + (static_cast<int64_t>(i) * 2'000'000LL);
+        samples[i] = {.monotonic_ns = mono, .ptp_ns = ptp, .bracket_ns = 100};
+    }
+
+    auto result = fit_time_mapping(samples.data(), samples.size(), 200.0);
+
+    EXPECT_TRUE(result.valid);
+    EXPECT_TRUE(std::fabs(result.slope - 1.0) < 1e-6);
+}
+
+TEST(ptp_fit_time, identical_monotonic_values)
+{
+    // Degenerate case: all monotonic values the same (zero variance)
+    std::array<TimeSample, 5> samples{};
+    for (int i = 0; i < 5; ++i) {
+        samples[i] = {.monotonic_ns = 1000, .ptp_ns = static_cast<int64_t>(2000 + i), .bracket_ns = 10};
+    }
+
+    auto result = fit_time_mapping(samples.data(), samples.size(), 200.0);
+
+    // Should return invalid (sum_mm_centered is zero)
+    EXPECT_FALSE(result.valid);
+}
+
+TEST(ptp_fit_time, residuals_reported)
+{
+    // Add some noise to verify residuals are computed
+    std::array<TimeSample, 10> samples{};
+    for (int i = 0; i < 10; ++i) {
+        int64_t mono = static_cast<int64_t>(i) * 1'000'000LL;
+        int64_t noise = (i % 2 == 0) ? 100 : -100;
+        samples[i] = {.monotonic_ns = mono, .ptp_ns = mono + 5000 + noise, .bracket_ns = 10};
+    }
+
+    auto result = fit_time_mapping(samples.data(), samples.size(), 200.0);
+
+    EXPECT_TRUE(result.valid);
+    EXPECT_TRUE(result.rms_residual > 0.0);
+    EXPECT_TRUE(result.max_residual > 0.0);
+    EXPECT_TRUE(result.max_residual >= result.rms_residual);
+}
+
+//
+// Main test runner
+//
+
+TEST_MAIN(statusbar_ptpclient, ptpclient_base_test)
