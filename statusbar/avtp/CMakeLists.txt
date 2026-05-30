@@ -1,0 +1,81 @@
+# Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+# SPDX-License-Identifier: MIT
+
+statusbar_add_module(
+  NAME
+  avtp
+  SOURCES
+  avtp_aaf.cpp
+  avtp_aaf_v1.cpp
+  avtp_aaf_v1_stream_input.cpp
+  avtp_aaf_v1_stream_output.cpp
+  avtp_aaf_stream_input.cpp
+  avtp_aaf_stream_output.cpp
+  avtp_aef.cpp
+  avtp_am824.cpp
+  avtp_am824_v1.cpp
+  avtp_am824_stream.cpp
+  avtp_am824_stream_input.cpp
+  avtp_am824_stream_output.cpp
+  avtp_stream_common.cpp
+  avtp_crf.cpp
+  avtp_crf_v1.cpp
+  avtp_crf_stream_input.cpp
+  avtp_crf_stream_output.cpp
+  avtp_eecf.cpp
+  avtp_escf.cpp
+  avtp_maap.cpp
+  avtp_ntscf.cpp
+  avtp_ntscf_v1.cpp
+  avtp_tscf.cpp
+  avtp_tscf_v1.cpp
+  avtp_maap_sm.cpp
+  avtp_types.cpp
+  DEPS
+  statusbar::buffer
+  statusbar::ieee
+  statusbar::ip
+  statusbar::sm
+  statusbar::status
+  statusbar::tsn
+  TESTS
+  avtp_aaf_test.cpp
+  avtp_aaf_stream_input_test.cpp
+  avtp_aaf_stream_output_test.cpp
+  avtp_aaf_v1_test.cpp
+  avtp_aaf_v1_stream_input_test.cpp
+  avtp_aaf_v1_stream_output_test.cpp
+  avtp_aef_test.cpp
+  avtp_am824_test.cpp
+  avtp_am824_v1_test.cpp
+  avtp_am824_stream_test.cpp
+  avtp_am824_stream_output_test.cpp
+  avtp_crf_test.cpp
+  avtp_crf_stream_test.cpp
+  avtp_crf_v1_test.cpp
+  avtp_eecf_test.cpp
+  avtp_escf_test.cpp
+  avtp_ip_encap_test.cpp
+  avtp_maap_test.cpp
+  avtp_ntscf_test.cpp
+  avtp_ntscf_v1_test.cpp
+  avtp_tscf_test.cpp
+  avtp_tscf_v1_test.cpp
+  avtp_maap_sm_test.cpp
+  avtp_stream_format_test.cpp
+  avtp_types_test.cpp)
+
+add_executable(avtp_retransmit_tool avtp_retransmit_tool.cpp)
+target_link_libraries(avtp_retransmit_tool PRIVATE statusbar)
+set_target_properties(avtp_retransmit_tool PROPERTIES OUTPUT_NAME
+                                                      statusbar-avtp-retransmit)
+set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
+                                    avtp_retransmit_tool)
+
+# Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_aaf_fuzzer.cpp)
+
+add_executable(avtp_sm_tool avtp_sm_tool.cpp)
+target_link_libraries(avtp_sm_tool PRIVATE statusbar)
+set_target_properties(avtp_sm_tool PROPERTIES OUTPUT_NAME statusbar-avtp-sm)
+set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS avtp_sm_tool)
