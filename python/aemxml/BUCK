@@ -1,0 +1,70 @@
+# python/aemxml/BUCK
+#
+# base_module is intentionally omitted so that Buck2 uses the label's package
+# path ("python/aemxml") as the prefix in the link-tree.  This means:
+#
+#   __file__ (symlink) = <link-tree>/python/aemxml/aemxml_test.py
+#   Path(__file__).parent×3  = <link-tree>/        ← same as repo root layout
+#   os.path.abspath(__file__) two parents up        ← same as repo root layout
+#
+# Resources keyed as "../../examples/<f>" normalize (via paths.normalize) to
+# "examples/<f>" at the link-tree root, mirroring the on-disk repo layout that
+# both aemxml_test.py and aemxml_reader.validate_aemxml() expect.
+
+python_library(
+    name = "aemxml",
+    srcs = [
+        "__init__.py",
+        "aemxml_reader.py",
+        "aemxml_tool.py",
+        "aemxml_writer.py",
+        "blob_reader.py",
+        "blob_writer.py",
+        "control_values.py",
+        "flatten.py",
+        "json_reader.py",
+        "json_writer.py",
+        "model.py",
+        "stream_formats.py",
+        "wire.py",
+    ],
+    visibility = ["PUBLIC"],
+)
+
+python_test(
+    name = "aemxml_test",
+    srcs = ["aemxml_test.py"],
+    main_module = "python.aemxml.aemxml_test",
+    deps = [":aemxml"],
+    resources = {
+        # Resource keys are relative to the base_module prefix ("python/aemxml/").
+        # "../../<dest>" normalises to "<dest>" at the link-tree root,
+        # matching the repo layout that aemxml_test.py and aemxml_reader.py expect.
+        "../../examples/bareminimum.aemxml": "//examples:bareminimum.aemxml",
+        "../../examples/bareminimum_2021.aemxml": "//examples:bareminimum_2021.aemxml",
+        "../../examples/simple_stereo.json": "//examples:simple_stereo.json",
+        "../../standards/ieee1722.1-schema/atdecc.xsd": "//standards/ieee1722.1-schema:atdecc.xsd",
+        "../../standards/ieee1722.1-schema/avdecc.xsd": "//standards/ieee1722.1-schema:avdecc.xsd",
+    },
+)
+
+python_test(
+    name = "control_values_test",
+    srcs = ["control_values_test.py"],
+    main_module = "python.aemxml.control_values_test",
+    deps = [":aemxml"],
+)
+
+# descriptor_storage_cross_check.py needs the C++ tool
+# //statusbar/atdecc:descriptor_storage_tool which is out of scope for the
+# current Buck2 experiment (tools deferred). Add when tools land:
+#
+# python_test(
+#     name = "descriptor_storage_cross_check",
+#     srcs = ["descriptor_storage_cross_check.py"],
+#     main_module = "python.aemxml.descriptor_storage_cross_check",
+#     deps = [":aemxml"],
+#     env = {
+#         "DESCRIPTOR_STORAGE_TOOL": "$(location //statusbar/atdecc:descriptor_storage_tool)",
+#     },
+# )
