@@ -1,0 +1,199 @@
+// Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+// SPDX-License-Identifier: MIT
+
+// gptp_slave_linux_tool — gPTP slave-only follower daemon for Linux
+//
+// Usage: statusbar-gptp-slave [options]
+//   -i <interface>     Network interface (default: eth0)
+//   -p <profile>       Profile: "standard" or "automotive" (default: standard)
+//   -d <ns>            Manual peer delay in nanoseconds (disables Pdelay exchange)
+//   -v                 Verbose: print every sync update
+//
+// Requires CAP_NET_RAW + CAP_NET_ADMIN, or root.
+// After building, grant capabilities with:
+//   sudo setcap cap_net_raw,cap_net_admin=ep statusbar-gptp-slave
+// Or use: ./scripts/device/setcaps.sh statusbar-gptp-slave
+
+#if defined(__linux__)
+
+#    include "statusbar/config/config.hpp"
+#    include "statusbar/gptp/gptp_slave_session.hpp"
+
+#    include <poll.h>
+
+#    include <chrono>
+#    include <csignal>
+#    include <cstdio>
+#    include <cstdlib>
+#    include <iterator>
+#    include <print>
+#    include <string>
+
+using namespace statusbar;
+using namespace statusbar::gptp;
+using Clock = std::chrono::steady_clock;
+
+namespace {
+
+sig_atomic_t volatile g_running = 1;
+
+void signal_handler(int /*sig*/)
+{
+    g_running = 0;
+}
+
+void install_signal_handlers()
+{
+    struct sigaction sa{};
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+}
+
+struct Config
+{
+    std::string interface{"eth0"};
+    std::string profile_str{"standard"};
+    int64_t manual_peer_delay_ns{-1};     // -1 = use live Pdelay
+    int64_t phase_jump_threshold_ns{-1};  // -1 = use config default
+    bool verbose{false};
+    bool software_timestamping{false};
+    double servo_ki{-1.0};
+    double servo_kp{-1.0};
+    std::string bridge_clock_str{};  // "" = disabled
+
+    // Derived (resolved after parsing)
+    Profile profile{Profile::Standard};
+    clockid_t bridge_clock{-1};
+};
+
+auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
+{
+    statusbar::args::ArgumentSpecs specs;
+
+    specs.add_device("interface", "Network interface", "eth0", [&](auto v) { config.interface = std::string{v}; });
+
+    specs.add_choice(
+        "profile", "gPTP profile", {"standard", "automotive"}, "standard", [&](auto v) { config.profile_str = std::string{v}; });
+
+    specs.add<int64_t>("manual-peer-delay", "Manual peer delay in ns (disables Pdelay exchange)", -1, [&](auto v) {
+        config.manual_peer_delay_ns = v;
+    });
+
+    specs.add<int64_t>("phase-jump-threshold", "Phase jump threshold in ns (default: from profile)", -1, [&](auto v) {
+        config.phase_jump_threshold_ns = v;
+    });
+
+    specs.add<double>("servo-ki", "Servo PI integral gain (default: 0.0003)", -1.0, [&](auto v) { config.servo_ki = v; });
+
+    specs.add<double>("servo-kp", "Servo PI proportional gain (default: 1.0)", -1.0, [&](auto v) { config.servo_kp = v; });
+
+    specs.add_flag("software", "Use software timestamping (no PHC required)", [&](auto v) { config.software_timestamping = v; });
+
+    specs.add_choice(
+        "bridge-clock",
+        "POSIX clock to bridge gPTP against. Defaults to monotonic_raw — the "
+        "per-sync line and exit summary always include the gPTP<->bridge "
+        "offset and rate ratio for the chosen clock.",
+        {"none", "monotonic", "monotonic_raw", "realtime"},
+        "monotonic_raw",
+        [&](auto v) { config.bridge_clock_str = std::string{v}; });
+
+    specs.add_flag("verbose", "Print every sync update", [&](auto v) { config.verbose = v; });
+
+    return specs;
+}
+
+void print_usage(char const* program_name, statusbar::args::ArgumentSpecs const& specs)
+{
+    std::println("Usage: {} [options]", program_name);
+    std::println("\ngPTP slave-only follower daemon for Linux.");
+    std::println("Requires CAP_NET_RAW + CAP_NET_ADMIN, or root.\n");
+    std::println("Options:");
+
+    std::string help;
+    specs.format_help_to(std::back_inserter(help));
+    std::print("{}", help);
+
+    std::println("\nExamples:");
+    std::println("  {} --interface=eth0 --profile=standard --verbose", program_name);
+    std::println("  {} --interface=eth0 --profile=automotive --manual-peer-delay=500000 --software --verbose", program_name);
+    std::println("  {} --interface=eth0 --software --servo-ki=0.0001 --bridge-clock=monotonic --verbose", program_name);
+    std::println("  {} --config=gptp.toml --verbose", program_name);
+    std::println("\nConfiguration File:");
+    std::println("  Settings can be stored in a TOML file and loaded with --config=FILE.");
+    std::println("  CLI arguments override config file values. Save current config with --config-save=FILE.");
+}
+
+/// Resolve derived fields from the parsed string values.
+void resolve_config(Config& config)
+{
+    config.profile = (config.profile_str == "automotive") ? Profile::AvnuAutomotive : Profile::Standard;
+
+    if (config.bridge_clock_str == "monotonic") {
+        config.bridge_clock = CLOCK_MONOTONIC;
+    } else if (config.bridge_clock_str == "monotonic_raw") {
+        config.bridge_clock = CLOCK_MONOTONIC_RAW;
+    } else if (config.bridge_clock_str == "realtime") {
+        config.bridge_clock = CLOCK_REALTIME;
+    }
+}
+
+}  // namespace
+
+int main(int argc, char** argv)
+{
+    Config cli;
+    auto specs = build_arg_specs(cli);
+    auto cli_result = statusbar::config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-gptp-slave");
+    if (!cli_result) {
+        return statusbar::config::handled_builtin_command(cli_result) ? 0 : 1;
+    }
+    resolve_config(cli);
+
+    install_signal_handlers();
+
+    SlaveSessionConfig sc{};
+    sc.interface = cli.interface;
+    sc.profile = cli.profile;
+    sc.software_timestamping = cli.software_timestamping;
+    sc.manual_peer_delay_ns = cli.manual_peer_delay_ns;
+    sc.phase_jump_threshold_ns = cli.phase_jump_threshold_ns;
+    sc.servo_kp = cli.servo_kp;
+    sc.servo_ki = cli.servo_ki;
+    sc.bridge_clock = cli.bridge_clock;
+    sc.verbose = cli.verbose;
+
+    SlaveSession session{sc};
+    if (!session.start()) {
+        return 1;
+    }
+
+    while (g_running != 0) {
+        struct pollfd pfd{};
+        pfd.fd = session.poll_fds()[0];
+        pfd.events = POLLIN;
+        int const ready = ::poll(&pfd, 1, /*timeout_ms*/ 100);
+        auto const now = Clock::now();
+        if (ready > 0 && (pfd.revents & POLLIN) != 0) {
+            session.dispatch(pfd.fd, now);
+        }
+        session.tick(now);
+    }
+
+    session.stop();
+    return 0;
+}
+
+#else
+
+#    include <print>
+
+int main()
+{
+    std::println(stderr, "gptp_slave_linux_tool requires Linux with hardware timestamping support.");
+    return 1;
+}
+
+#endif
