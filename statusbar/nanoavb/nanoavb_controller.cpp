@@ -69,7 +69,14 @@ void NanoAvbAemController::wire_all_callbacks()
     acmp_controller_.set_callbacks({
         .tx_command = [this](AcmpCommandResponse const& cmd) -> bool {
             if (callbacks_.send_atdecc_multicast) {
-                return callbacks_.send_atdecc_multicast(make_const_span(cmd));
+                // L2 ACMP: emit the pre-2021 56-byte (control_data_length=44) short
+                // form, matching the entity talker/listener TX. Per IEEE 1722.1 a
+                // receiver MUST accept the longer 2021 PDU and ignore the extra
+                // bytes, but several shipping devices (e.g. the DSP processor) silently drop the
+                // 96-byte extended form -- so default to the interoperable short
+                // form. acmp_serialize_2016 still emits the full PDU for UDP.
+                std::array<uint8_t, AcmpDu2021::LENGTH> buf{};
+                return callbacks_.send_atdecc_multicast(acmp_serialize_2016(cmd, buf));
             }
             return false;
         },
@@ -338,9 +345,24 @@ auto NanoAvbAemController::disconnect_stream(Eui64 talker, uint16_t talker_uid, 
     return acmp_controller_.disconnect(talker, talker_uid, listener, listener_uid);
 }
 
+auto NanoAvbAemController::connect_tx_stream(Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid) -> bool
+{
+    return acmp_controller_.connect_tx(talker, talker_uid, listener, listener_uid);
+}
+
+auto NanoAvbAemController::disconnect_tx_stream(Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid) -> bool
+{
+    return acmp_controller_.disconnect_tx(talker, talker_uid, listener, listener_uid);
+}
+
 auto NanoAvbAemController::get_rx_state(Eui64 listener, uint16_t listener_uid) -> bool
 {
     return acmp_controller_.get_rx_state(listener, listener_uid);
+}
+
+auto NanoAvbAemController::get_tx_state(Eui64 talker, uint16_t talker_uid) -> bool
+{
+    return acmp_controller_.get_tx_state(talker, talker_uid);
 }
 
 // Packet Dispatch

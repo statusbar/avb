@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <span>
 #include <string>
@@ -103,7 +104,7 @@ auto ControllerSimple::get_display_entities() -> std::vector<EntityDisplayInfo>
         if (it != entity_names_.end()) {
             info.name = it->second;
         } else {
-            info.name = ieee::to_string(id);
+            info.name = std::string{ieee::to_string(id).view()};
         }
 
         info.has_talker = adp.has_talker_capability(talker_capabilities::IMPLEMENTED);
@@ -213,6 +214,22 @@ void ControllerSimple::fetch_entity_descriptors(Eui64 entity_id, int64_t /*now_n
     }
 }
 
+auto ControllerSimple::cached_descriptors(ieee::Eui64 const& id) const -> std::vector<RawDescriptor>
+{
+    std::vector<RawDescriptor> out;
+    auto const it = descriptor_data_cache_.find(id);
+    if (it == descriptor_data_cache_.end()) {
+        return out;
+    }
+    for (auto const& [key, cached] : it->second) {
+        if (!cached.success) {
+            continue;
+        }
+        out.push_back({.type = key.first, .index = key.second, .data = cached.data});
+    }
+    return out;
+}
+
 void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
 {
     switch (action.kind) {
@@ -269,6 +286,37 @@ void ControllerSimple::dispatch(ControllerAction const& action, int64_t now_ns)
                 emit_status("Set stream format failed: entity not found or queue full");
             }
             break;
+        case ControllerActionKind::SetClockSource:
+            // desc_index = CLOCK_DOMAIN index; clock_source_index = which source.
+            if (!controller_.set_clock_source(
+                    action.request.talker_entity_id, action.request.desc_index, action.request.clock_source_index)) {
+                emit_status("Set clock source failed: entity not found or queue full");
+            }
+            break;
+        case ControllerActionKind::GetClockSource:
+            if (!controller_.get_clock_source(action.request.talker_entity_id, action.request.desc_index)) {
+                emit_status("Get clock source failed: entity not found or queue full");
+            }
+            break;
+        case ControllerActionKind::ConnectTxStream:
+            controller_.connect_tx_stream(
+                action.request.talker_entity_id,
+                action.request.talker_unique_id,
+                action.request.listener_entity_id,
+                action.request.listener_unique_id);
+            break;
+        case ControllerActionKind::DisconnectTxStream:
+            controller_.disconnect_tx_stream(
+                action.request.talker_entity_id,
+                action.request.talker_unique_id,
+                action.request.listener_entity_id,
+                action.request.listener_unique_id);
+            break;
+        case ControllerActionKind::GetCounters:
+            if (!controller_.get_counters(action.request.talker_entity_id, action.request.desc_type, action.request.desc_index)) {
+                emit_status("Get counters failed: entity not found or queue full");
+            }
+            break;
     }
 }
 
@@ -322,16 +370,17 @@ auto ControllerSimple::EntityDetailBuilder::build() const -> EntityDetail
         span_load(desc, make_const_span(entity_desc_data));
         detail.name = std::string{desc.entity_name.as_string_view()};
         detail.lines.push_back({.text = std::format("  Name: {}", desc.entity_name.as_string_view()), .bold = false});
-        detail.lines.push_back({.text = std::format("  Entity ID: {}", ieee::to_string(desc.entity_id)), .bold = false});
-        detail.lines.push_back({.text = std::format("  Model ID: {}", ieee::to_string(desc.entity_model_id)), .bold = false});
+        detail.lines.push_back({.text = std::format("  Entity ID: {}", ieee::to_string(desc.entity_id).view()), .bold = false});
+        detail.lines.push_back(
+            {.text = std::format("  Model ID: {}", ieee::to_string(desc.entity_model_id).view()), .bold = false});
         detail.lines.push_back({.text = std::format("  Firmware: {}", desc.firmware_version.as_string_view()), .bold = false});
         detail.lines.push_back({.text = std::format("  Serial: {}", desc.serial_number.as_string_view()), .bold = false});
         detail.lines.push_back(
             {.text = std::format("  Streams: {} out, {} in", desc.talker_stream_sources.get(), desc.listener_stream_sinks.get()),
              .bold = false});
     } else {
-        detail.name = ieee::to_string(entity_id);
-        detail.lines.push_back({.text = std::format("  Entity ID: {}", ieee::to_string(entity_id)), .bold = false});
+        detail.name = std::string{ieee::to_string(entity_id).view()};
+        detail.lines.push_back({.text = std::format("  Entity ID: {}", ieee::to_string(entity_id).view()), .bold = false});
         detail.lines.push_back({.text = "  (descriptor not received)", .bold = false});
     }
 
@@ -344,8 +393,9 @@ auto ControllerSimple::EntityDetailBuilder::build() const -> EntityDetail
         span_load_padded(avb, make_const_span(avb_iface_data));
         detail.lines.push_back({.text = "AVB Interface", .bold = true});
         detail.lines.push_back({.text = std::format("  Name: {}", avb.object_name.as_string_view()), .bold = false});
-        detail.lines.push_back({.text = std::format("  MAC: {}", ieee::to_string(avb.mac_address)), .bold = false});
-        detail.lines.push_back({.text = std::format("  Clock Identity: {}", ieee::to_string(avb.clock_identity)), .bold = false});
+        detail.lines.push_back({.text = std::format("  MAC: {}", ieee::to_string(avb.mac_address).view()), .bold = false});
+        detail.lines.push_back(
+            {.text = std::format("  Clock Identity: {}", ieee::to_string(avb.clock_identity).view()), .bold = false});
         detail.lines.push_back({.text = std::format("  gPTP Domain: {}", static_cast<int>(avb.domain_number)), .bold = false});
     }
 
@@ -472,7 +522,8 @@ void ControllerSimple::wire_controller()
 
                 if (rebooted) {
                     auto const name_it = entity_names_.find(id);
-                    std::string const name = (name_it != entity_names_.end()) ? name_it->second : ieee::to_string(id);
+                    std::string const name =
+                        (name_it != entity_names_.end()) ? name_it->second : std::string{ieee::to_string(id).view()};
                     forget_entity_metadata(id);
                     enqueue_descriptor_read(id, DESCRIPTOR_ENTITY, 0);
                     queue_rx_state_for_entity(e.adpdu);
@@ -510,7 +561,7 @@ void ControllerSimple::wire_controller()
                     if (it != entity_names_.end() && !it->second.empty()) {
                         return it->second;
                     }
-                    return ieee::to_string(id);
+                    return std::string{ieee::to_string(id).view()};
                 };
                 if (st == ACMP_STATUS_SUCCESS) {
                     if (mt == ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE) {
@@ -556,8 +607,28 @@ void ControllerSimple::forget_entity_metadata(Eui64 const& id)
     descriptor_data_cache_.erase(id);
 }
 
+void ControllerSimple::query_rx_state(Eui64 listener_id, uint16_t unique_id, int64_t now_ns)
+{
+    controller_.tick(now_ns);
+    controller_.get_rx_state(listener_id, unique_id);
+}
+
+void ControllerSimple::query_tx_state(Eui64 talker_id, uint16_t unique_id, int64_t now_ns)
+{
+    controller_.tick(now_ns);
+    controller_.get_tx_state(talker_id, unique_id);
+}
+
 void ControllerSimple::queue_rx_state_for_entity(AdpDu const& adp)
 {
+    // Auto-probing is opt-in (set_auto_probe_rx_state). When off, discovery and
+    // DiscoverAll never fan GET_RX_STATE at an entity's sinks -- so a one-shot
+    // connect/list can't have its ACMP in-flight window starved by an
+    // unresponsive multi-sink entity. The explicit get-rx-state command uses
+    // query_rx_state() and is unaffected.
+    if (!auto_probe_rx_state_) {
+        return;
+    }
     auto const listener_sinks = adp.listener_stream_sinks.get();
     auto const has_listener = (adp.listener_capabilities.get() & listener_capabilities::IMPLEMENTED) != 0;
     if (!has_listener || listener_sinks == 0) {
@@ -621,6 +692,33 @@ void ControllerSimple::dispatch_acmp(std::span<uint8_t const> payload, int64_t n
     }
     AcmpDu acmp{};
     span_load(acmp, payload);
+    if (std::getenv("ACMP_TRACE") != nullptr) {
+        std::print(
+            stderr,
+            "[acmp-trace] mt={} status={} L={}:{} T={}:{} len={}\n",
+            acmp.message_type(),
+            acmp.status(),
+            ieee::to_string(acmp.listener_entity_id).view(),
+            acmp.listener_unique_id.get(),
+            ieee::to_string(acmp.talker_entity_id).view(),
+            acmp.talker_unique_id.get(),
+            payload.size());
+    }
+    // Raw trace: surface EVERY ACMP PDU (commands included) so a diagnostic
+    // caller can reconstruct a handshake leg by leg -- in particular the
+    // listener's relayed CONNECT_TX_COMMAND, which is a command and would
+    // otherwise be dropped by the is_response() gate below.
+    if (acmp_trace_) {
+        pending_events_.emplace_back(
+            AcmpTraceEvent{
+                .message_type = acmp.message_type(),
+                .status = acmp.status(),
+                .talker_entity_id = acmp.talker_entity_id,
+                .talker_unique_id = acmp.talker_unique_id.get(),
+                .listener_entity_id = acmp.listener_entity_id,
+                .listener_unique_id = acmp.listener_unique_id.get()});
+    }
+
     if (!acmp.is_response()) {
         return;
     }
@@ -628,6 +726,18 @@ void ControllerSimple::dispatch_acmp(std::span<uint8_t const> payload, int64_t n
     // Passively monitor all ACMP responses for connection tracking
     auto const mt = acmp.message_type();
     auto const st = acmp.status();
+    // Surface every GET_RX_STATE_RESPONSE (any status), so a diagnostic caller
+    // can tell "entity answered" from "no reply" even for an unconnected sink.
+    if (mt == ACMP_MESSAGE_TYPE_GET_RX_STATE_RESPONSE) {
+        pending_events_.emplace_back(
+            RxStateEvent{
+                .listener_entity_id = acmp.listener_entity_id,
+                .listener_unique_id = acmp.listener_unique_id.get(),
+                .status = st,
+                .connected = (st == ACMP_STATUS_SUCCESS) && (acmp.talker_entity_id != Eui64{}),
+                .talker_entity_id = acmp.talker_entity_id,
+                .talker_unique_id = acmp.talker_unique_id.get()});
+    }
     if (st == ACMP_STATUS_SUCCESS) {
         if (mt == ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE || mt == ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE) {
             pending_events_.emplace_back(ConnectionAddedEvent{make_active_connection(acmp)});
@@ -657,9 +767,43 @@ void ControllerSimple::handle_aem_response(
         handle_get_stream_format_response(target, status, data);
         return;
     }
-    // Show status for other commands (identify, start/stop streaming, etc.)
+    // GET_COUNTERS: parse the 136-byte AemCountersPayload and surface a
+    // CountersReadyEvent so a supervise/diagnostic caller can sample a
+    // specific counter (FRAMES_RX / FRAMES_TX) across two passes.
+    if (cmd == AEM_COMMAND_GET_COUNTERS && status == AEM_STATUS_SUCCESS && data.size() >= sizeof(AemCountersPayload)) {
+        AemCountersPayload cp{};
+        span_load(cp, data.subspan(0, sizeof(AemCountersPayload)));
+        CountersReadyEvent ev{};
+        ev.entity_id = target;
+        ev.descriptor_type = cp.descriptor_type.get();
+        ev.descriptor_index = cp.descriptor_index.get();
+        ev.counters_valid = cp.counters_valid.get();
+        for (size_t i = 0; i < ev.counters.size(); ++i) {
+            ev.counters[i] = cp.counters[i].get();
+        }
+        pending_events_.emplace_back(ev);
+        return;
+    }
     auto name_it = entity_names_.find(target);
-    std::string name = (name_it != entity_names_.end()) ? name_it->second : ieee::to_string(target);
+    std::string name = (name_it != entity_names_.end()) ? name_it->second : std::string{ieee::to_string(target).view()};
+    // GET/SET_CLOCK_SOURCE: also report the (current) clock source index from the
+    // 8-byte AemClockSourcePayload the entity echoes back, so a scriptable caller
+    // can read back which source the device is now locked to.
+    if ((cmd == AEM_COMMAND_GET_CLOCK_SOURCE || cmd == AEM_COMMAND_SET_CLOCK_SOURCE) && status == AEM_STATUS_SUCCESS &&
+        data.size() >= AemClockSourcePayload::LENGTH) {
+        AemClockSourcePayload csp{};
+        span_load(csp, data.subspan(0, AemClockSourcePayload::LENGTH));
+        emit_status(
+            std::format(
+                "{} {}: {} clock_domain={} clock_source={}",
+                aem_command_name(cmd),
+                name,
+                aem_status_name(status),
+                csp.descriptor_index.get(),
+                csp.clock_source_index.get()));
+        return;
+    }
+    // Show status for other commands (identify, start/stop streaming, etc.)
     emit_status(std::format("{} {}: {}", aem_command_name(cmd), name, aem_status_name(status)));
 }
 

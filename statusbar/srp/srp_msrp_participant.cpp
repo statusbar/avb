@@ -13,7 +13,11 @@
 
 #include "statusbar/srp/srp_msrp_participant.hpp"
 
+#include "statusbar/status/throw_or_abort.hpp"
+
 #include <algorithm>
+#include <cstdio>  // stderr (diagnostic [srp-mrp] logging)
+#include <print>
 
 namespace statusbar::srp::msrp {
 
@@ -79,14 +83,6 @@ constexpr auto rx_events_for(AttributeEvent event) noexcept -> RxEvents
     }
 }
 
-/// Increment the tsn::StreamId contained in a TalkerAdvertiseFirstValue by
-/// one unique_id step. Used when expanding a multi-value vector
-/// attribute during receive.
-inline void increment_stream_id(tsn::StreamId& id) noexcept
-{
-    id.increment_unique_id();
-}
-
 /// Generic erase-remove for containers without std::erase_if support
 /// (e.g. statusbar::sg14::inplace_vector).
 template <typename Container, typename Pred>
@@ -129,7 +125,6 @@ inline void reset_buffer(MutableBuffer& buf) noexcept
 using detail_msrp::append_be16;
 using detail_msrp::append_u8;
 using detail_msrp::erase_if;
-using detail_msrp::increment_stream_id;
 using detail_msrp::reset_buffer;
 using detail_msrp::rx_events_for;
 using detail_msrp::translate_sndmsg;
@@ -147,7 +142,7 @@ MsrpParticipantT<Limits>::MsrpParticipantT(MsrpConfig const& config, uint64_t rn
     , port_{rng_seed}
 {
     if (auto const valid = config_.validate(); !valid) {
-        throw std::system_error(valid.error());
+        statusbar::throw_or_abort(valid.error());
     }
     // Reserve all dynamic containers up front — no further allocations
     // occur during protocol processing. statusbar::sg14::inplace_vector::reserve()
@@ -315,12 +310,32 @@ auto MsrpParticipantT<Limits>::listener_permits_transmit(tsn::StreamId const& st
     if (rec->operation != Operation::Register) {
         return false;
     }
-    // Must be actually registered (Registrar in "In" state), not
-    // pending leave or already gone.
-    if (!rec->registrar_is_in()) {
+    // Must be registered: Registrar In OR Lv (Leaving). Lv is the transient
+    // window of a routine periodic LeaveAll refresh (In -> Lv -> In); the
+    // attribute is still registered until the LeaveTimer expires to Mt. Gating
+    // on In-only made the talker flap off on every ~10-15 s LeaveAll. See
+    // ListenerRecord::registrar_is_registered (IEEE 802.1Q 10.7.7).
+    if (!rec->registrar_is_registered()) {
         return false;
     }
     return rec->substate == ListenerDeclaration::Ready || rec->substate == ListenerDeclaration::ReadyFailed;
+}
+
+template <class Limits>
+auto MsrpParticipantT<Limits>::listener_permit_debug(tsn::StreamId const& stream_id) const noexcept -> ListenerPermitDebug
+{
+    ListenerPermitDebug d;
+    auto const* rec = find_listener(stream_id);
+    if (rec == nullptr) {
+        return d;  // has_record=false, permits=false
+    }
+    d.has_record = true;
+    d.operation = rec->operation;
+    d.registrar_in = rec->registrar_is_registered();  // gate criterion: In or Lv
+    d.substate = rec->substate;
+    d.permits = (rec->operation == Operation::Register) && d.registrar_in &&
+        (rec->substate == ListenerDeclaration::Ready || rec->substate == ListenerDeclaration::ReadyFailed);
+    return d;
 }
 
 template <class Limits>
@@ -607,16 +622,38 @@ void MsrpParticipantT<Limits>::on_leave_timer(TimePoint now)
 template <class Limits>
 void MsrpParticipantT<Limits>::on_leaveall_timer(TimePoint now)
 {
-    // LeaveAll timer expired: drive the LeaveAll FSM, which will
-    // rearm its own timer, then fire TxLeaveAll on every per-attribute
-    // Applicant and Registrar FSM. After this, the next TX pass will
-    // include the LeaveAll flag in the outgoing PDU.
+    // LeaveAll timer expired: drive the LeaveAll FSM, which rearms its own timer,
+    // then fire TxLeaveAll on every per-attribute Applicant (so our own
+    // declarations are RE-DECLARED in the LeaveAll PDU). After this, the next TX
+    // pass includes the LeaveAll flag.
     port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::LvaTimer, now);
+
+    // Suppress-LeaveAll workaround: re-arm the FSM (done above) but never
+    // originate a LeaveAll and never drive our applicants into the leave path.
+    // We just keep re-asserting via the periodic timer -- the pre-006bf73 "sticky,
+    // never release" behaviour that a Luminex bridge needs for stable E->the DSP processor
+    // forwarding. Consume the FSM's pending Tx so it does not get stuck Active,
+    // but pass leave_all=false so the bit never reaches the wire.
+    if (suppress_leaveall_) {
+        port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::Tx, now);
+        build_and_send_pdu(now, /*leave_all=*/false);
+        return;
+    }
 
     auto drive = [&](auto& records) {
         for (auto& rec : records) {
             mrp::dispatch_applicant(rec, applicant_sm::Def::Event::TxLeaveAll, now);
-            mrp::dispatch_registrar(rec, registrar_sm::Def::Event::TxLeaveAll, now, port_.timers());
+            // Deliberately DO NOT drive our own Registrars to Lv on our OWN
+            // LeaveAll (the spec's In + TxLeaveAll -> Lv). That GC step assumes a
+            // peer re-declares the attribute within LeaveTime; a non-compliant
+            // bridge (the the audio interface AVB switch re-declares only on ITS own ~12 s
+            // LeaveAll, not in response to ours) does not, so we would age our own
+            // ACTIVELY-SERVED registration to Mt every LeaveAll period -- closing
+            // the talker gate (registrar not In) and freezing the stream. As an
+            // end-station MAD-only participant we let the peer's LeaveAll/Leave
+            // (RLeaveAll/RLeave) be the only thing that retires a registration; a
+            // received LeaveAll always arrives with the peer's re-declare in the
+            // same PDU, so it never strands us.
         }
     };
     drive(talker_adv_);
@@ -624,10 +661,12 @@ void MsrpParticipantT<Limits>::on_leaveall_timer(TimePoint now)
     drive(listeners_);
     drive(domains_);
 
-    // The LeaveAll FSM is now in Active; dispatch Tx so it transitions
-    // back to Passive with tx_leaveall_pending=true, and emit the PDU.
-    port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::Tx, now);
-    build_and_send_pdu(now);
+    // The LeaveAll FSM is now in Active; dispatch Tx so it transitions back to
+    // Passive with tx_leaveall_pending=true, and emit the PDU WITH the LeaveAll
+    // flag set. Forwarding tx_leaveall_pending is what actually puts the LeaveAll
+    // (and the re-declarations) on the wire. See build_and_send_pdu.
+    auto const& lva_ctx = port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::Tx, now);
+    build_and_send_pdu(now, lva_ctx.tx_leaveall_pending);
 }
 
 template <class Limits>
@@ -754,6 +793,7 @@ void MsrpParticipantT<Limits>::receive_pdu(std::span<uint8_t const> pdu, TimePoi
         return;  // unknown protocol version
     }
 
+    rx_leaveall_seen_ = false;
     size_t pos = 1;
     while (pos + 2 <= pdu.size()) {
         uint16_t const end_check = (static_cast<uint16_t>(pdu[pos]) << 8) | pdu[pos + 1];
@@ -789,6 +829,18 @@ void MsrpParticipantT<Limits>::receive_pdu(std::span<uint8_t const> pdu, TimePoi
         // Skip over any trailing bytes the inner decoder didn't consume,
         // keeping the outer message-walk cursor aligned with the sender.
         pos = attr_list_end;
+    }
+
+    // A received LeaveAll asked everyone to re-declare. Do it SYNCHRONOUSLY here
+    // rather than only arming the join timer (~100 ms): the bridge that sent the
+    // LeaveAll declares our (now-leaving) attributes as Mt toward downstream
+    // listeners on its own ~100 ms join timer, and a re-declare that lands just
+    // after that window makes the listener see our talker momentarily disappear
+    // and tear down its reservation (observed E -> the DSP processor via a Luminex switch:
+    // the E->the DSP processor stream stopped being forwarded). Emitting our re-declarations
+    // immediately keeps our registration continuously visible to the bridge.
+    if (rx_leaveall_seen_) {
+        build_and_send_pdu(now);
     }
 
     // After processing received events, a join timer opportunity may
@@ -828,6 +880,13 @@ void MsrpParticipantT<Limits>::decode_vector_attribute(
     // If the vector carries a LeaveAll flag, deliver it to every
     // attribute of this type.
     if (leave_all) {
+        rx_leaveall_seen_ = true;  // receive_pdu re-declares immediately (see there)
+        if (attr_type == AttributeType::Listener) {
+            // Diagnostic: a LeaveAll on the Listener type drives EVERY listener
+            // registrar to Leaving (registrar_in -> false) until the next Join
+            // re-registers it -- a prime suspect for the listener-ready flap.
+            std::print(stderr, "[srp-mrp] Listener LeaveAll (num_values={}) -> all listener registrars leave\n", num_values);
+        }
         auto drive_leaveall = [&](auto& records) {
             for (auto& rec : records) {
                 mrp::dispatch_applicant(rec, applicant_sm::Def::Event::RLeaveAll, now);
@@ -937,7 +996,7 @@ void MsrpParticipantT<Limits>::handle_rx_event(
             handle_talker_failed_rx(attr_length, first_value_bytes, value_index, rx.applicant, rx.registrar, now);
             break;
         case AttributeType::Listener:
-            handle_listener_rx(attr_length, first_value_bytes, value_index, rx.applicant, rx.registrar, decl, now);
+            handle_listener_rx(attr_length, first_value_bytes, value_index, rx.applicant, rx.registrar, decl, event, now);
             break;
         case AttributeType::Domain:
             handle_domain_rx(attr_length, first_value_bytes, value_index, rx.applicant, rx.registrar, now);
@@ -960,7 +1019,7 @@ void MsrpParticipantT<Limits>::handle_talker_advertise_rx(
     TalkerAdvertiseFirstValue fv;
     (void)load_unchecked(first_value_bytes, &fv);
     for (uint16_t k = 0; k < value_index; ++k) {
-        detail_msrp::increment_stream_id(fv.stream_id);
+        increment_first_value(fv);
     }
     if (!is_interesting(fv.stream_id)) {
         return;
@@ -1004,7 +1063,7 @@ void MsrpParticipantT<Limits>::handle_talker_failed_rx(
     TalkerFailedFirstValue fv;
     (void)load_unchecked(first_value_bytes, &fv);
     for (uint16_t k = 0; k < value_index; ++k) {
-        detail_msrp::increment_stream_id(fv.advertise.stream_id);
+        increment_first_value(fv);
     }
     if (!is_interesting(fv.advertise.stream_id)) {
         return;
@@ -1037,6 +1096,7 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
     applicant_sm::Def::Event applicant_event,
     registrar_sm::Def::Event registrar_event,
     ListenerDeclaration decl,
+    AttributeEvent wire_event,
     TimePoint now)
 {
     if (attr_length < ListenerFirstValue::LENGTH) {
@@ -1045,14 +1105,15 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
     ListenerFirstValue fv;
     (void)load_unchecked(first_value_bytes, &fv);
     for (uint16_t k = 0; k < value_index; ++k) {
-        detail_msrp::increment_stream_id(fv.stream_id);
+        increment_first_value(fv);
     }
     auto* rec_ptr = find_or_create_listener(fv.stream_id);
     if (rec_ptr == nullptr) {
         return;  // peer attribute, table full — silently drop
     }
     auto& rec = *rec_ptr;
-    bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
+    auto const state_before = rec.registrar_sm.current_state();
+    bool const was_registered = (state_before == registrar_sm::Def::State::In);
     rec.first_value = fv;
     auto const prev_substate = rec.substate;
     rec.substate = decl;
@@ -1064,6 +1125,37 @@ void MsrpParticipantT<Limits>::handle_listener_rx(
     }
     rec.registrar_ctx.clear_outputs();
     rec.registrar_sm.handle_event(rec.registrar_ctx, registrar_event, now);
+    // Diagnostic: a Listener attribute received for one of OUR talker streams --
+    // print the wire MRP event and the registrar STATE transition, to trace what
+    // drives the listener-ready flap ([srp-gate]). Seeing In<->Lv = a routine
+    // LeaveAll refresh (benign once the gate accepts Lv); reaching Mt = the peer
+    // truly de-registered (re-declaration / relay problem). `is_interesting`
+    // keeps this to our streams.
+    if (is_interesting(rec.first_value.stream_id)) {
+        auto const state_name = [](registrar_sm::Def::State s) -> char const* {
+            switch (s) {
+                case registrar_sm::Def::State::In:
+                    return "In";
+                case registrar_sm::Def::State::Lv:
+                    return "Lv";
+                case registrar_sm::Def::State::Mt:
+                    return "Mt";
+                case registrar_sm::Def::State::Start:
+                    return "Start";
+                default:
+                    return "?";
+            }
+        };
+        std::print(
+            stderr,
+            "[srp-mrp] listener rx sid={:016x} wire_event={} decl={} reg {}->{} lvtimer={}\n",
+            rec.first_value.stream_id.to_uint64(),
+            attribute_event_name(wire_event),
+            listener_declaration_name(decl),
+            state_name(state_before),
+            state_name(rec.registrar_sm.current_state()),
+            rec.registrar_ctx.lvtimer_request);
+    }
     if (rec.registrar_ctx.lvtimer_request) {
         port_.timers().start_leave(now);
     }
@@ -1089,13 +1181,11 @@ void MsrpParticipantT<Limits>::handle_domain_rx(
     }
     DomainFirstValue fv;
     (void)load_unchecked(first_value_bytes, &fv);
-    // Domain vectors with num_values > 1 would increment the
-    // sr_class_id and sr_class_priority fields (see mrp.c), but
-    // in practice domains are transmitted as singletons. For
-    // multi-value receive we'd need to derive the extra values
-    // here; we treat index 0 only for now.
-    if (value_index != 0) {
-        return;
+    // Multi-value Domain vectors increment SRclassID and SRclassPriority per
+    // value (IEEE 802.1Q 35.2.2.9; AVnu MSRP.End.c.35.1.11 Part B). The VID is
+    // carried unchanged.
+    for (uint16_t k = 0; k < value_index; ++k) {
+        increment_first_value(fv);
     }
     auto* rec_ptr = find_or_create_domain(fv.sr_class_id.get());
     if (rec_ptr == nullptr) {
@@ -1126,31 +1216,80 @@ template <typename RecordVec>
 auto MsrpParticipantT<Limits>::append_attribute_message(
     MutableBuffer& out, RecordVec& records, AttributeType attr_type, uint8_t attr_length, bool include_leave_all) -> bool
 {
-    // Count how many records actually want to tx in this pass.
-    size_t emit_count = 0;
-    for (auto const& rec : records) {
-        if (rec.applicant_ctx.tx_pending) {
-            ++emit_count;
+    // Count how many records actually want to tx in this pass. End-station
+    // MAD-only participant: only attributes WE declared (operation==Declare) are
+    // transmitted. Registered peer attributes (operation==Register) are tracked
+    // by the Registrar -- so we learn remote streams and can send Listener Ready
+    // -- but must never be re-declared on the wire. Re-declaring a registered
+    // attribute is the MAP (propagation) behaviour of a bridge port, not an end
+    // station: the observer applicant states (Ao/Qo) fire the *optional* sIn
+    // (a_tx_in_optional), which on a shared medium refreshes a shared registrar
+    // but on a point-to-point AVB link is pure noise -- and worse, makes the
+    // bridge see a second source for that StreamID and reject the reservation
+    // with TalkerFailed (SrClassPriorityMismatch). So we never emit Register
+    // records; see the matching skip in the emit loop below.
+    //
+    // Sticky-Listener exception: when redeclare_registered_listeners_ is set,
+    // registered Listener attributes ARE re-emitted (the cfea332 echo, for the
+    // Listener type only -- safe because a Listener has no two-source conflict).
+    // See set_redeclare_registered_listeners() for the rationale (jdk01E -> the DSP processor).
+    bool const allow_register_redeclare = redeclare_registered_listeners_ && (attr_type == AttributeType::Listener);
+    auto const may_emit = [&](auto const& rec) { return rec.operation == Operation::Declare || allow_register_redeclare; };
+    // A run is a maximal sequence of records that (a) want to tx this pass, (b)
+    // we may emit, and (c) whose FirstValues form a 35.1.11 increment chain --
+    // each is the previous one passed through increment_first_value(). A run is
+    // coalesced into ONE VectorAttribute with NumberOfValues == run length (one
+    // ThreePackedEvent per value, plus one FourPackedDeclaration per value for
+    // Listener). Records that cannot chain emit as singleton vectors.
+    //
+    // next_run(recs, from, out_len) returns the start index of the next run at or
+    // after `from` (skipping not-pending / non-emittable records), or recs.size()
+    // when none remain; out_len receives the run length.
+    auto next_run = [&](auto const& recs, size_t from, size_t& out_len) -> size_t {
+        size_t const n = recs.size();
+        size_t i = from;
+        while (i < n && !(recs[i].applicant_ctx.tx_pending && may_emit(recs[i]))) {
+            ++i;
         }
+        if (i >= n) {
+            out_len = 0;
+            return n;
+        }
+        size_t len = 1;
+        auto expected = recs[i].first_value;
+        increment_first_value(expected);
+        size_t j = i + 1;
+        while (j < n && recs[j].applicant_ctx.tx_pending && may_emit(recs[j]) && recs[j].first_value == expected) {
+            ++len;
+            increment_first_value(expected);
+            ++j;
+        }
+        out_len = len;
+        return i;
+    };
+
+    bool const is_listener_attr = (attr_type == AttributeType::Listener);
+
+    // Pre-compute AttributeListLength (IEEE 802.1Q-2014 Clause 10.8.2.3): byte
+    // count of the VectorAttributes plus the trailing EndMark (2 octets). A run
+    // of length L costs: VectorHeader(2) + FirstValue(attr_length) +
+    // ThreePackedEvents(ceil(L/3)) [+ FourPackedDeclarations(ceil(L/4)) for
+    // Listener]. This run walk MUST match the emit loop below so the length
+    // stays in sync with the bytes actually written.
+    size_t attr_list_length = size_t{2};  // trailing EndMark
+    size_t run_count = 0;
+    for (size_t run_len = 0, s = next_run(records, 0, run_len); s < records.size(); s = next_run(records, s + run_len, run_len)) {
+        ++run_count;
+        attr_list_length += size_t{2} + size_t{attr_length} + mrp::threepacked_octet_count(run_len) +
+            (is_listener_attr ? mrp::fourpacked_octet_count(run_len) : size_t{0});
     }
 
     // If no attributes want to tx and we don't need to broadcast a
     // LeaveAll, skip the whole message.
-    if (emit_count == 0 && !include_leave_all) {
+    if (run_count == 0 && !include_leave_all) {
         return false;
     }
-
-    bool const is_listener_attr = (attr_type == AttributeType::Listener);
-
-    // Pre-compute AttributeListLength (IEEE 802.1Q-2014 Clause 10.8.2.3):
-    // byte count of the VectorAttributes plus the trailing EndMark (2 octets).
-    // Each singleton vector costs: VectorHeader(2) + FirstValue(attr_length)
-    // + ThreePackedEvents(1) [+ FourPackedDeclarations(1) for Listener].
-    size_t const per_vector_bytes = size_t{2} + size_t{attr_length} + size_t{1} + (is_listener_attr ? size_t{1} : size_t{0});
-    size_t attr_list_length = size_t{2};  // trailing EndMark
-    if (emit_count > 0) {
-        attr_list_length += emit_count * per_vector_bytes;
-    } else if (include_leave_all) {
+    if (run_count == 0 && include_leave_all) {
         // Empty-vector LeaveAll: VectorHeader(2) only, no FirstValue / events.
         attr_list_length += size_t{2};
     }
@@ -1169,65 +1308,89 @@ auto MsrpParticipantT<Limits>::append_attribute_message(
         return false;
     }
 
-    // Emit either a single empty LeaveAll vector (if LVA needed but
-    // no attributes to tx) or a series of singleton vectors (one per
-    // attribute that wants to tx, with LVA flag attached to the first
-    // one if needed).
+    // Clear stale tx flags on records we will NOT emit (registered peer
+    // attributes whose observer applicant fired the optional sIn). next_run skips
+    // them, so clear here to keep the flag from lingering into the next pass --
+    // see the count-loop comment above for why an end station never re-declares a
+    // registered attribute.
+    for (auto& rec : records) {
+        if (rec.applicant_ctx.tx_pending && !may_emit(rec)) {
+            rec.applicant_ctx.tx_pending = false;
+            rec.applicant_ctx.send_msg = applicant_sm::SendMessage::None;
+            rec.applicant_ctx.encode = applicant_sm::Encoding::None;
+        }
+    }
+
+    // Emit one VectorAttribute per run (coalescing increment chains), or a single
+    // empty LeaveAll vector below if a LeaveAll is owed but nothing wants to tx.
+    // The LeaveAll flag rides the first vector emitted.
     bool leave_all_emitted = !include_leave_all;
     bool any_vector_emitted = false;
 
-    for (auto& rec : records) {
-        if (!rec.applicant_ctx.tx_pending) {
-            continue;
-        }
-        // Translate sndmsg -> wire AttributeEvent using current Registrar state.
-        bool reg_in = false;
-        if constexpr (requires { rec.registrar_is_in(); }) {
-            reg_in = rec.registrar_is_in();
-        }
-        auto const wire_event = detail_msrp::translate_sndmsg(rec.applicant_ctx.send_msg, reg_in);
-
-        // Serialize the FirstValue into a stack buffer.
-        std::array<uint8_t, 64> fv_buf{};  // 34 bytes is the largest (TalkerFailed)
-        auto const fv_span = std::span<uint8_t>(fv_buf.data(), attr_length);
-        (void)store_unchecked(fv_span, rec.first_value);
-
-        ListenerDeclaration const decl = [&]() {
-            if constexpr (requires { rec.substate; }) {
-                return rec.substate;
-            } else {
-                return ListenerDeclaration::Ignore;
-            }
-        }();
-
-        // VectorAttributeHeader (2 bytes): leave_all_flag | num_values=1
+    for (size_t run_len = 0, s = next_run(records, 0, run_len); s < records.size(); s = next_run(records, s + run_len, run_len)) {
+        // VectorAttributeHeader (2 bytes): leave_all_flag | num_values=run_len
         VectorAttributeHeader vh{};
-        vh.set(!leave_all_emitted, 1);
+        vh.set(!leave_all_emitted, static_cast<uint16_t>(run_len));
         if (!append_be16(out, vh.vector_header.get())) {
             return any_vector_emitted;
         }
-        // FirstValue
+        // FirstValue: the run's base value. The receiver derives values 1..L-1 by
+        // applying increment_first_value() per the matching ThreePackedEvent.
+        std::array<uint8_t, 64> fv_buf{};  // 34 bytes is the largest (TalkerFailed)
+        auto const fv_span = std::span<uint8_t>(fv_buf.data(), attr_length);
+        (void)store_unchecked(fv_span, records[s].first_value);
         if (!static_cast<bool>(out.append(std::span<uint8_t const>(fv_span.data(), attr_length)))) {
             return any_vector_emitted;
         }
-        // ThreePackedEvents: single value packed with two Mt fillers
-        if (!append_u8(out, mrp::pack3_events(wire_event, AttributeEvent::Mt, AttributeEvent::Mt))) {
-            return any_vector_emitted;
-        }
-        // FourPackedDeclarations (Listener only)
-        if (is_listener_attr) {
-            if (!append_u8(out, mrp::pack4_declarations(static_cast<uint8_t>(decl), 0, 0, 0))) {
+        // ThreePackedEvents: one AttributeEvent per value, packed 3 per octet
+        // (unused trailing slots in the final octet are Mt fillers).
+        auto event_at = [&](size_t k) -> AttributeEvent {
+            if (k >= run_len) {
+                return AttributeEvent::Mt;
+            }
+            auto const& rec = records[s + k];
+            bool reg_in = false;
+            if constexpr (requires { rec.registrar_is_in(); }) {
+                reg_in = rec.registrar_is_in();
+            }
+            return detail_msrp::translate_sndmsg(rec.applicant_ctx.send_msg, reg_in);
+        };
+        for (size_t o = 0; o < run_len; o += 3) {
+            if (!append_u8(out, mrp::pack3_events(event_at(o), event_at(o + 1), event_at(o + 2)))) {
                 return any_vector_emitted;
+            }
+        }
+        // FourPackedDeclarations (Listener only): one per value, packed 4 per
+        // octet (unused trailing slots are 0 == Ignore fillers).
+        if (is_listener_attr) {
+            auto decl_at = [&](size_t k) -> uint8_t {
+                if (k >= run_len) {
+                    return 0;
+                }
+                auto const& rec = records[s + k];
+                if constexpr (requires { rec.substate; }) {
+                    return static_cast<uint8_t>(rec.substate);
+                } else {
+                    return 0;
+                }
+            };
+            for (size_t o = 0; o < run_len; o += 4) {
+                if (!append_u8(out, mrp::pack4_declarations(decl_at(o), decl_at(o + 1), decl_at(o + 2), decl_at(o + 3)))) {
+                    return any_vector_emitted;
+                }
             }
         }
 
         leave_all_emitted = true;
         any_vector_emitted = true;
 
-        // Clear tx_pending for this pass so the next build doesn't re-emit it.
-        rec.applicant_ctx.tx_pending = false;
-        rec.applicant_ctx.send_msg = applicant_sm::SendMessage::None;
-        rec.applicant_ctx.encode = applicant_sm::Encoding::None;
+        // Clear tx_pending across the whole run so the next build doesn't re-emit.
+        for (size_t k = 0; k < run_len; ++k) {
+            auto& rec = records[s + k];
+            rec.applicant_ctx.tx_pending = false;
+            rec.applicant_ctx.send_msg = applicant_sm::SendMessage::None;
+            rec.applicant_ctx.encode = applicant_sm::Encoding::None;
+        }
     }
 
     // If we needed to emit a LeaveAll but no attributes produced a tx,
@@ -1249,7 +1412,7 @@ auto MsrpParticipantT<Limits>::append_attribute_message(
 }
 
 template <class Limits>
-void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now)
+void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
 {
     // First, dispatch the appropriate TX event to every attribute's
     // Applicant to generate tx outputs. We pick TxRegistrarIn vs
@@ -1265,8 +1428,31 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now)
     drive_tx(listeners_);
     drive_tx(domains_);
 
-    // Did the LeaveAll FSM ask us to tag this PDU?
-    bool const leave_all_flag = false;  // Set in on_leaveall_timer path via separate codepath below
+    // Did the LeaveAll FSM ask us to tag this PDU? on_leaveall_timer passes the
+    // leaveall_sm's tx_leaveall_pending here; the join/periodic TX paths pass
+    // false. (Previously hardcoded false -> our LeaveAll was never transmitted.)
+    //
+    // The LeaveAll must ride the FIRST attribute type that actually re-declares a
+    // record, so the flag is always carried by a non-empty vector (with a
+    // FirstValue). Emitting a standalone EMPTY LeaveAll vector (NumberOfValues=0)
+    // for a type we have no records of -- e.g. TalkerFailed on a pure talker --
+    // is mis-parsed by some peers (the the audio interface AVB switch) AND tshark: they read a
+    // FirstValue for the 0-value vector and consume the following Listener/Domain
+    // messages' bytes, DESTROYING the rest of the PDU. A LeaveAll PDU must
+    // re-declare every active attribute in the same packet (IEEE 802.1Q
+    // 10.7.6.2); losing the Domain re-declaration makes the bridge treat our port
+    // as non-AVB and fail the talker with code 8. So: carry the LeaveAll on the
+    // first re-declaring message, and never synthesize an empty LeaveAll vector
+    // ahead of other messages.
+    auto has_emittable = [](auto const& recs) {
+        for (auto const& r : recs) {
+            if (r.applicant_ctx.tx_pending && r.operation == Operation::Declare) {
+                return true;
+            }
+        }
+        return false;
+    };
+    bool la_remaining = leave_all;
 
     // Reuse the participant's pre-allocated PDU buffer; no per-tx heap.
     reset_buffer(pdu_buffer_);
@@ -1275,22 +1461,26 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now)
     }
 
     bool any_message = false;
-    any_message |= append_attribute_message(
-        pdu_buffer_,
-        talker_adv_,
-        AttributeType::TalkerAdvertise,
-        static_cast<uint8_t>(AttributeLength::TalkerAdvertise),
-        leave_all_flag);
-    any_message |= append_attribute_message(
-        pdu_buffer_,
-        talker_failed_,
-        AttributeType::TalkerFailed,
-        static_cast<uint8_t>(AttributeLength::TalkerFailed),
-        leave_all_flag);
-    any_message |= append_attribute_message(
-        pdu_buffer_, listeners_, AttributeType::Listener, static_cast<uint8_t>(AttributeLength::Listener), leave_all_flag);
-    any_message |= append_attribute_message(
-        pdu_buffer_, domains_, AttributeType::Domain, static_cast<uint8_t>(AttributeLength::Domain), leave_all_flag);
+    auto emit_msg = [&](auto& recs, AttributeType type, uint8_t len) {
+        bool const carry_la = la_remaining && has_emittable(recs);
+        bool const emitted = append_attribute_message(pdu_buffer_, recs, type, len, carry_la);
+        if (carry_la && emitted) {
+            la_remaining = false;  // LeaveAll consumed by this non-empty message
+        }
+        any_message |= emitted;
+    };
+    emit_msg(talker_adv_, AttributeType::TalkerAdvertise, static_cast<uint8_t>(AttributeLength::TalkerAdvertise));
+    emit_msg(talker_failed_, AttributeType::TalkerFailed, static_cast<uint8_t>(AttributeLength::TalkerFailed));
+    emit_msg(listeners_, AttributeType::Listener, static_cast<uint8_t>(AttributeLength::Listener));
+    emit_msg(domains_, AttributeType::Domain, static_cast<uint8_t>(AttributeLength::Domain));
+
+    // Empty-database LeaveAll: we owe a LeaveAll but have nothing to re-declare.
+    // A single standalone empty LeaveAll is safe here -- there are no later
+    // messages in the PDU for a mis-parsing peer to run into.
+    if (la_remaining && !any_message) {
+        any_message |= append_attribute_message(
+            pdu_buffer_, talker_adv_, AttributeType::TalkerAdvertise, static_cast<uint8_t>(AttributeLength::TalkerAdvertise), true);
+    }
 
     if (!any_message) {
         return;

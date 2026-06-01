@@ -11,23 +11,27 @@
 using namespace statusbar;
 using namespace statusbar::avtp;
 
-// AAF: rate=48000 (nsr=0x05), channels=2, depth=24
-// Byte layout: 02 50 02 18 00 00 00 00 → 0x0250021800000000
+// AAF stream format (IEEE 1722-2016 Clause 7.3.4): byte0=0x02, byte1 low nibble=nsr,
+// byte2=format, byte3=bit_depth, bytes4-7 = channels<<22 | samples_per_frame<<12.
+// 48000(nsr=5) 2ch 24-bit INT_24(0x03): 02 05 03 18 | (2<<22)=00 80 00 00
 TEST(stream_format, aaf_48khz_2ch_24bit)
 {
-    auto const s = stream_format_to_string(0x0250021800000000ULL);
+    auto const s = stream_format_to_string(0x0205031800800000ULL);
     EXPECT_TRUE(s == "AAF 2ch 48kHz 24-bit");
 }
 
+// Verified against a the DSP processor STREAM_INPUT: 02 07 02 20 02 00 c0 00
+// = 96000(nsr=7) INT_32(0x02) 32-bit, 8 channels, 12 samples/frame.
 TEST(stream_format, aaf_96khz_8ch_32bit)
 {
-    auto const s = stream_format_to_string(0x0270082000000000ULL);
+    auto const s = stream_format_to_string(0x020702200200C000ULL);
     EXPECT_TRUE(s == "AAF 8ch 96kHz 32-bit");
 }
 
+// 44100(nsr=4) 2ch 16-bit INT_16(0x04): 02 04 04 10 | (2<<22)=00 80 00 00
 TEST(stream_format, aaf_441khz_2ch_16bit)
 {
-    auto const s = stream_format_to_string(0x0240021000000000ULL);
+    auto const s = stream_format_to_string(0x0204041000800000ULL);
     EXPECT_TRUE(s == "AAF 2ch 44.1kHz 16-bit");
 }
 
@@ -60,9 +64,10 @@ TEST(stream_format, crf_formatted_as_crf)
     EXPECT_TRUE(s == "CRF");
 }
 
+// nsr in the low nibble = 0x0F (no mapped rate) -> "rate?(15)"
 TEST(stream_format, aaf_unknown_rate_shows_nsr_code)
 {
-    auto const s = stream_format_to_string(0x02F0011000000000ULL);
+    auto const s = stream_format_to_string(0x020F011000000000ULL);
     EXPECT_TRUE(s.find("rate?") != std::string::npos);
 }
 

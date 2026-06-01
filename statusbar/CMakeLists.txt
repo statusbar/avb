@@ -67,6 +67,15 @@ add_subdirectory(avb_entity)
 add_subdirectory(atdecc_tools)
 add_subdirectory(avtp_tools)
 
+# Networking and measurement modules. udptun and stun come before owlm (owlm
+# links both). tools/ is last — its executables link the package `statusbar`
+# umbrella.
+add_subdirectory(udptun)
+add_subdirectory(stun)
+add_subdirectory(owlm)
+add_subdirectory(netdump)
+add_subdirectory(tools)
+
 # Populate the package INTERFACE library — skipped under the outer aggregate
 # build, which populates a single shared `statusbar` itself.
 if(NOT STATUSBAR_AGGREGATE_BUILD)
@@ -82,6 +91,10 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
               statusbar-avb_entity
               statusbar-atdecc_tools
               statusbar-avtp_tools
+              statusbar-udptun
+              statusbar-stun
+              statusbar-owlm
+              statusbar-netdump
               statusbar::args
               statusbar::audio
               statusbar::benchmark
@@ -113,8 +126,8 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
 endif()
 
 # Aggregate test binary built from every module's test sources. Skipped under
-# the outer aggregate build, which builds one combined statusbar_test from
-# every package.
+# the outer aggregate build, which builds one combined statusbar_test from every
+# package.
 if(NOT STATUSBAR_AGGREGATE_BUILD)
   get_property(STATUSBAR_TEST_FILES_ABS GLOBAL PROPERTY STATUSBAR_TEST_FILES)
   set(STATUSBAR_TEST_FILES "")

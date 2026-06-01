@@ -89,17 +89,21 @@ namespace statusbar::avtp {
     }
 }
 
-/// Decode an AAF stream format. Layout (IEEE 1722-2016 Clause 7.3.4):
+/// Decode an AAF stream format. Layout (IEEE 1722-2016 Clause 7.3.4), verified
+/// byte-for-byte against a the DSP processor (02 07 02 20 02 00 c0 00 =
+/// AAF 96 kHz INT_32 8ch 12 samples/frame):
 ///   Byte 0: subtype (0x02)
-///   Byte 1: nsr[7:4] | reserved[3:2] | channels_per_frame[9:8]
-///   Byte 2: channels_per_frame[7:0]
+///   Byte 1: reserved[7:4] | nsr[3:0]
+///   Byte 2: format (AAF sample format code: INT_32=0x02, ...)
 ///   Byte 3: bit_depth
-///   Bytes 4-7: reserved
+///   Bytes 4-7 (32-bit BE): channels_per_frame[31:22] | samples_per_frame[21:12] | rsv[11:0]
 [[nodiscard]] inline auto decode_aaf_stream_format(uint64_t fmt) -> std::string
 {
     auto const b = stream_format_bytes(fmt);
-    uint8_t const nsr = (b[1] >> 4) & 0x0FU;
-    uint16_t const channels = (static_cast<uint16_t>(b[1] & 0x03U) << 8) | b[2];
+    uint8_t const nsr = b[1] & 0x0FU;
+    uint32_t const tail = (static_cast<uint32_t>(b[4]) << 24) | (static_cast<uint32_t>(b[5]) << 16) |
+        (static_cast<uint32_t>(b[6]) << 8) | static_cast<uint32_t>(b[7]);
+    uint16_t const channels = static_cast<uint16_t>((tail >> 22) & 0x3FFU);
     uint8_t const depth = b[3];
     uint32_t const rate = aaf_nsr_to_hz(nsr);
     if (rate == 0) {

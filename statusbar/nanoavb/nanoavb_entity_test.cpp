@@ -107,8 +107,10 @@ TEST(nanoavb_entity_commands, read_entity_descriptor)
     auto result = make_test_result(handler, header, command_data);
 
     EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);
-    // Response should be 8 byte header + entity descriptor size
-    EXPECT_EQ(result.response_data().size(), 8 + sizeof(DescriptorEntity));
+    // Response = 4-byte READ_DESCRIPTOR header (configuration_index + reserved)
+    // + entity descriptor. The descriptor carries its own descriptor_type +
+    // descriptor_index, so the header is 4 bytes, not 8.
+    EXPECT_EQ(result.response_data().size(), AemReadDescriptorResponsePayload::LENGTH + sizeof(DescriptorEntity));
 }
 
 TEST(nanoavb_entity_commands, read_configuration_descriptor)
@@ -135,9 +137,9 @@ TEST(nanoavb_entity_commands, read_configuration_descriptor)
     EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);
     // DescriptorConfiguration now has an inline descriptor_counts trailer,
     // so sizeof() is larger than the wire size. The response body is the
-    // 8-byte READ_DESCRIPTOR header + wire_size() = LENGTH for an empty
+    // 4-byte READ_DESCRIPTOR header + wire_size() = LENGTH for an empty
     // config (descriptor_counts_count == 0).
-    EXPECT_EQ(result.response_data().size(), 8 + DescriptorConfiguration::LENGTH);
+    EXPECT_EQ(result.response_data().size(), AemReadDescriptorResponsePayload::LENGTH + DescriptorConfiguration::LENGTH);
 }
 
 TEST(nanoavb_entity_commands, read_stream_input_descriptor)
@@ -165,9 +167,45 @@ TEST(nanoavb_entity_commands, read_stream_input_descriptor)
     // DescriptorStream now carries an inline stream_formats trailer,
     // so sizeof() is larger than the on-wire size. For a freshly
     // constructed stream with number_of_formats = 0, wire_size() equals
-    // LENGTH (138 bytes), so the full response is 8 (READ_DESCRIPTOR
+    // LENGTH (138 bytes), so the full response is 4 (READ_DESCRIPTOR
     // header) + 138.
-    EXPECT_EQ(result.response_data().size(), 8 + DescriptorStream::LENGTH);
+    EXPECT_EQ(result.response_data().size(), AemReadDescriptorResponsePayload::LENGTH + DescriptorStream::LENGTH);
+}
+
+TEST(nanoavb_entity_legacy_2016, stream_input_descriptor_truncated_to_2016)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_legacy_2016(true);  // emit 1722.1-2013/2016 descriptor lengths
+
+    auto header = create_aem_header(AEM_COMMAND_READ_DESCRIPTOR);
+    std::array<uint8_t, 8> command_data = {0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00};  // STREAM_INPUT[0]
+    auto result = make_test_result(handler, header, command_data);
+
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);
+    // 2016 mode truncates the stream descriptor from 138 (2021) to 132 (2013);
+    // this stream has no stream_formats trailer, so the body is exactly 132.
+    EXPECT_EQ(result.response_data().size(), AemReadDescriptorResponsePayload::LENGTH + DescriptorStream::MINIMUM_LENGTH);
+
+    // formats_offset (descriptor bytes 82..83, big-endian) is rewritten to 132
+    // so a 2016 controller finds the (empty) stream_formats array correctly.
+    auto const resp = result.response_data();
+    size_t const fo = AemReadDescriptorResponsePayload::LENGTH + 82;
+    auto const formats_offset = static_cast<uint16_t>((static_cast<uint16_t>(resp[fo]) << 8) | resp[fo + 1]);
+    EXPECT_EQ(formats_offset, static_cast<uint16_t>(DescriptorStream::MINIMUM_LENGTH));
+}
+
+TEST(nanoavb_entity_legacy_2016, default_emits_2021_stream_length)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};  // default: legacy_2016 off
+
+    auto header = create_aem_header(AEM_COMMAND_READ_DESCRIPTOR);
+    std::array<uint8_t, 8> command_data = {0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00};  // STREAM_INPUT[0]
+    auto result = make_test_result(handler, header, command_data);
+
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(result.response_data().size(), AemReadDescriptorResponsePayload::LENGTH + DescriptorStream::LENGTH);
 }
 
 TEST(nanoavb_entity_commands, read_invalid_descriptor)
@@ -719,6 +757,120 @@ TEST(nanoavb_entity_stubs, get_counters_not_implemented)
     EXPECT_EQ(result.status, AEM_STATUS_NOT_IMPLEMENTED);
 }
 
+TEST(nanoavb_entity_get_counters, returns_counters_from_callback)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_get_counters(
+        [](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
+            if (descriptor_type != DESCRIPTOR_STREAM_INPUT || descriptor_index != 0) {
+                return false;
+            }
+            valid = (1U << 0) | (1U << 11);  // MEDIA_LOCKED + FRAMES_RX
+            counters[0] = 1;                 // media_locked
+            counters[11] = 4242;             // frames_rx
+            return true;
+        });
+
+    // GET_COUNTERS command: descriptor_type=STREAM_INPUT(0x0005), index=0 (big-endian).
+    std::array<uint8_t, AemGetCountersCommandPayload::LENGTH> cmd{0x00, 0x05, 0x00, 0x00};
+    auto header = create_aem_header(AEM_COMMAND_GET_COUNTERS);
+    auto result = make_test_result(handler, header, cmd);
+
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(result.response_data().size(), sizeof(AemCountersPayload));
+
+    AemCountersPayload resp{};
+    span_load(resp, result.response_data().first(sizeof(AemCountersPayload)));
+    EXPECT_EQ(resp.descriptor_type.get(), DESCRIPTOR_STREAM_INPUT);
+    EXPECT_EQ(resp.descriptor_index.get(), 0);
+    EXPECT_EQ(resp.counters_valid.get(), (1U << 0) | (1U << 11));
+    EXPECT_EQ(resp.counters[0].get(), 1U);
+    EXPECT_EQ(resp.counters[11].get(), 4242U);
+}
+
+TEST(nanoavb_entity_get_counters, no_such_descriptor_when_callback_declines)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_get_counters([](uint16_t, uint16_t, uint32_t&, std::array<uint32_t, 32>&) -> bool { return false; });
+
+    std::array<uint8_t, AemGetCountersCommandPayload::LENGTH> cmd{0x00, 0x05, 0x00, 0x09};  // index 9 (no such)
+    auto header = create_aem_header(AEM_COMMAND_GET_COUNTERS);
+    auto result = make_test_result(handler, header, cmd);
+
+    EXPECT_EQ(result.status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
+//
+// GET_STREAM_INFO Tests
+//
+TEST(nanoavb_entity_stubs, get_stream_info_not_implemented)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+
+    // No get_stream_info callback wired => NOT_IMPLEMENTED (the gap that made the
+    // the DSP processor tear down its FAST_CONNECT to the talker).
+    std::array<uint8_t, AemGetStreamInfoCommandPayload::LENGTH> cmd{0x00, 0x06, 0x00, 0x00};  // STREAM_OUTPUT, idx 0
+    auto header = create_aem_header(AEM_COMMAND_GET_STREAM_INFO);
+    auto result = make_test_result(handler, header, cmd);
+
+    EXPECT_EQ(result.status, AEM_STATUS_NOT_IMPLEMENTED);
+}
+
+TEST(nanoavb_entity_get_stream_info, returns_info_from_callback)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_get_stream_info([](uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out) -> bool {
+        if (descriptor_type != DESCRIPTOR_STREAM_OUTPUT || descriptor_index != 1) {
+            return false;
+        }
+        out.stream_id = Eui64{0x2c, 0xcf, 0x67, 0xe0, 0x13, 0x60, 0x00, 0x01};
+        out.stream_dest_mac = {0x91, 0xe0, 0xf0, 0x00, 0xfe, 0x01};
+        out.stream_format = {0x02, 0x70, 0x08, 0x20, 0x00, 0x00, 0x00, 0x00};
+        out.stream_vlan_id = doublet_t{2};
+        out.msrp_accumulated_latency = quadlet_t{2'000'000};
+        out.flags = quadlet_t{
+            stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_FORMAT_VALID | stream_info_flags::STREAM_DEST_MAC_VALID |
+            stream_info_flags::STREAM_VLAN_ID_VALID | stream_info_flags::MSRP_ACC_LAT_VALID | stream_info_flags::CONNECTED};
+        return true;
+    });
+
+    // GET_STREAM_INFO command: descriptor_type=STREAM_OUTPUT(0x0006), index=1.
+    std::array<uint8_t, AemGetStreamInfoCommandPayload::LENGTH> cmd{0x00, 0x06, 0x00, 0x01};
+    auto header = create_aem_header(AEM_COMMAND_GET_STREAM_INFO);
+    auto result = make_test_result(handler, header, cmd);
+
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(result.response_data().size(), AemStreamInfoPayload::LENGTH);
+
+    AemStreamInfoPayload resp{};
+    span_load(resp, result.response_data().first(AemStreamInfoPayload::LENGTH));
+    EXPECT_EQ(resp.descriptor_type.get(), DESCRIPTOR_STREAM_OUTPUT);
+    EXPECT_EQ(resp.descriptor_index.get(), 1);
+    EXPECT_TRUE(resp.is_connected());
+    EXPECT_TRUE(resp.is_stream_id_valid());
+    EXPECT_TRUE(resp.is_stream_format_valid());
+    EXPECT_EQ(resp.stream_id, (Eui64{0x2c, 0xcf, 0x67, 0xe0, 0x13, 0x60, 0x00, 0x01}));
+    EXPECT_EQ(resp.stream_vlan_id.get(), 2);
+    EXPECT_EQ(resp.msrp_accumulated_latency.get(), 2'000'000U);
+}
+
+TEST(nanoavb_entity_get_stream_info, no_such_descriptor_when_callback_declines)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_get_stream_info([](uint16_t, uint16_t, AemStreamInfoPayload&) -> bool { return false; });
+
+    std::array<uint8_t, AemGetStreamInfoCommandPayload::LENGTH> cmd{0x00, 0x05, 0x00, 0x09};  // STREAM_INPUT, idx 9
+    auto header = create_aem_header(AEM_COMMAND_GET_STREAM_INFO);
+    auto result = make_test_result(handler, header, cmd);
+
+    EXPECT_EQ(result.status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
 //
 // AECP Packet Processing Tests
 //
@@ -943,6 +1095,50 @@ TEST(nanoavb_entity_lock_ctrl, release_lock_clears_state)
     handler.release_lock();
     EXPECT_FALSE(handler.is_locked());
     EXPECT_TRUE(handler.locking_controller() == Eui64{});
+}
+
+TEST(nanoavb_entity_commands, get_stream_format_implemented)
+{
+    // Regression: GET_STREAM_FORMAT (0x0009) must be implemented. When the entity
+    // answers NOT_IMPLEMENTED, controllers (e.g. the audio interface, Hive) cannot finish
+    // enumerating the stream's format and re-query the entity indefinitely
+    // (an ~80 s AECP storm observed on the wire from a the audio interface).
+    auto model = create_test_model();  // has STREAM_INPUT[0]
+    AemCommandHandler handler{model};
+
+    auto header = create_aem_header(AEM_COMMAND_GET_STREAM_FORMAT);
+    std::array<uint8_t, 4> command_data = {0x00, 0x05, 0x00, 0x00};  // STREAM_INPUT[0]
+    auto result = make_test_result(handler, header, command_data);
+
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);  // was NOT_IMPLEMENTED before the fix
+    EXPECT_EQ(result.response_data().size(), AemStreamFormatPayload::LENGTH);  // 12
+    EXPECT_EQ(result.response_data()[1], 0x05);  // echoes descriptor_type = STREAM_INPUT
+}
+
+TEST(nanoavb_entity_commands, get_sampling_rate_implemented)
+{
+    // Regression: GET_SAMPLING_RATE (0x0015) must be implemented for the AUDIO_UNIT.
+    DescriptorEntity entity{};
+    entity.entity_name = AtdeccString{"SR Test"};
+    entity.configurations_count = 1;
+    DescriptorConfiguration config{};
+    config.object_name = AtdeccString{"Default"};
+    DescriptorAudioUnit au{};
+    au.current_sampling_rate = 96000;  // 96 kHz
+    auto model = EntityModelBuilder{}.entity(entity).configuration(config).audio_unit(au).build();
+    AemCommandHandler handler{model};
+
+    auto header = create_aem_header(AEM_COMMAND_GET_SAMPLING_RATE);
+    std::array<uint8_t, 4> command_data = {0x00, 0x02, 0x00, 0x00};  // AUDIO_UNIT[0]
+    auto result = make_test_result(handler, header, command_data);
+
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);  // was NOT_IMPLEMENTED before the fix
+    EXPECT_EQ(result.response_data().size(), AemSamplingRatePayload::LENGTH);  // 8
+    auto const r = result.response_data();
+    auto const sr = static_cast<uint32_t>(
+        (static_cast<uint32_t>(r[4]) << 24) | (static_cast<uint32_t>(r[5]) << 16) | (static_cast<uint32_t>(r[6]) << 8)
+        | static_cast<uint32_t>(r[7]));
+    EXPECT_EQ(sr, 96000u);
 }
 
 //

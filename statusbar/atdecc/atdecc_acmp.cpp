@@ -154,4 +154,21 @@ auto acmp_command_response_to_pdu(AcmpCommandResponse const& resp, AcmpDu& pdu) 
     pdu.connected_listeners_entries = resp.connected_listeners_entries;
 }
 
+auto acmp_serialize_2016(AcmpCommandResponse const& resp, std::span<uint8_t> buffer) noexcept -> std::span<uint8_t const>
+{
+    // UDP-encapsulated ACMP needs the extended IP fields; serialize the full PDU.
+    if (resp.is_udp()) {
+        size_t const n = protocol::store_unchecked(buffer, resp);
+        return buffer.subspan(0, n);
+    }
+    // L2 ACMP: emit the pre-2021 56-byte (control_data_length=44) form for max
+    // device interop. acmp_command_response_to_pdu copies the cdl header bytes
+    // verbatim (still 84), so reset it to the L2 length after the field copy.
+    AcmpDu pdu{};
+    acmp_command_response_to_pdu(resp, pdu);
+    pdu.set_control_data_length(AcmpDu::DATA_LENGTH);
+    size_t const n = protocol::store_unchecked(buffer, pdu);
+    return buffer.subspan(0, n);
+}
+
 }  // namespace statusbar::atdecc

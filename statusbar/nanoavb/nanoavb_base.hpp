@@ -71,6 +71,7 @@ enum class NanoAvbError : int
     StreamAlreadyConnected,
     SrpRegistrationFailed,
     InvalidVlanId,
+    VlanTableFull,  // All VLAN slots hold actively-registered VLANs
 };
 
 /// Get human-readable name for NanoAvbError

@@ -29,7 +29,7 @@ struct Context
 {
     Callbacks callbacks{};
     bool enabled{false};
-    std::string last_action{};
+    std::string_view last_action{};
 };
 
 struct Def

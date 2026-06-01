@@ -38,7 +38,7 @@ void ControllerTuiApp::rebuild_rows(std::span<EntityDisplayInfo const> entities)
     talker_rows_.clear();
     listener_rows_.clear();
     for (auto const& e : entities) {
-        std::string const name = e.name.empty() ? ieee::to_string(e.entity_id) : e.name;
+        std::string const name = e.name.empty() ? std::string{ieee::to_string(e.entity_id).view()} : e.name;
         if (e.has_talker && e.talker_stream_sources > 0) {
             StreamRow header{.kind = StreamRowKind::Header, .entity_id = e.entity_id, .stream_index = 0, .entity_name = name};
             talker_rows_.push_back(std::move(header));
@@ -753,8 +753,9 @@ auto format_stream_row(StreamRow const& row, bool is_cursor, bool is_pending, in
 
 auto format_connection_line(ActiveConnection const& c, bool is_cursor, int width) -> std::string
 {
-    std::string const t_name = c.talker_name.empty() ? ieee::to_string(c.talker_entity_id) : c.talker_name;
-    std::string const l_name = c.listener_name.empty() ? ieee::to_string(c.listener_entity_id) : c.listener_name;
+    std::string const t_name = c.talker_name.empty() ? std::string{ieee::to_string(c.talker_entity_id).view()} : c.talker_name;
+    std::string const l_name =
+        c.listener_name.empty() ? std::string{ieee::to_string(c.listener_entity_id).view()} : c.listener_name;
     std::string line = std::format(
         "{} {}:{}->{}:{}",
         is_cursor ? ">" : " ",

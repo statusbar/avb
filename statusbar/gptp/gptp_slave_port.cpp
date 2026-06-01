@@ -5,6 +5,7 @@
 
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/gptp/gptp_tlv.hpp"
+#include "statusbar/status/throw_or_abort.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -43,10 +44,10 @@ GptpSlavePort::GptpSlavePort(GptpConfig const& config, GptpClockOps ops, std::pm
     , observers_{memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource()}
 {
     if (auto const valid = config_.validate(); !valid) {
-        throw std::system_error(valid.error());
+        statusbar::throw_or_abort(valid.error());
     }
     if (!is_complete(ops_)) {
-        throw std::system_error(make_error_code(GptpError::InvalidConfiguration));
+        statusbar::throw_or_abort(make_error_code(GptpError::InvalidConfiguration));
     }
     // Pre-populate the PortStateSM context with the config's
     // as_capable_initial flag.

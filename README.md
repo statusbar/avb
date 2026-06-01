@@ -11,16 +11,21 @@ emit, or route AVTP streams.
 Includes an experimental AVTP-layer crypto extension (`avtp_crypto`) for
 authenticating AVTP control traffic.
 
-Version 1.1.0.
+Also includes AVB/TSN-adjacent networking and measurement tooling: a
+gPTP-timestamped UDP framework (`udptun`), one-way latency measurement
+(`owlm`), a STUN client and server (RFC 8489, `stun`), AVB/AVTP-aware packet
+capture and dump (`netdump`), and a real-time AVTP latency tester.
+
+Version 1.2.0.
 
 > Portions of this repository were developed with assistance from Claude,
 > an AI model by Anthropic. All reference material used in this process
-> came from my own original open source implementations of these AVB/TSN
-> protocol modules, with Claude assisting in refactoring and in
+> came from my own original open source implementations of these AVB/TSN and
+> networking protocol modules, with Claude assisting in refactoring and in
 > validating conformance against IEEE 1722, IEEE 1722.1, IEEE 802.1AS,
-> and IEEE 802.1Q MSRP/MVRP. All architectural decisions, final
-> implementations, and engineering judgments are my own, and any errors
-> are mine alone.
+> IEEE 802.1Q MSRP/MVRP, STUN (RFC 8489), and the pcap/pcapng capture
+> formats. All architectural decisions, final implementations, and
+> engineering judgments are my own, and any errors are mine alone.
 
 ## Overview
 
@@ -36,6 +41,11 @@ The package is organised into protocol modules (`avtp`, `atdecc`, `gptp`,
 command-line tools: ATDECC controllers and monitors, a Linux gPTP slave and
 NTP-SHM bridge, AVTP capture / replay / decode utilities, and turn-key AVB
 audio entities.
+
+It also provides AVB/TSN-adjacent networking and measurement modules: the
+`udptun` gPTP-timestamped UDP framework, `owlm` one-way latency measurement, a
+`stun` STUN client/server (RFC 8489), and `netdump` packet capture — with
+their command-line tools and a real-time AVTP latency tester.
 
 It is built for audio device makers building AVB endpoints, AVDECC controller
 authors, and gPTP implementers on Linux. It depends on `statusbar-core`,
@@ -83,6 +93,18 @@ Depends on `statusbar-core`, `statusbar-crypto`, and `statusbar-audio`. See the 
 - `statusbar-avb-stereo-io`, `statusbar-avb-am824-io` (Linux) — example AVB
   audio entities (stereo PCM, AM824).
 - `statusbar-nanoavb`, `statusbar-nanoavb-sm` — minimal AVB entity example.
+- `statusbar-owlm-tool` (Linux) — one-way latency measurement over a
+  gPTP-locked link.
+- `statusbar-owlm-analyze` — post-process `owlm` CSV output into plots/stats
+  (numpy / pandas / matplotlib).
+- `statusbar-rttest-send-avtp-tool` (Linux) — real-time AVTP packet sender for
+  latency tests.
+- `statusbar-stun-client-tool`, `statusbar-stun-server-tool` — STUN rendezvous
+  client / server.
+- `statusbar-stun-sm-tool` — render the STUN state machines as DOT / Markdown.
+- `statusbar-pcap-dump` — pretty-print a pcap / pcapng capture frame-by-frame.
+- `statusbar-bpf-dump` (Linux) — dump packets matching an EtherType filter via
+  eBPF.
 
 ### Modules
 
@@ -109,6 +131,13 @@ Depends on `statusbar-core`, `statusbar-crypto`, and `statusbar-audio`. See the 
   MSRP, MVRP, and gPTP together behind a supervisor state machine.
 - **`avb_entity`** — turn-key AVB audio entities (stereo PCM, AM824) built
   on top of `nanoavb` and `ptpclient`.
+- **`udptun`** — gPTP-timestamped UDP framework with redundancy, per-source
+  tracking, and CSV / columnar telemetry.
+- **`owlm`** — one-way latency measurement over a gPTP-locked link.
+- **`stun`** — STUN (RFC 8489) client/server with a private REGISTER extension
+  for reflexive-address discovery and peer rendezvous.
+- **`netdump`** — AVB/AVTP-aware packet capture and frame-by-frame dump
+  (pcap/pcapng).
 
 ## Building
 

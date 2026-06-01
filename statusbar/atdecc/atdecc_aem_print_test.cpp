@@ -109,6 +109,36 @@ TEST(aem_print, parse_descriptor_too_short)
     EXPECT_FALSE(result.has_value());
 }
 
+// Security regression: a crafted READ_DESCRIPTOR response whose fixed header is
+// present but whose count field is huge must be REJECTED, not formatted — the
+// count drives the variable trailer reads and would otherwise run past the
+// buffer (OOB read / info leak). See descriptor_trailer_end in atdecc_aem_print.cpp.
+TEST(aem_print, parse_descriptor_rejects_oversized_trailer_count)
+{
+    DescriptorConfiguration config{};
+    config.descriptor_type = static_cast<uint16_t>(DESCRIPTOR_CONFIGURATION);
+    config.descriptor_counts_count = 0xFFFF;  // attacker-controlled: claims 65535 entries
+    static_assert(sizeof(config) >= DescriptorConfiguration::LENGTH);
+    std::array<uint8_t, DescriptorConfiguration::LENGTH> buf{};  // fixed header ONLY, no trailer
+    std::memcpy(buf.data(), &config, DescriptorConfiguration::LENGTH);
+    auto result = parse_descriptor(std::span<uint8_t const>(buf));
+    EXPECT_FALSE(result.has_value());
+}
+
+// Complement: a descriptor whose declared trailer count IS fully present must
+// still parse — the hardening must not reject well-formed variable descriptors.
+TEST(aem_print, parse_descriptor_accepts_present_trailer)
+{
+    DescriptorConfiguration config{};
+    config.descriptor_type = static_cast<uint16_t>(DESCRIPTOR_CONFIGURATION);
+    config.descriptor_counts_count = 2;
+    constexpr size_t kFull = DescriptorConfiguration::LENGTH + (2 * sizeof(DescriptorCountEntry));
+    std::array<uint8_t, kFull> buf{};  // header + 2 trailer entries
+    std::memcpy(buf.data(), &config, DescriptorConfiguration::LENGTH);
+    auto result = parse_descriptor(std::span<uint8_t const>(buf));
+    EXPECT_TRUE(result.has_value());
+}
+
 //
 // Entity descriptor parse and format roundtrip
 //

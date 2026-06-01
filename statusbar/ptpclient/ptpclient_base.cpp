@@ -70,35 +70,39 @@ auto fit_time_mapping(TimeSample const* samples, size_t count, double max_rate_p
         return result;
     }
 
+    // Best-fit slope (UNCLAMPED) — see the header template overload for the
+    // rationale: fit quality is judged against this line so a clean-but-steep
+    // slope (CLOCK_MONOTONIC slewed by phc2sys) reads as healthy. The clamp below
+    // bounds only the PUBLISHED slope, not the residual.
     // slope = sum((m - mean_m)(p - mean_p)) / sum((m - mean_m)^2)
-    double slope = sum_mp_centered / sum_mm_centered;
+    double const slope_fit = sum_mp_centered / sum_mm_centered;
 
-    // Clamp slope to plausible ppm window around 1.0
     double const max_ppm = std::max(10.0, max_rate_ppm);
     double const lo = 1.0 - (max_ppm * 1e-6);
     double const hi = 1.0 + (max_ppm * 1e-6);
-    if (slope < lo) {
-        slope = lo;
-    } else if (slope > hi) {
-        slope = hi;
+    double slope_pub = slope_fit;
+    if (slope_pub < lo) {
+        slope_pub = lo;
+    } else if (slope_pub > hi) {
+        slope_pub = hi;
     }
 
-    // intercept = mean_p - slope * mean_m
+    // intercept = mean_p - slope_pub * mean_m  (matches the published slope)
     // Use __int128 for precision with large timestamps (~10^18 ns)
-    auto const slope_fp = FixedPointSlope::from_double(slope);
+    auto const slope_fp = FixedPointSlope::from_double(slope_pub);
     __int128 const mean_m_int = static_cast<__int128>(std::llround(mean_m));
     __int128 const mean_p_int = static_cast<__int128>(std::llround(mean_p));
     __int128 const slope_mean_m = (mean_m_int * slope_fp.numerator) / slope_fp.denominator;
     int64_t const intercept_ns = static_cast<int64_t>(mean_p_int - slope_mean_m);
 
-    // Compute residuals using centered values for precision
+    // Residuals against the UNCLAMPED best-fit slope = true fit quality.
     double rss = 0;
     double max_abs = 0;
     for (size_t i = 0; i < count; ++i) {
         double const m_centered = static_cast<double>(samples[i].monotonic_ns) - mean_m;
         double const p_centered = static_cast<double>(samples[i].ptp_ns) - mean_p;
-        // residual = p' - slope * m' (since intercept cancels out in centered coords)
-        double const residual = p_centered - (slope * m_centered);
+        // residual = p' - slope_fit * m' (intercept cancels out in centered coords)
+        double const residual = p_centered - (slope_fit * m_centered);
         rss += residual * residual;
         double const abs_resid = std::abs(residual);
         if (abs_resid > max_abs) {
@@ -106,7 +110,7 @@ auto fit_time_mapping(TimeSample const* samples, size_t count, double max_rate_p
         }
     }
 
-    result.slope = slope;
+    result.slope = slope_pub;
     result.intercept_ns = intercept_ns;
     result.rms_residual = std::sqrt(rss / n);
     result.max_residual = max_abs;

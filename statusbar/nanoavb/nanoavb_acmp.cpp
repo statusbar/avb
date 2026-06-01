@@ -3,6 +3,8 @@
 
 #include "statusbar/nanoavb/nanoavb_acmp.hpp"
 
+#include <print>
+
 namespace statusbar::nanoavb {
 
 NanoAvbAcmpTalker::NanoAvbAcmpTalker(
@@ -160,6 +162,32 @@ auto NanoAvbAcmpListener::check_timeout(TimePoint current_time) -> bool
         sm_.handle_event(ctx_, ListenerEvent::TxTimeout, current_time);
         return true;
     }
+
+    // Watchdog against a wedged listener. The SM only ever rests in Waiting:
+    // every other state is either transient (entered and left inside a single
+    // handle_event UCT chain) or a *_TxResp wait that persists strictly while a
+    // talker request is pending. So a non-Waiting, non-Start state with NO
+    // pending request is a wedge. It happens because send_connect_tx /
+    // send_disconnect_tx take immediate error-response paths (LISTENER_UNKNOWN_ID
+    // for an out-of-range stream, CONTROLLER_NOT_AUTHORIZED, LISTENER_EXCLUSIVE)
+    // that clear_pending() and return -- yet the transition table still advances
+    // the SM into ConnectTxResp / DisconnectTxResp. That state has no transition
+    // for a fresh CONNECT_RX or GET_RX_STATE and (with nothing pending) no
+    // timeout to fire, so the listener would silently ignore EVERY later
+    // controller command until the process restarts. Recover to Waiting so the
+    // next command is serviced. (Hardware-observed on jdk01a: listener stopped
+    // answering ACMP after hours while the talker kept working.)
+    auto const st = sm_.current_state();
+    if (!ctx_.has_pending && st != ListenerState::Waiting && st != ListenerState::Start) {
+        // TEMPORARY diagnostic: surface every wedge recovery so we can confirm in
+        // production how often the error-path wedge fires (and remove this log
+        // once we've stopped seeing it). The recovery itself is permanent.
+        std::print(stderr, "[acmp-listener] watchdog: recovered wedged listener from state {} -> Waiting\n", static_cast<int>(st));
+        ctx_.clear_pending();
+        sm_.reset();          // -> Start
+        start(current_time);  // UCT: Start -> Waiting
+        return true;
+    }
     return false;
 }
 
@@ -223,6 +251,16 @@ auto NanoAvbAcmpController::connect(Eui64 talker_id, uint16_t talker_uid, Eui64 
 auto NanoAvbAcmpController::disconnect(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool
 {
     return send_command(ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, talker_id, talker_uid, listener_id, listener_uid);
+}
+
+auto NanoAvbAcmpController::connect_tx(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool
+{
+    return send_command(ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, talker_id, talker_uid, listener_id, listener_uid);
+}
+
+auto NanoAvbAcmpController::disconnect_tx(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool
+{
+    return send_command(ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND, talker_id, talker_uid, listener_id, listener_uid);
 }
 
 auto NanoAvbAcmpController::get_rx_state(Eui64 listener_id, uint16_t listener_uid) -> bool

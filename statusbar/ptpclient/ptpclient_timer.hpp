@@ -10,6 +10,7 @@
 #include "statusbar/ptpclient/ptpclient_base.hpp"
 #include "statusbar/ptpclient/ptpclient_bridge.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
 
 #include <atomic>
@@ -117,7 +118,8 @@ class PtpTimer : public PtpTimerBase
     /// @param compensation_ns Compensation offset in nanoseconds (negative = wake earlier)
     /// @param enable_realtime Enable realtime thread priority (SCHED_FIFO) for timer thread
     /// @param cpu_affinity CPU to pin timer thread to (-1 to disable)
-    /// @param threshold Tripwire threshold in nanoseconds for detecting timer overruns
+    /// @param threshold Wake-jitter threshold in ns. Currently unused (the ftrace
+    ///        tripwire that consumed it was removed); retained for API stability.
     PtpTimer(
         PtpTimeBridge& bridge,
         int64_t period_ns,
@@ -193,22 +195,6 @@ class PtpTimer : public PtpTimerBase
     [[nodiscard]] auto missed_cycles() const noexcept -> int64_t { return load_missed_cycles(); }
 
   private:
-    /// Handle bridge error: notify callback, wait for recovery, realign
-    void handle_bridge_error(std::error_code error, int64_t& next_wake)
-    {
-        increment_recovery_count();
-        callback_(failure(error));
-
-        while (is_running_atomic()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            auto const recovery = bridge_.convert_monotonic_to_ptp(read_monotonic_ns());
-            if (recovery.healthy) {
-                next_wake = ((recovery.time_ns / period_ns_) + 1) * period_ns_;
-                break;
-            }
-        }
-    }
-
     /// Process a successful wake: update stats, call callback, advance schedule
     /// @return wake error in nanoseconds
     auto process_wake(int64_t actual_wake_ptp, int64_t& next_wake) -> int64_t
@@ -232,70 +218,68 @@ class PtpTimer : public PtpTimerBase
 
     void timer_loop()
     {
-#if defined(__linux__)
-        realtime::TraceConfig cfg;
-        cfg.tracer = "wakeup_rt";  // while you're still sleep-based
-        cfg.cpu = 3;
-        cfg.buffer_kb = 32768;
-        cfg.out_dir = "/tmp/statusbar_traces";
+        run_guarded("PTP timer thread", [this]() { timer_loop_impl(); });
+    }
 
-        realtime::TraceController controller(cfg);
-        controller.start();  // likely needs root
-
-        realtime::Tripwire tw;
-        tw.threshold_ns = threshold_;
-
-        // Spawn monitor thread — pass running flag so it stops when timer stops
-        std::thread helper = realtime::monitor_tripwire(controller, tw, nullptr, running_flag_ptr());
-#endif
-
+    void timer_loop_impl()
+    {
         // Set realtime affinity if set (log failure but continue)
         if (cpu_affinity_ >= 0) {
             (void)realtime::set_realtime_affinity_logged(cpu_affinity_, "PTP timer");
         }
-        // Set realtime priority if enabled (log failure but continue)
+        // Set realtime priority if enabled (log failure but continue). Priority
+        // 49: below kernel IRQ threads (@50) and far below migration/RCU (@99);
+        // matches the realtime_timer_config default. Max priority would contend
+        // with critical per-CPU kernel threads on the isolated core.
         if (enable_realtime_) {
-            (void)realtime::set_realtime_priority_logged("PTP timer");
+            (void)realtime::set_realtime_priority_logged(49, "PTP timer");
         }
 
-        // Get initial PTP time and align to next period boundary
-        auto const mapping = bridge_.get_mapping();
-        if (!mapping.healthy) {
-            // Bridge not healthy, call callback with error and exit
-            callback_(failure(PtpError::bridge_not_healthy));
-            return;
-        }
-
-        // Use bridge to convert current monotonic time to PTP time for initial alignment
-        auto const monotonic_ns = read_monotonic_ns();
-        auto const now_result = bridge_.convert_monotonic_to_ptp(monotonic_ns);
-        int64_t const current_ptp = now_result.time_ns;
-        int64_t next_wake = ((current_ptp / period_ns_) + 1) * period_ns_;
-        int64_t next_monotonic_ns = monotonic_ns + (next_wake - current_ptp);
+        // Do NOT block waiting for sync at startup. Enter the loop immediately;
+        // while the bridge is unhealthy (no sync yet, or sync lost mid-run) we
+        // report "no sync" via the callback and retry, rather than exiting. When
+        // sync arrives (or returns) we realign to the next period boundary and
+        // resume firing. The timer must keep running and recover on its own
+        // whenever time sync comes back, however long it takes.
+        int64_t next_wake = 0;
+        bool aligned = false;
 
         while (is_running_atomic()) {
+            if (!aligned) {
+                auto const mapping = bridge_.get_mapping();
+                if (!mapping.healthy) {
+                    // No sync: report and retry without blocking forever.
+                    callback_(failure(PtpError::bridge_not_healthy));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    continue;
+                }
+                // Sync (re)acquired: align to the next period boundary. now_ns()
+                // reads the authoritative RAW clock and converts via the bridge's
+                // PHC<->RAW mapping.
+                auto const current_ptp = bridge_.now_ns();
+                next_wake = ((current_ptp / period_ns_) + 1) * period_ns_;
+                aligned = true;
+            }
+
             auto wake_result = bridge_.sleep_until_ptp(next_wake + compensation_ns_);
 
             if (!wake_result) {
                 if (!is_running_atomic()) {
                     break;
                 }
-                handle_bridge_error(wake_result.error(), next_wake);
+                // Lost sync mid-run: count the transition, report it, and drop
+                // back to the realignment path (which keeps reporting no-sync).
+                increment_recovery_count();
+                callback_(failure(wake_result.error()));
+                aligned = false;
                 continue;
             }
 
-            int64_t const error_ns = process_wake(*wake_result, next_wake);
-
-#if defined(__linux__)
-            if (error_ns > threshold_) {
-                tw.trigger();
-                set_running(false);
-            }
-#endif
+            // Updates wake stats, invokes the callback, and advances the
+            // schedule (catching up if we ran behind). A late wake is recorded
+            // in the stats but never stops the timer.
+            (void)process_wake(*wake_result, next_wake);
         }
-#if defined(__linux__)
-        helper.join();
-#endif
     }
 
     /// Read monotonic time in nanoseconds
@@ -310,7 +294,7 @@ class PtpTimer : public PtpTimerBase
     int64_t compensation_ns_;
     bool enable_realtime_;
     int cpu_affinity_;
-    int64_t threshold_;
+    [[maybe_unused]] int64_t threshold_;  ///< retained for API stability; ftrace tripwire that used it was removed
 
     Callback callback_;
     // Atomics are in PtpTimerBase

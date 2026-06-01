@@ -1,0 +1,674 @@
+// Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+// SPDX-License-Identifier: MIT
+
+// aem-entity-blob — generate an AEM descriptor-storage blob for the AVB
+// audio-bridge entity, consumed by AvbEntityAm824IO::create (and any
+// AvbEntity*). Replaces the externally-produced testdata/simple2.bin with an
+// in-tree, interop-grade model.
+//
+// The model is a single-configuration 8-channel audio bridge: one
+// STREAM_INPUT (listener) + one STREAM_OUTPUT (talker), each carrying an
+// 8-channel IEC 61883-6 AM824 stream at 96 kHz, with the STREAM_PORT /
+// AUDIO_CLUSTER / AUDIO_MAP / CLOCK_SOURCE / CLOCK_DOMAIN / LOCALE / STRINGS
+// descriptors a controller and real endpoints (third-party devices) expect.
+//
+// Stream format codes (see tests/avb/device-enumerations/README.md):
+//   AM824 8-ch 96 kHz = 0x00A0040860000800  (byte2 SFC=4=96k, byte3=8ch)
+//
+// Usage: aem-entity-blob [--out FILE] [--channels N] [--name NAME]
+
+#include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
+#include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/ieee/ieee.hpp"
+
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <print>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace {
+
+using namespace statusbar;
+using namespace statusbar::atdecc::aem;
+
+// Entity / talker / listener capability bits (IEEE 1722.1 Clause 6.2.1).
+constexpr uint32_t CAP_AEM = 0x00000008;
+constexpr uint32_t CAP_CLASS_A = 0x00000100;
+constexpr uint32_t CAP_GPTP = 0x00000400;
+constexpr uint16_t TALKER_IMPLEMENTED = 0x0001;
+constexpr uint16_t TALKER_MEDIA_CLOCK_SOURCE = 0x0800;  // talker_capabilities::MEDIA_CLOCK_SOURCE
+constexpr uint16_t TALKER_AUDIO_SOURCE = 0x4000;
+constexpr uint16_t LISTENER_IMPLEMENTED = 0x0001;
+constexpr uint16_t LISTENER_AUDIO_SINK = 0x4000;
+
+// No localized description (use the inline object_name instead).
+constexpr uint16_t NO_LOCALIZED = 0xFFFF;
+
+// AM824 8-channel 96 kHz stream format, wire order (MSB first).
+[[nodiscard]] auto am824_8ch_96k() -> ieee::Eui64
+{
+    return ieee::Eui64{0x00, 0xA0, 0x04, 0x08, 0x60, 0x00, 0x08, 0x00};
+}
+
+// AAF 8-channel 96 kHz INT_32 stream format (IEEE 1722-2016 Clause 7.3.4).
+// Verified byte-for-byte against a the DSP processor STREAM_INPUT descriptor:
+//   byte0 subtype=0x02 (AAF)
+//   byte1 = nsr in the LOW nibble: 0x07 = 96 kHz   (NOT the high nibble!)
+//   byte2 = format = 0x02 (INT_32)                 (sample format, not channels)
+//   byte3 = bit_depth = 0x20 (32)
+//   bytes4-7 (32-bit BE) = channels_per_frame(8)<<22 | samples_per_frame(12)<<12
+//                        = (8<<22)|(12<<12) = 0x0200C000 -> 02 00 c0 00
+// The earlier code (02 70 08 20 00 00 00 00) put nsr in the high nibble and the
+// channel count where the format byte goes, so compliant controllers / the the DSP processor
+// decoded it as "AAF 0 kHz, 0 channels" and refused the format. The int-vs-float
+// distinction also lives in the AAF PDU format field at run time (int_32bit).
+[[nodiscard]] auto aaf_8ch_96k_32bit() -> ieee::Eui64
+{
+    return ieee::Eui64{0x02, 0x07, 0x02, 0x20, 0x02, 0x00, 0xC0, 0x00};
+}
+
+// CRF (Clock Reference Format) Milan 48 kHz audio-sample media-clock stream format
+// (IEEE 1722-2016 §10; bit layout per la_avdecc StreamFormatInfo). Milan mandates a
+// 48 kHz CRF media clock; both 48 kHz and 96 kHz clients lock to it (our 96 kHz
+// audio rides as 2x this base). This is BYTE-FOR-BYTE the CRF stream-input format
+// the DSP processor/the DSP processor advertises (0x041060010000bb80) -- a base match alone is not
+// enough; the listener flags a mismatched interval/ts-per-PDU as UNSUPPORTED_FORMAT:
+//   byte0 0x04        subtype=CRF, v=0
+//   byte1 0x10        crf_type=1 (AudioSample), timestamp_interval[11:8]=0
+//   byte2 0x60        timestamp_interval=96 (one timestamp per 96 events of the base)
+//   byte3 0x01        timestamps_per_pdu=1  (=> 48000/96 = 500 AVTPDU/s, one per 2 ms)
+//   byte4 0x00        pull=0 (x1.0), base_frequency[28:24]=0
+//   byte5-7 00 bb 80  base_frequency=48000
+[[nodiscard]] auto crf_audio_48k() -> ieee::Eui64
+{
+    return ieee::Eui64{0x04, 0x10, 0x60, 0x01, 0x00, 0x00, 0xBB, 0x80};
+}
+
+// --------------------------------------------------------------------------
+// AemEntityBlob — assembles a DescriptorStorage blob (AEM1 header + TOC +
+// concatenated descriptor bytes). No symbol table (the entity loader resolves
+// descriptors by (configuration, type, index) via the TOC).
+// --------------------------------------------------------------------------
+
+// Wire length of a descriptor: its variable-trailer-aware wire_size().
+template <typename T>
+[[nodiscard]] auto descriptor_wire_bytes(T const& d) -> std::vector<uint8_t>
+{
+    size_t n = 0;
+    if constexpr (requires { d.wire_size(); }) {
+        n = d.wire_size();
+    } else {
+        n = T::LENGTH;
+    }
+    // The fixed header is followed in-memory by the trailer array at offset
+    // LENGTH, so the first wire_size() bytes are exactly the on-wire form.
+    std::vector<uint8_t> v(n);
+    std::memcpy(v.data(), &d, n);
+    return v;
+}
+
+class AemEntityBlob
+{
+  public:
+    template <typename T>
+    void add(uint16_t configuration, T const& desc)
+    {
+        entries_.push_back(
+            Entry{
+                .type = static_cast<uint16_t>(desc.descriptor_type.get()),
+                .index = static_cast<uint16_t>(desc.descriptor_index.get()),
+                .config = configuration,
+                .bytes = descriptor_wire_bytes(desc),
+            });
+    }
+
+    [[nodiscard]] auto build() const -> std::vector<uint8_t>
+    {
+        size_t const toc_offset = atdecc::aem::DescriptorStorageHeader::LENGTH;  // 20
+        size_t const desc_base = toc_offset + (entries_.size() * DescriptorStorageTocEntry::LENGTH);
+        size_t total = desc_base;
+        for (auto const& e : entries_) {
+            total += e.bytes.size();
+        }
+
+        std::vector<uint8_t> blob(total, 0);
+
+        atdecc::aem::DescriptorStorageHeader header{};
+        header.magic = atdecc::aem::DescriptorStorage::MAGIC;
+        header.toc_count = static_cast<uint32_t>(entries_.size());
+        header.toc_offset = static_cast<uint32_t>(toc_offset);
+        header.symbol_count = 0;
+        header.symbol_offset = static_cast<uint32_t>(desc_base);  // empty table at desc base
+        std::memcpy(blob.data(), &header, DescriptorStorageHeader::LENGTH);
+
+        size_t off = desc_base;
+        for (size_t i = 0; i < entries_.size(); ++i) {
+            auto const& e = entries_[i];
+            DescriptorStorageTocEntry toc{};
+            toc.descriptor_type = e.type;
+            toc.descriptor_index = e.index;
+            toc.configuration_index = e.config;
+            toc.length = static_cast<uint16_t>(e.bytes.size());
+            toc.offset = static_cast<uint32_t>(off);
+            std::memcpy(
+                blob.data() + toc_offset + (i * DescriptorStorageTocEntry::LENGTH), &toc, DescriptorStorageTocEntry::LENGTH);
+            std::memcpy(blob.data() + off, e.bytes.data(), e.bytes.size());
+            off += e.bytes.size();
+        }
+        return blob;
+    }
+
+  private:
+    struct Entry
+    {
+        uint16_t type;
+        uint16_t index;
+        uint16_t config;
+        std::vector<uint8_t> bytes;
+    };
+    std::vector<Entry> entries_;
+};
+
+// --------------------------------------------------------------------------
+// Model construction
+// --------------------------------------------------------------------------
+
+[[nodiscard]] auto build_bridge_model(std::string_view name, uint16_t channels, uint32_t sample_rate) -> std::vector<uint8_t>
+{
+    AemEntityBlob b;
+    constexpr uint16_t CFG = 0;
+    ieee::Eui64 const stream_format = am824_8ch_96k();
+
+    // ENTITY — entity_id / model_id / name / firmware are overridden at runtime
+    // by AvbEntityAm824IO from its config; capabilities + counts are honored.
+    {
+        DescriptorEntity d{};
+        d.entity_name = AtdeccString{std::string{name}.c_str()};
+        d.entity_capabilities = CAP_AEM | CAP_CLASS_A | CAP_GPTP;
+        d.talker_stream_sources = 1;
+        d.talker_capabilities = TALKER_IMPLEMENTED | TALKER_AUDIO_SOURCE;
+        d.listener_stream_sinks = 1;
+        d.listener_capabilities = LISTENER_IMPLEMENTED | LISTENER_AUDIO_SINK;
+        d.configurations_count = 1;
+        d.current_configuration = 0;
+        b.add(CFG, d);
+    }
+
+    // CONFIGURATION — declares every descriptor type/count in this config.
+    {
+        DescriptorConfiguration d{};
+        d.object_name = AtdeccString{"Bridge"};
+        d.localized_description = NO_LOCALIZED;
+        // In ascending descriptor-type order.
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_UNIT, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_INPUT, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AVB_INTERFACE, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_SOURCE, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_LOCALE, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STRINGS, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_INPUT, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_OUTPUT, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_CLUSTER, .count = 2});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_MAP, .count = 2});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .count = 1});
+        b.add(CFG, d);
+    }
+
+    // AUDIO_UNIT — one stream-input port + one stream-output port; 96 kHz.
+    {
+        DescriptorAudioUnit d{};
+        d.object_name = AtdeccString{"AudioUnit"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_domain_index = 0;
+        d.number_of_stream_input_ports = 1;
+        d.base_stream_input_port = 0;
+        d.number_of_stream_output_ports = 1;
+        d.base_stream_output_port = 0;
+        d.current_sampling_rate = sample_rate;
+        (void)d.push_sampling_rate(sample_rate);
+        b.add(CFG, d);
+    }
+
+    // STREAM_INPUT (listener) + STREAM_OUTPUT (talker), 8-ch AM824 @ 96 kHz.
+    {
+        DescriptorStream d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_INPUT;
+        d.object_name = AtdeccString{"StreamInput"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_domain_index = 0;
+        d.stream_flags = STREAM_FLAG_CLASS_A;
+        d.current_format = stream_format;
+        (void)d.push_stream_format(stream_format);
+        d.avb_interface_index = 0;
+        b.add(CFG, d);
+    }
+    {
+        DescriptorStream d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        d.object_name = AtdeccString{"StreamOutput"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_domain_index = 0;
+        d.stream_flags = STREAM_FLAG_CLASS_A;
+        d.current_format = stream_format;
+        (void)d.push_stream_format(stream_format);
+        d.avb_interface_index = 0;
+        b.add(CFG, d);
+    }
+
+    // STREAM_PORT_INPUT → cluster 0 / map 0; STREAM_PORT_OUTPUT → cluster 1 / map 1.
+    {
+        DescriptorStreamPort d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_PORT_INPUT;
+        d.clock_domain_index = 0;
+        d.number_of_clusters = 1;
+        d.base_cluster = 0;
+        d.number_of_maps = 1;
+        d.base_map = 0;
+        b.add(CFG, d);
+    }
+    {
+        DescriptorStreamPort d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_PORT_OUTPUT;
+        d.clock_domain_index = 0;
+        d.number_of_clusters = 1;
+        d.base_cluster = 1;
+        d.number_of_maps = 1;
+        d.base_map = 1;
+        b.add(CFG, d);
+    }
+
+    // AUDIO_CLUSTER 0 (input) + 1 (output): one N-channel MBLA cluster each.
+    // AvbEntityAm824IO derives its channel count from the first AUDIO_CLUSTER.
+    for (uint16_t idx : {uint16_t{0}, uint16_t{1}}) {
+        DescriptorAudioCluster d{};
+        d.descriptor_index = idx;
+        d.object_name = AtdeccString{idx == 0 ? "InputCluster" : "OutputCluster"};
+        d.localized_description = NO_LOCALIZED;
+        d.channel_count = channels;
+        d.format = AUDIO_CLUSTER_FORMAT_MBLA;
+        b.add(CFG, d);
+    }
+
+    // AUDIO_MAP 0 (input) + 1 (output): identity map stream ch i → cluster ch i.
+    for (uint16_t idx : {uint16_t{0}, uint16_t{1}}) {
+        DescriptorAudioMap d{};
+        d.descriptor_index = idx;
+        for (uint16_t ch = 0; ch < channels; ++ch) {
+            AudioMapping m{};
+            m.mapping_stream_index = 0;
+            m.mapping_stream_channel = ch;
+            m.mapping_cluster_offset = 0;
+            m.mapping_cluster_channel = ch;
+            (void)d.push_mapping(m);
+        }
+        b.add(CFG, d);
+    }
+
+    // AVB_INTERFACE — mac/clock_identity filled at runtime from the NIC + gPTP.
+    {
+        DescriptorAvbInterface d{};
+        d.object_name = AtdeccString{"eth0"};
+        d.localized_description = NO_LOCALIZED;
+        d.interface_flags = AVB_INTERFACE_FLAG_GPTP_SUPPORTED;
+        b.add(CFG, d);
+    }
+
+    // CLOCK_SOURCE — INTERNAL (gPTP-derived): the bridge is the media-clock
+    // leader; downstream the audio interface slaves to our stream via its INPUT_STREAM source.
+    {
+        DescriptorClockSource d{};
+        d.object_name = AtdeccString{"Internal"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_source_type = CLOCK_SOURCE_TYPE_INTERNAL;
+        b.add(CFG, d);
+    }
+
+    // CLOCK_DOMAIN — one source (index 0), selected.
+    {
+        DescriptorClockDomain d{};
+        d.object_name = AtdeccString{"ClockDomain"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_source_index = 0;
+        (void)d.push_clock_source(0);
+        b.add(CFG, d);
+    }
+
+    // LOCALE + STRINGS.
+    {
+        DescriptorLocale d{};
+        d.locale_identifier = AtdeccString{"en"};
+        d.number_of_strings = 1;
+        d.base_strings = 0;
+        b.add(CFG, d);
+    }
+    {
+        DescriptorStrings d{};
+        d.string_0 = AtdeccString{std::string{name}.c_str()};
+        b.add(CFG, d);
+    }
+
+    return b.build();
+}
+
+// --------------------------------------------------------------------------
+// Dual-format model: two stream inputs + two stream outputs.
+//   stream 0 = AM824 (IEC 61883-6), stream 1 = AAF (32-bit PCM), both N-ch.
+// Consumed by AvbEntityAudioIO (one AM824 pair + one AAF pair).
+// --------------------------------------------------------------------------
+[[nodiscard]] auto build_audio_model(std::string_view name, uint16_t channels, uint32_t sample_rate) -> std::vector<uint8_t>
+{
+    AemEntityBlob b;
+    constexpr uint16_t CFG = 0;
+    ieee::Eui64 const am824_format = am824_8ch_96k();
+    ieee::Eui64 const aaf_format = aaf_8ch_96k_32bit();
+
+    // Per-stream descriptor wiring: index, type-specific format, and the
+    // STREAM_PORT → cluster/map base indices (inputs use cluster/map 0,1;
+    // outputs use 2,3).
+    struct StreamSpec
+    {
+        uint16_t index;
+        ieee::Eui64 format;
+    };
+    std::array<StreamSpec, 2> const streams{{{.index = 0, .format = am824_format}, {.index = 1, .format = aaf_format}}};
+
+    // ENTITY — two talker sources + two listener sinks.
+    {
+        DescriptorEntity d{};
+        d.entity_name = AtdeccString{std::string{name}.c_str()};
+        d.entity_capabilities = CAP_AEM | CAP_CLASS_A | CAP_GPTP;
+        d.talker_stream_sources = 3;  // AM824, AAF, CRF (media clock)
+        d.talker_capabilities = TALKER_IMPLEMENTED | TALKER_AUDIO_SOURCE | TALKER_MEDIA_CLOCK_SOURCE;
+        d.listener_stream_sinks = 2;
+        d.listener_capabilities = LISTENER_IMPLEMENTED | LISTENER_AUDIO_SINK;
+        d.configurations_count = 1;
+        d.current_configuration = 0;
+        b.add(CFG, d);
+    }
+
+    // CONFIGURATION — counts for the dual-stream model.
+    {
+        DescriptorConfiguration d{};
+        d.object_name = AtdeccString{"AudioIO"};
+        d.localized_description = NO_LOCALIZED;
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_UNIT, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_INPUT, .count = 2});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .count = 3});  // +CRF
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_JACK_INPUT, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_JACK_OUTPUT, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AVB_INTERFACE, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_SOURCE, .count = 2});  // INTERNAL + INPUT_STREAM
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_LOCALE, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STRINGS, .count = 1});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_INPUT, .count = 2});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_OUTPUT, .count = 2});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_CLUSTER, .count = 4});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_MAP, .count = 4});
+        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .count = 1});
+        b.add(CFG, d);
+    }
+
+    // AUDIO_UNIT — two stream-input ports + two stream-output ports.
+    {
+        DescriptorAudioUnit d{};
+        d.object_name = AtdeccString{"AudioUnit"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_domain_index = 0;
+        d.number_of_stream_input_ports = 2;
+        d.base_stream_input_port = 0;
+        d.number_of_stream_output_ports = 2;
+        d.base_stream_output_port = 0;
+        d.current_sampling_rate = sample_rate;
+        (void)d.push_sampling_rate(sample_rate);
+        b.add(CFG, d);
+    }
+
+    // STREAM_INPUT 0/1 + STREAM_OUTPUT 0/1 (index 0 = AM824, 1 = AAF).
+    for (auto const& s : streams) {
+        DescriptorStream d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_INPUT;
+        d.descriptor_index = s.index;
+        d.object_name = AtdeccString{s.index == 0 ? "StreamInputAM824" : "StreamInputAAF"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_domain_index = 0;
+        d.stream_flags = STREAM_FLAG_CLASS_A;
+        d.current_format = s.format;
+        (void)d.push_stream_format(s.format);
+        d.avb_interface_index = 0;
+        b.add(CFG, d);
+    }
+    for (auto const& s : streams) {
+        DescriptorStream d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        d.descriptor_index = s.index;
+        d.object_name = AtdeccString{s.index == 0 ? "StreamOutputAM824" : "StreamOutputAAF"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_domain_index = 0;
+        d.stream_flags = STREAM_FLAG_CLASS_A;
+        d.current_format = s.format;
+        (void)d.push_stream_format(s.format);
+        d.avb_interface_index = 0;
+        b.add(CFG, d);
+    }
+
+    // STREAM_OUTPUT 2 — CRF (Clock Reference Format) media-clock stream. A clock
+    // stream carries no audio, so it has no STREAM_PORT / AUDIO_CLUSTER / MAP; it
+    // just sources the clock domain. Milan listeners can lock their media clock
+    // to it.
+    {
+        DescriptorStream d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        d.descriptor_index = 2;
+        d.object_name = AtdeccString{"StreamOutputCRF"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_domain_index = 0;
+        d.stream_flags = STREAM_FLAG_CLASS_A;
+        d.current_format = crf_audio_48k();
+        (void)d.push_stream_format(crf_audio_48k());
+        d.avb_interface_index = 0;
+        b.add(CFG, d);
+    }
+
+    // STREAM_PORT_INPUT 0→cluster0/map0, 1→cluster1/map1;
+    // STREAM_PORT_OUTPUT 0→cluster2/map2, 1→cluster3/map3.
+    for (uint16_t idx : {uint16_t{0}, uint16_t{1}}) {
+        DescriptorStreamPort d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_PORT_INPUT;
+        d.descriptor_index = idx;
+        d.clock_domain_index = 0;
+        d.number_of_clusters = 1;
+        d.base_cluster = idx;
+        d.number_of_maps = 1;
+        d.base_map = idx;
+        b.add(CFG, d);
+    }
+    for (uint16_t idx : {uint16_t{0}, uint16_t{1}}) {
+        DescriptorStreamPort d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_PORT_OUTPUT;
+        d.descriptor_index = idx;
+        d.clock_domain_index = 0;
+        d.number_of_clusters = 1;
+        d.base_cluster = static_cast<uint16_t>(2 + idx);
+        d.number_of_maps = 1;
+        d.base_map = static_cast<uint16_t>(2 + idx);
+        b.add(CFG, d);
+    }
+
+    // AUDIO_CLUSTER 0..3 (one N-channel MBLA cluster per stream port).
+    // AvbEntityAudioIO derives its channel count from AUDIO_CLUSTER 0.
+    for (uint16_t idx = 0; idx < 4; ++idx) {
+        DescriptorAudioCluster d{};
+        d.descriptor_index = idx;
+        d.object_name = AtdeccString{idx < 2 ? "InputCluster" : "OutputCluster"};
+        d.localized_description = NO_LOCALIZED;
+        d.channel_count = channels;
+        d.format = AUDIO_CLUSTER_FORMAT_MBLA;
+        b.add(CFG, d);
+    }
+
+    // AUDIO_MAP 0..3 — identity map stream ch i → cluster ch i.
+    for (uint16_t idx = 0; idx < 4; ++idx) {
+        DescriptorAudioMap d{};
+        d.descriptor_index = idx;
+        for (uint16_t ch = 0; ch < channels; ++ch) {
+            AudioMapping m{};
+            m.mapping_stream_index = 0;
+            m.mapping_stream_channel = ch;
+            m.mapping_cluster_offset = 0;
+            m.mapping_cluster_channel = ch;
+            (void)d.push_mapping(m);
+        }
+        b.add(CFG, d);
+    }
+
+    // AVB_INTERFACE.
+    {
+        DescriptorAvbInterface d{};
+        d.object_name = AtdeccString{"eth0"};
+        d.localized_description = NO_LOCALIZED;
+        d.interface_flags = AVB_INTERFACE_FLAG_GPTP_SUPPORTED;
+        b.add(CFG, d);
+    }
+
+    // JACK_INPUT 0 + JACK_OUTPUT 0 — a single N-channel digital jack each side.
+    // Optional in 1722.1, but controllers (Hive) expect physical jacks to render
+    // the routing UI; their absence reads as an incomplete model.
+    {
+        DescriptorJack d{};
+        d.descriptor_type = DESCRIPTOR_JACK_INPUT;
+        d.descriptor_index = 0;
+        d.object_name = AtdeccString{"JackInput"};
+        d.localized_description = NO_LOCALIZED;
+        d.jack_type = JACK_TYPE_DIGITAL;
+        b.add(CFG, d);
+    }
+    {
+        DescriptorJack d{};
+        d.descriptor_type = DESCRIPTOR_JACK_OUTPUT;
+        d.descriptor_index = 0;
+        d.object_name = AtdeccString{"JackOutput"};
+        d.localized_description = NO_LOCALIZED;
+        d.jack_type = JACK_TYPE_DIGITAL;
+        b.add(CFG, d);
+    }
+
+    // CLOCK_SOURCE 0 (INTERNAL, located on the AUDIO_UNIT) + 1 (INPUT_STREAM,
+    // located on STREAM_INPUT 0 so a controller can select 'lock to the incoming
+    // stream'), then a CLOCK_DOMAIN listing both with INTERNAL current.
+    {
+        DescriptorClockSource d{};
+        d.descriptor_index = 0;
+        d.object_name = AtdeccString{"Internal"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_source_type = CLOCK_SOURCE_TYPE_INTERNAL;
+        d.clock_source_location_type = DESCRIPTOR_AUDIO_UNIT;
+        d.clock_source_location_index = 0;
+        b.add(CFG, d);
+    }
+    {
+        DescriptorClockSource d{};
+        d.descriptor_index = 1;
+        d.object_name = AtdeccString{"InputStream"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_source_type = CLOCK_SOURCE_TYPE_INPUT_STREAM;
+        d.clock_source_location_type = DESCRIPTOR_STREAM_INPUT;
+        d.clock_source_location_index = 0;
+        b.add(CFG, d);
+    }
+    {
+        DescriptorClockDomain d{};
+        d.object_name = AtdeccString{"ClockDomain"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_source_index = 0;  // current = INTERNAL
+        (void)d.push_clock_source(0);
+        (void)d.push_clock_source(1);
+        b.add(CFG, d);
+    }
+
+    // LOCALE + STRINGS.
+    {
+        DescriptorLocale d{};
+        d.locale_identifier = AtdeccString{"en"};
+        d.number_of_strings = 1;
+        d.base_strings = 0;
+        b.add(CFG, d);
+    }
+    {
+        DescriptorStrings d{};
+        d.string_0 = AtdeccString{std::string{name}.c_str()};
+        b.add(CFG, d);
+    }
+
+    return b.build();
+}
+
+}  // namespace
+
+int main(int argc, char** argv)
+{
+    std::string out = "entity.bin";
+    std::string name = "Statusbar AVB Bridge";
+    uint16_t channels = 8;
+    uint32_t sample_rate = 96000;
+    bool dual = false;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string_view a{argv[i]};
+        auto next = [&]() -> std::string_view { return (i + 1 < argc) ? std::string_view{argv[++i]} : std::string_view{}; };
+        if (a == "--out") {
+            out = std::string{next()};
+        } else if (a == "--name") {
+            name = std::string{next()};
+        } else if (a == "--channels") {
+            channels = static_cast<uint16_t>(std::stoul(std::string{next()}));
+        } else if (a == "--sample-rate") {
+            sample_rate = static_cast<uint32_t>(std::stoul(std::string{next()}));
+        } else if (a == "--dual") {
+            dual = true;
+        } else if (a == "--help" || a == "-h") {
+            std::println(
+                "Usage: {} [--out FILE] [--channels N] [--sample-rate HZ] [--name NAME] [--dual]\n"
+                "  --dual  emit a dual-format model: 2 stream inputs + 2 stream outputs\n"
+                "          (stream 0 AM824, stream 1 AAF) for AvbEntityAudioIO",
+                argv[0]);
+            return 0;
+        } else {
+            std::println(stderr, "unknown argument: {}", a);
+            return 1;
+        }
+    }
+
+    auto const blob = dual ? build_audio_model(name, channels, sample_rate) : build_bridge_model(name, channels, sample_rate);
+
+    // Round-trip validate before writing — fail loudly if the blob is malformed.
+    auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});
+    if (!storage) {
+        std::println(stderr, "error: generated blob failed DescriptorStorage::create: {}", storage.error().message());
+        return 1;
+    }
+
+    std::ofstream f{out, std::ios::binary};
+    if (!f) {
+        std::println(stderr, "error: cannot open {} for writing", out);
+        return 1;
+    }
+    f.write(reinterpret_cast<char const*>(blob.data()), static_cast<std::streamsize>(blob.size()));
+    if (dual) {
+        std::println(
+            "wrote {} ({} bytes): {}-ch dual-format @ {} Hz — 2 listeners + 3 talkers "
+            "(stream 0 AM824, stream 1 AAF int32, stream 2 CRF media clock)",
+            out,
+            blob.size(),
+            channels,
+            sample_rate);
+    } else {
+        std::println("wrote {} ({} bytes): {}-ch AM824 @ {} Hz, 1 listener + 1 talker", out, blob.size(), channels, sample_rate);
+    }
+    return 0;
+}

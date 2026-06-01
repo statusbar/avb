@@ -33,7 +33,7 @@ struct Context
 {
     Callbacks callbacks{};
     bool play_allowed{false};  // computed gate
-    std::string last_action{};
+    std::string_view last_action{};
 };
 
 struct Def

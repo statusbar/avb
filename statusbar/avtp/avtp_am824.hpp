@@ -138,6 +138,22 @@ enum class Am824SampleRate : uint8_t
     }
 }
 
+/// Convert a presentation time (gPTP nanoseconds) to a 16-bit IEC 61883 SYT.
+/// Layout: cycle_count[3:0] (in 8 kHz / 125 us cycles) in bits 15-12,
+/// cycle_offset (0..3071, in 24.576 MHz ticks within the cycle) in bits 11-0.
+/// This is the presentation time of the data block at a syt_interval boundary;
+/// without it (SYT left at the 0xFFFF "no-info" sentinel) receivers have no
+/// media-clock reference and free-run/slip. Paired with tv=1 + the AVTP
+/// timestamp, which carry the same presentation time.
+[[nodiscard]] constexpr auto am824_presentation_to_syt(uint64_t pts_ns) noexcept -> uint16_t
+{
+    constexpr uint64_t ns_per_cycle = 125'000U;  // 1/8000 s
+    constexpr uint64_t ticks_per_cycle = 3072U;  // 24.576 MHz / 8000 Hz
+    uint64_t const cycle = pts_ns / ns_per_cycle;
+    uint64_t const offset = ((pts_ns % ns_per_cycle) * ticks_per_cycle) / ns_per_cycle;
+    return static_cast<uint16_t>(((cycle & 0x0FU) << 12) | (offset & 0x0FFFU));
+}
+
 //
 // AM824 PDU - IEEE 1722-2016 Figure 23 IEC 61883 with no source packet header
 // Wire format: 24 byte AVTPDU common stream header + 8 byte CIP headers + audio data

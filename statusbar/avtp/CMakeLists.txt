@@ -74,6 +74,20 @@ set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
 
 # Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_aaf_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_aaf_v1_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_am824_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_am824_v1_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_crf_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_crf_v1_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_eecf_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_escf_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_ntscf_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_ntscf_v1_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_tscf_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_tscf_v1_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_ip_encap_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_aef_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/avtp_maap_fuzzer.cpp)
 
 add_executable(avtp_sm_tool avtp_sm_tool.cpp)
 target_link_libraries(avtp_sm_tool PRIVATE statusbar)

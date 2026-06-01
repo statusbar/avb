@@ -70,6 +70,37 @@ TEST(am824_stream_output_ctx, header_first_packet_has_timestamp)
     // AVTP timestamp should be lower 32 bits of (gptp_now + offset)
     uint64_t const expected_pts = 100'000'000U + 2'000'000U;
     EXPECT_EQ(pdu.avtp_timestamp(), static_cast<uint32_t>(expected_pts & 0xFFFF'FFFFU));
+
+    // CIP SYT must carry the same presentation time (not the 0xFFFF no-info
+    // sentinel) so receivers can recover the media clock.
+    EXPECT_NE(pdu.syt_timestamp(), 0xFFFFU);
+    EXPECT_EQ(pdu.syt_timestamp(), am824_presentation_to_syt(expected_pts));
+}
+
+TEST(am824_stream_output_ctx, syt_encodes_presentation_time)
+{
+    // 62500 ns into a 125 us cycle -> cycle_offset = 1536 (half of 3072)
+    EXPECT_EQ(am824_presentation_to_syt(100'062'500U), static_cast<uint16_t>(0x0600U));
+    // Exact cycle boundary -> offset 0
+    EXPECT_EQ(am824_presentation_to_syt(102'000'000U), static_cast<uint16_t>(0x0000U));
+    // cycle_count low nibble wraps mod 16: 17 cycles -> 1 in bits 15-12
+    EXPECT_EQ((am824_presentation_to_syt(17ULL * 125'000ULL) >> 12) & 0xFU, 1U);
+}
+
+TEST(am824_stream_output_ctx, no_timestamp_packet_clears_syt)
+{
+    StreamId sid{};
+    Am824StreamOutputContext ctx{sid, Am824SampleRate::rate_48_khz, 2, 2'000'000};
+    Am824Pdu pdu{};
+    pdu.init(sid, 2, Am824SampleRate::rate_48_khz);
+
+    ctx.build_packet_header(pdu, 6, 100'000'000U);  // DBC 0-5: boundary at 0 -> tv
+    EXPECT_TRUE(pdu.tv());
+    EXPECT_NE(pdu.syt_timestamp(), 0xFFFFU);
+
+    ctx.build_packet_header(pdu, 1, 100'125'000U);  // DBC 6: no boundary -> no tv
+    EXPECT_FALSE(pdu.tv());
+    EXPECT_EQ(pdu.syt_timestamp(), 0xFFFFU);  // SYT cleared to no-info
 }
 
 TEST(am824_stream_output_ctx, header_no_timestamp_between_boundaries)

@@ -22,6 +22,9 @@ statusbar_add_module(
   TESTS
   ptpclient_base_test.cpp
   ptpclient_bridge_test.cpp
+  ptpclient_freq_ratio_test.cpp
+  ptpclient_media_clock_test.cpp
+  ptpclient_tai_translator_test.cpp
   ptpclient_test.cpp)
 
 # gptp_ntpshm.cpp implements a ptpclient driver (uses ptpclient::PtpError)

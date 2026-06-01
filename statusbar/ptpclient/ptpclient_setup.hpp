@@ -334,11 +334,22 @@ auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::Argu
     specs.add<int64_t>("ptp.compensation", "Compensation offset in ns (negative = wake earlier)", 0, [&](int64_t v) -> void {
         config.compensation_ns = v;
     });
-    specs.add<int64_t>("ptp.cpu", "CPU core affinity", 3, [&](int64_t v) -> void { config.cpu_affinity = static_cast<int>(v); });
+    specs.add<int64_t>(
+        "ptp.cpu", "Timer thread CPU core affinity", 3, [&](int64_t v) -> void { config.cpu_affinity = static_cast<int>(v); });
     specs.add_flag("ptp.no-rt", "Disable realtime priority", [&](bool v) -> void { config.enable_realtime = !v; });
     specs.add_flag("ptp.no-mlock", "Disable memory locking", [&](bool v) -> void { config.lock_memory = !v; });
     specs.add_flag("ptp.quiet", "Suppress verbose output", [&](bool v) -> void { config.verbose = !v; });
     specs.add<int64_t>("ptp.threshold", "PTP sync threshold ns", 50'000, [&](int64_t v) -> void { config.threshold = v; });
+    // Busy-spin window before each wake. The timer clock_nanosleep()s to ~this far
+    // before the deadline then busy-polls the rest for sub-us precision. Spinning
+    // ~40% of every 125us period is heat-intensive; set 0 to drop the spin (just
+    // clock_nanosleep, looser wakes, far lower CPU/heat -- useful on thermally
+    // marginal nodes).
+    specs.add<int64_t>(
+        "ptp.spin_ns",
+        "Busy-spin refinement window before each wake in ns (0 = no busy-wait)",
+        config.sampling.wake_refine_spin_ns,
+        [&](int64_t v) -> void { config.sampling.wake_refine_spin_ns = v; });
     return specs;
 }
 

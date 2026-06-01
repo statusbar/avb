@@ -1,0 +1,61 @@
+#!/bin/sh
+# postinst for the statusbar-avb runtime package.
+#
+# Grants raw-ethernet + realtime capabilities to the installed command-line
+# tools so the L2/RT executables (AVTP/gPTP/ATDECC/SRP entities, owlm) run
+# without root. This is what lets the workflow be: build -> deploy the .deb ->
+# ssh in -> run the tool, with no manual `setcap` step.
+#
+#   cap_net_raw,cap_net_admin  AF_PACKET raw L2 access + SO_BINDTODEVICE
+#   cap_sys_nice               SCHED_FIFO realtime threads (125 us packet timer)
+#   cap_ipc_lock               mlockall() to keep RT pages resident
+#
+# @SETCAP_BINDIR@ is substituted by CMake to the package's install bindir.
+# Generated from packaging/deb/postinst.in -- do not edit the installed copy.
+set -e
+
+BINDIR="@SETCAP_BINDIR@"
+CAPS="cap_net_raw,cap_net_admin,cap_sys_nice,cap_ipc_lock=ep"
+
+case "$1" in
+    configure)
+        if ! command -v setcap >/dev/null 2>&1; then
+            echo "statusbar-avb: 'setcap' not found (install libcap2-bin);" \
+                 "raw-ethernet tools will need root or a manual setcap." >&2
+            exit 0
+        fi
+        granted=0
+        for f in "$BINDIR"/statusbar-*; do
+            [ -f "$f" ] || continue
+            # Only real ELF executables -- skip the python/shell wrappers
+            # (owlm_analyze, aemxml, ...) which setcap would reject.
+            magic=$(head -c 4 "$f" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+            [ "$magic" = "7f454c46" ] || continue
+            if setcap "$CAPS" "$f" 2>/dev/null; then
+                granted=$((granted + 1))
+            else
+                echo "statusbar-avb: warning: setcap failed on $f" >&2
+            fi
+        done
+        echo "statusbar-avb: granted [$CAPS] to $granted executable(s) in $BINDIR" >&2
+
+        # Apply the PTP-clock udev rule now (read access to /dev/ptp*), so the
+        # AVTP talker gets gPTP-domain timestamps without root or a reboot.
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules 2>/dev/null || true
+            udevadm trigger --subsystem-match=ptp 2>/dev/null || true
+        fi
+
+        # Make systemd aware of the statusbar-avb-entity unit. It is DELIBERATELY
+        # left disabled: enabling/starting the entity is a per-host decision made
+        # by the operator after editing /etc/statusbar-avb/entity.toml --
+        #   systemctl enable --now statusbar-avb-entity
+        # so a plain package install never puts a stream on the wire.
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+        ;;
+    abort-upgrade | abort-remove | abort-deconfigure) ;;
+esac
+
+exit 0

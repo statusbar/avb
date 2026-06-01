@@ -30,7 +30,7 @@ struct Context
 {
     Callbacks callbacks{};
     uint32_t listener_count{0};
-    std::string last_action{};
+    std::string_view last_action{};
 };
 
 struct Def

@@ -177,7 +177,7 @@ class MvrpParticipantT
 {
   public:
     using SubscriptionId = uint32_t;
-    using SendPduFn = std::function<bool(std::span<uint8_t const>)>;
+    using SendPduFn = statusbar::sg14::inplace_function<bool(std::span<uint8_t const>), 64>;
 
     /// Conservative upper bound on the size of a single outgoing MVRPDU.
     static constexpr size_t MAX_PDU_BYTES = 1500;
@@ -443,7 +443,12 @@ class MvrpParticipantT
             port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::RLeaveAll, now);
         }
 
-        if (pos + attr_length > payload.size()) {
+        // Validate against the FIXED FirstValue length, not the attacker-supplied
+        // attr_length: a crafted PDU with attr_length < VlanIdentifierFirstValue::LENGTH
+        // (e.g. 0 or 1) near the end of the buffer would otherwise pass a
+        // `pos + attr_length` check yet make load_unchecked read LENGTH bytes past
+        // the packet. Require the full fixed FirstValue to be present.
+        if (attr_length < VlanIdentifierFirstValue::LENGTH || pos + attr_length > payload.size()) {
             return;
         }
         VlanIdentifierFirstValue fv;

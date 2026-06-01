@@ -1671,6 +1671,140 @@ TEST(acmp_convert, to_pdu)
 }
 
 //
+// Tests: acmp_serialize_2016 -- L2 sends use the pre-2021 56-byte short form
+//
+
+TEST(acmp_l2_serialize, non_udp_emits_short_form)
+{
+    AcmpCommandResponse resp;
+    resp.init_command(ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+    resp.talker_entity_id = Eui64(0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77);
+    resp.listener_unique_id = 1;
+    resp.sequence_id = 7;
+
+    std::array<uint8_t, AcmpDu2021::LENGTH> buf{};
+    auto wire = acmp_serialize_2016(resp, buf);
+
+    // 1722.1-2013 short form: 56 bytes total, control_data_length field == 44.
+    EXPECT_EQ(wire.size(), AcmpDu::LENGTH);
+    AcmpDu got{};
+    (void)protocol::load_unchecked(wire, &got);
+    EXPECT_EQ(got.control_data_length(), AcmpDu::DATA_LENGTH);
+    EXPECT_EQ(got.message_type(), ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+    EXPECT_TRUE(got.talker_entity_id == resp.talker_entity_id);
+    EXPECT_EQ(got.listener_unique_id.get(), 1);
+    EXPECT_EQ(got.sequence_id.get(), 7);
+}
+
+TEST(acmp_l2_serialize, udp_emits_extended_form)
+{
+    AcmpCommandResponse resp;
+    resp.init_command(ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+    resp.flags = acmp_flags::UDP;
+    resp.source_port = 5000;
+
+    std::array<uint8_t, AcmpDu2021::LENGTH> buf{};
+    auto wire = acmp_serialize_2016(resp, buf);
+
+    // UDP-encapsulated ACMP keeps the 96-byte extended form with cdl == 84.
+    EXPECT_EQ(wire.size(), AcmpDu2021::LENGTH);
+    AcmpDu2021 got{};
+    (void)protocol::load_unchecked(wire, &got);
+    EXPECT_EQ(got.control_data_length(), AcmpDu2021::DATA_LENGTH);
+    EXPECT_EQ(got.source_port.get(), 5000);
+}
+
+// The decisive serialization-correctness test: every ACMP field must land at its
+// EXACT IEEE 1722.1-2013 wire offset. Distinct, recognizable bytes per field so a
+// swap or shift is caught -- crucially, the round-trip tests above CANNOT catch a
+// layout bug that is symmetric across serialize+deserialize (the struct would
+// round-trip a wrong layout to itself). This pins the byte positions against the
+// spec: stream_id@4, controller@12, talker@20, listener@28, ... (the very offsets
+// that are easy to misread by hand -- e.g. forgetting the 8-byte stream_id and
+// mistaking controller_entity_id for talker_entity_id).
+TEST(acmp_serialize_2016, wire_field_offsets)
+{
+    AcmpCommandResponse resp{};
+    resp.init_command(ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+    resp.stream_id = Eui64(0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57);
+    resp.controller_entity_id = Eui64(0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7);
+    resp.talker_entity_id = Eui64(0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0x80, 0x81);
+    resp.listener_entity_id = Eui64(0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21);
+    resp.talker_unique_id = 0x0102;
+    resp.listener_unique_id = 0x0304;
+    resp.stream_dest_mac = Eui48(0x91, 0xE0, 0xF0, 0x00, 0x21, 0xE6);
+    resp.connection_count = 0x0005;
+    resp.sequence_id = 0x0006;
+    resp.stream_vlan_id = 0x0002;
+
+    std::array<uint8_t, AcmpDu2021::LENGTH> buf{};
+    auto const wire = acmp_serialize_2016(resp, buf);
+    EXPECT_EQ(wire.size(), AcmpDu::LENGTH);  // 56-byte 2013/2016 short form
+
+    // Common AVTP control header.
+    EXPECT_EQ(wire[0], static_cast<uint8_t>(AvtpSubtype::acmp));      // subtype @0
+    EXPECT_EQ(wire[1] & 0x0F, ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);  // message_type @1
+    EXPECT_EQ(((wire[2] & 0x07) << 8) | wire[3], AcmpDu::DATA_LENGTH);  // control_data_length @2-3 == 44
+
+    auto const field_at = [&](size_t off, std::span<uint8_t const> bytes) {
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            EXPECT_EQ(wire[off + i], bytes[i]);
+        }
+    };
+    field_at(4, resp.stream_id.span());              // stream_id            @4-11
+    field_at(12, resp.controller_entity_id.span());  // controller_entity_id @12-19
+    field_at(20, resp.talker_entity_id.span());      // talker_entity_id     @20-27
+    field_at(28, resp.listener_entity_id.span());    // listener_entity_id   @28-35
+    EXPECT_EQ(wire[36], 0x01);                        // talker_unique_id     @36-37 (network order)
+    EXPECT_EQ(wire[37], 0x02);
+    EXPECT_EQ(wire[38], 0x03);                        // listener_unique_id   @38-39
+    EXPECT_EQ(wire[39], 0x04);
+    field_at(40, resp.stream_dest_mac.span());        // stream_dest_mac      @40-45
+    EXPECT_EQ(wire[46], 0x00);                        // connection_count     @46-47
+    EXPECT_EQ(wire[47], 0x05);
+    EXPECT_EQ(wire[48], 0x00);                        // sequence_id          @48-49
+    EXPECT_EQ(wire[49], 0x06);
+    EXPECT_EQ(wire[52], 0x00);                        // stream_vlan_id       @52-53
+    EXPECT_EQ(wire[53], 0x02);
+}
+
+// Round-trip the full field set through serialize -> parse, independent of the
+// byte-offset assertions above, so a regression in either path shows.
+TEST(acmp_serialize_2016, roundtrip_all_fields)
+{
+    AcmpCommandResponse resp{};
+    resp.init_response(ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE, ACMP_STATUS_SUCCESS);
+    resp.stream_id = Eui64(0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08);
+    resp.controller_entity_id = Eui64(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11);
+    resp.talker_entity_id = Eui64(0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17);
+    resp.listener_entity_id = Eui64(0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27);
+    resp.talker_unique_id = 3;
+    resp.listener_unique_id = 4;
+    resp.stream_dest_mac = Eui48(0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34);
+    resp.connection_count = 1;
+    resp.sequence_id = 99;
+    resp.stream_vlan_id = 2;
+
+    std::array<uint8_t, AcmpDu2021::LENGTH> buf{};
+    auto const wire = acmp_serialize_2016(resp, buf);
+    AcmpDu pdu{};
+    (void)protocol::load_unchecked(wire, &pdu);
+    auto const back = acmp_command_response_from_pdu(pdu);
+
+    EXPECT_EQ(back.message_type(), ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE);
+    EXPECT_TRUE(back.stream_id == resp.stream_id);
+    EXPECT_TRUE(back.controller_entity_id == resp.controller_entity_id);
+    EXPECT_TRUE(back.talker_entity_id == resp.talker_entity_id);
+    EXPECT_TRUE(back.listener_entity_id == resp.listener_entity_id);
+    EXPECT_EQ(back.talker_unique_id.get(), 3);
+    EXPECT_EQ(back.listener_unique_id.get(), 4);
+    EXPECT_TRUE(back.stream_dest_mac == resp.stream_dest_mac);
+    EXPECT_EQ(back.connection_count.get(), 1);
+    EXPECT_EQ(back.sequence_id.get(), 99);
+    EXPECT_EQ(back.stream_vlan_id.get(), 2);
+}
+
+//
 // Tests: ListenerStreamInfo
 //
 

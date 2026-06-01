@@ -552,13 +552,16 @@ TEST(aem_command_handler_new_ctor, read_descriptor_flows_through_handler)
     std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE + 16> out{};
     auto const response = aem_handler.handle_command(header, command_data, make_span(out));
     EXPECT_EQ(response.status, AEM_STATUS_SUCCESS);
-    EXPECT_EQ(response.size, 8 + DescriptorEntity::wire_size());
+    EXPECT_EQ(response.size, AemReadDescriptorResponsePayload::LENGTH + DescriptorEntity::wire_size());
 
-    // The response body should start with 8 bytes of READ_DESCRIPTOR
-    // header followed by the ENTITY descriptor wire bytes. Parse the
-    // descriptor back out and verify it's the one we put in the blob.
+    // The response body starts with the 4-byte READ_DESCRIPTOR header
+    // (configuration_index + reserved) followed by the ENTITY descriptor wire
+    // bytes (which begin with the descriptor's own descriptor_type +
+    // descriptor_index). Parse the descriptor back out and verify it's the one
+    // we put in the blob.
     DescriptorEntity parsed{};
-    span_load_padded(parsed, std::span<uint8_t const>{out.data() + 8, DescriptorEntity::wire_size()});
+    span_load_padded(
+        parsed, std::span<uint8_t const>{out.data() + AemReadDescriptorResponsePayload::LENGTH, DescriptorEntity::wire_size()});
     auto const name_view = parsed.entity_name.as_string_view();
     EXPECT_EQ(std::string{name_view}, std::string{"NewCtorEntity"});
     EXPECT_EQ(parsed.configurations_count.get(), static_cast<uint16_t>(1));

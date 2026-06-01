@@ -36,6 +36,8 @@ auto nanoavb_error_name(NanoAvbError e) noexcept -> char const*
             return "SRP Registration Failed";
         case NanoAvbError::InvalidVlanId:
             return "Invalid VLAN ID";
+        case NanoAvbError::VlanTableFull:
+            return "VLAN Table Full";
         default:
             return "Unknown Error";
     }

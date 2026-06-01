@@ -57,6 +57,20 @@ set_target_properties(acmp_controller_tool PROPERTIES OUTPUT_NAME
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                     acmp_controller_tool)
 
+add_executable(aem_set_clock_source_tool atdecc_aem_set_clock_source_tool.cpp)
+target_link_libraries(aem_set_clock_source_tool PRIVATE statusbar)
+set_target_properties(aem_set_clock_source_tool
+                      PROPERTIES OUTPUT_NAME statusbar-aem-set-clock-source)
+set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
+                                    aem_set_clock_source_tool)
+
+add_executable(aem_get_counters_tool atdecc_aem_get_counters_tool.cpp)
+target_link_libraries(aem_get_counters_tool PRIVATE statusbar)
+set_target_properties(aem_get_counters_tool
+                      PROPERTIES OUTPUT_NAME statusbar-aem-get-counters)
+set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
+                                    aem_get_counters_tool)
+
 add_executable(descriptor_storage_tool atdecc_descriptor_storage_tool.cpp)
 target_link_libraries(descriptor_storage_tool PRIVATE statusbar)
 set_target_properties(descriptor_storage_tool
@@ -78,3 +92,8 @@ set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
 
 # Fuzz harnesses (built only when -DENABLE_FUZZING=ON; defaults ON for Clang).
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_descriptor_storage_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_adp_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_acmp_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_aecp_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_aecp_aem_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_aem_descriptor_fuzzer.cpp)

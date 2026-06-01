@@ -590,7 +590,9 @@ auto main(int argc, char* argv[]) -> int
             "  Output: src={} dst={} new_stream_id={} offset={}ns", src_str, dst_str, new_sid_str, cfg.presentation_offset);
     }
 
+#if __cpp_exceptions
     try {
+#endif
         if (cfg.format == "am824") {
             return retransmit_am824(cfg);
         }
@@ -602,8 +604,10 @@ auto main(int argc, char* argv[]) -> int
         }
         std::println(stderr, "Error: unknown format '{}' (use am824, aaf, or crf)", cfg.format);
         return EXIT_FAILURE;
+#if __cpp_exceptions
     } catch (std::exception const& e) {
         std::println(stderr, "Error: {}", e.what());
         return EXIT_FAILURE;
     }
+#endif
 }

@@ -233,6 +233,28 @@ TEST(mvrp_participant, construct_default)
     EXPECT_EQ(p.vlan_count(), 0u);
 }
 
+// Security regression: a crafted MVRP PDU whose VlanIdentifier attribute_length
+// is smaller than VlanIdentifierFirstValue::LENGTH (here 0) and whose buffer ends
+// right after the vector header must NOT make decode_vector_attribute read the
+// FirstValue past the end of the packet. Without the fixed-length guard in
+// decode_vector_attribute this overreads 2 bytes (ASAN abort in CI; silent OOB in
+// release). Layout: [version][type=VlanIdentifier][attr_length=0][vector_header].
+TEST(mvrp_participant, receive_pdu_rejects_undersized_attr_length)
+{
+    MvrpParticipant p{test_mvrp_config(), 0x1234};
+    MvrpTestClock c{};
+    std::array<uint8_t, 5> pdu{
+        PROTOCOL_VERSION,
+        static_cast<uint8_t>(AttributeType::VlanIdentifier),
+        0x00,  // attribute_length = 0  (< VlanIdentifierFirstValue::LENGTH == 2)
+        0x00,
+        0x01,  // VectorAttributeHeader: number_of_values = 1, not END_MARK
+    };
+    p.receive_pdu(std::span<uint8_t const>(pdu), c.now);
+    // The malformed attribute must be ignored, not registered, and must not crash.
+    EXPECT_EQ(p.vlan_count(), 0u);
+}
+
 TEST(mvrp_participant, start_arms_timers)
 {
     MvrpParticipant p{test_mvrp_config(), 0x1234};

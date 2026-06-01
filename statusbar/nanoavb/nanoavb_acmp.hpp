@@ -116,6 +116,18 @@ class NanoAvbAcmpTalker
     /// @param callbacks The new callback interface
     void set_callbacks(AcmpTalkerCallbacks callbacks);
 
+    /// Set just the connection callbacks without disturbing the others
+    /// (set_callbacks replaces the whole struct, which would clear tx_response
+    /// already wired by the net layer). Lets the application observe ACMP
+    /// connect/disconnect after tx_response has been set up.
+    void set_connection_callbacks(
+        statusbar::sg14::inplace_function<void(uint16_t, Eui64, uint16_t), 64> on_connect,
+        statusbar::sg14::inplace_function<void(uint16_t, Eui64, uint16_t), 64> on_disconnect)
+    {
+        callbacks_.on_connect = std::move(on_connect);
+        callbacks_.on_disconnect = std::move(on_disconnect);
+    }
+
     /// Get the maximum number of streams
     [[nodiscard]] auto max_streams() const noexcept -> size_t { return ctx_.max_streams(); }
 
@@ -194,6 +206,20 @@ class NanoAvbAcmpListener
     /// This allows wiring up network handlers after both components are created
     /// @param callbacks The new callback interface
     void set_callbacks(AcmpListenerCallbacks callbacks);
+
+    /// Set just the connection callbacks without disturbing the others
+    /// (set_callbacks replaces the whole struct, which would clear the tx_command/
+    /// tx_response already wired by the net layer). Lets the application react to a
+    /// successful listener connect/disconnect -- e.g. issue the MSRP Listener Ready
+    /// reservation that makes the talker actually start streaming. The wired
+    /// tx_response lambda reads callbacks_ live, so updating it post-wiring works.
+    void set_connection_callbacks(
+        statusbar::sg14::inplace_function<void(uint16_t, Eui64 const&, Eui48), 64> on_connect,
+        statusbar::sg14::inplace_function<void(uint16_t), 64> on_disconnect)
+    {
+        callbacks_.on_connect = std::move(on_connect);
+        callbacks_.on_disconnect = std::move(on_disconnect);
+    }
 
     /// Get the maximum number of streams
     [[nodiscard]] auto max_streams() const noexcept -> size_t { return ctx_.max_streams(); }
@@ -298,6 +324,18 @@ class NanoAvbAcmpController
 
     /// Disconnect a talker from a listener
     auto disconnect(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool;
+
+    /// Send a CONNECT_TX_COMMAND directly to the talker's ACMP state machine.
+    /// Unlike connect() (which sends CONNECT_RX to the listener and lets the
+    /// listener relay a TX command), this drives the talker side directly --
+    /// needed by the supervise/self-heal path to re-establish a talker.
+    auto connect_tx(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool;
+
+    /// Send a DISCONNECT_TX_COMMAND directly to the talker's ACMP state machine.
+    /// Clears the talker's per-listener connection (and its SRP registration)
+    /// without going through the listener -- the clean half of a stale-stream
+    /// reset.
+    auto disconnect_tx(Eui64 talker_id, uint16_t talker_uid, Eui64 listener_id, uint16_t listener_uid) -> bool;
 
     /// Query listener connection state
     auto get_rx_state(Eui64 listener_id, uint16_t listener_uid) -> bool;

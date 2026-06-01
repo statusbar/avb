@@ -11,11 +11,14 @@
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/avtp/avtp.hpp"
+#include "statusbar/avtp/avtp_am824_stream_input.hpp"
+#include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/dsp/dsp.hpp"
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
+#include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/realtime/realtime.hpp"
 #include "statusbar/sm/sm.hpp"
@@ -30,6 +33,7 @@
 #include <functional>
 #include <memory>
 #include <memory_resource>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
@@ -73,6 +77,12 @@ struct AvbEntityAm824IOConfig
 
     /// DSP filter Q factor
     double filter_q{0.707};
+
+    /// Stream test-tone frequency (Hz) generated per channel. Default 96000/7.
+    double tone_freq_hz{96000.0 / 7.0};
+
+    /// Stream test-tone amplitude (0..1 linear).
+    float tone_amplitude{0.5F};
 
     /// Entity name (displayed in ATDECC controllers)
     std::string entity_name{"AVB AM824 IO"};
@@ -134,9 +144,16 @@ class AvbEntityAm824IO
   public:
     using TimePoint = sm::TimePoint;
 
-    /// Stream format constants
-    static constexpr uint32_t SAMPLE_RATE = 48000;
-    static constexpr size_t SAMPLES_PER_PACKET = 6;
+    /// Stream format constants. The entity runs at 96 kHz to match the
+    /// descriptor model and the third-party devices endpoints. SR class A uses a 125 us
+    /// measurement interval (8000 packets/s), so samples-per-packet is the
+    /// sample rate divided by that — 96000/8000 = 12 (was 6 at 48 kHz).
+    static constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
+    static constexpr uint32_t SAMPLE_RATE = 96000;
+    static constexpr size_t SAMPLES_PER_PACKET = SAMPLE_RATE / CLASS_A_PACKETS_PER_SEC;
+
+    /// AVTP presentation-time offset ahead of the capture/gPTP clock (2 ms).
+    static constexpr uint64_t PRESENTATION_OFFSET_NS = 2'000'000;
 
     /// Factory method — constructs and validates the entity from configuration
     /// Parses the descriptor storage blob to determine channel count and entity model
@@ -157,6 +174,28 @@ class AvbEntityAm824IO
     AvbEntityAm824IO(AvbEntityAm824IO&&) = delete;
     auto operator=(AvbEntityAm824IO&&) -> AvbEntityAm824IO& = delete;
 
+    /// Passkey that gates the public constructor: only AvbEntityAm824IO can
+    /// mint one, so construction is effectively private to create() while still
+    /// being reachable by std::make_unique (which cannot call a private ctor).
+    class CreateKey
+    {
+        CreateKey() = default;
+        friend class AvbEntityAm824IO;
+    };
+
+    /// Constructor — call via create(), which supplies the CreateKey. Takes the
+    /// entity model by value and constructs `components_` in place
+    /// (NanoAvbComponents is non-movable, so it cannot be passed pre-built).
+    /// @param config       Validated configuration
+    /// @param entity_model Entity model to hand to NanoAvbComponents
+    /// @param channels     Number of audio channels derived from descriptor blob
+    AvbEntityAm824IO(
+        CreateKey,
+        AvbEntityAm824IOConfig config,
+        nanoavb::EntityModel entity_model,
+        size_t channels,
+        std::pmr::memory_resource* memory_resource);
+
     /// Start the entity and add handlers to reactor
     /// @param reactor Message reactor (caller must run poll loop)
     /// @return Status indicating success or failure
@@ -173,7 +212,7 @@ class AvbEntityAm824IO
     [[nodiscard]] auto is_ready() const noexcept -> bool;
 
     /// Get current supervisor state as string
-    [[nodiscard]] auto state_string() const -> std::string;
+    [[nodiscard]] auto state_string() const -> std::string_view;
 
     /// Print current state of all state machines
     auto print_state() const -> void;
@@ -200,6 +239,13 @@ class AvbEntityAm824IO
     /// @param time Current PTP-synchronized time point for packet timestamping
     auto process_audio(TimePoint time) -> void;
 
+    /// Decode one received AVTP AM824 stream frame. Called from the stream RX
+    /// handler on the reactor thread; meters packets/samples. Non-AM824 or
+    /// invalid frames are ignored.
+    /// @param frame  The received Ethernet payload (AVTP header onward)
+    /// @param now_ns Arrival time in nanoseconds
+    void on_stream_rx_frame(std::span<uint8_t const> frame, int64_t now_ns);
+
     /// Set custom audio processing callback (in addition to biquad filter)
     /// @param callback Function called with interleaved N-channel samples for processing
     auto set_audio_callback(Am824AudioProcessCallback callback) -> void { audio_callback_ = std::move(callback); }
@@ -224,18 +270,14 @@ class AvbEntityAm824IO
     [[nodiscard]] auto channels() const noexcept -> size_t { return channels_; }
 
   private:
-    /// Private constructor — use create() to instantiate
-    /// @param config  Validated configuration
-    /// @param components Pre-built NanoAVB components
-    /// @param channels   Number of audio channels derived from descriptor blob
-    AvbEntityAm824IO(
-        AvbEntityAm824IOConfig config,
-        nanoavb::NanoAvbComponents components,
-        size_t channels,
-        std::pmr::memory_resource* memory_resource);
-
     /// Wire up state machine callbacks
     auto wire_callbacks() -> void;
+
+    /// Build the MSRP talker reservation (TSpec) for our AM824 stream. The
+    /// stream id / destination / VLAN are sourced from the ACMP-configured
+    /// talker stream 0 so MSRP, ACMP, and the AVTP stream share one identity;
+    /// the TSpec is derived from the 96 kHz AM824 framing.
+    [[nodiscard]] auto make_talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo;
 
     // Member order optimized to minimize struct padding
     // (config_ must precede components_ for initialization dependency)
@@ -279,6 +321,34 @@ class AvbEntityAm824IO
 
     /// Audio processing buffer (interleaved, channels_ samples per frame)
     std::pmr::vector<float> audio_buffer_;
+
+    /// Per-channel sine oscillators (stream audio source). Each channel uses a
+    /// distinct initial phase so no two channels are identical.
+    std::pmr::vector<dsp::Oscillator<float>> oscillators_;
+
+    //
+    // Stream data plane (AVTP AM824)
+    //
+
+    /// AVTP stream transmit socket (used from the PTP timer thread). Opened with
+    /// PACKET_QDISC_BYPASS so our own egress is not re-received on this host.
+    net::RawnetContext stream_tx_{};
+
+    /// Talker per-stream serialization state (DBC, timestamps, sequence).
+    std::optional<avtp::Am824StreamOutputContext> talker_out_{};
+
+    /// Listener per-stream deserialization state.
+    std::optional<avtp::Am824StreamInputContext> listener_in_{};
+
+    /// Resolved stream destination MAC (from ACMP talker stream 0).
+    ieee::Eui48 stream_dest_mac_{};
+
+    /// Stream data-plane counters. tx is touched only on the PTP thread; rx
+    /// counters are atomic (written on the reactor thread, read for status).
+    uint64_t stream_tx_packets_{0};
+    std::atomic<uint64_t> stream_rx_packets_{0};
+    std::atomic<uint64_t> stream_rx_samples_{0};
+    std::atomic<uint64_t> stream_rx_bad_{0};
 
     /// Running state
     bool running_{false};

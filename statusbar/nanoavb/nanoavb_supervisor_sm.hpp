@@ -21,12 +21,10 @@ struct Callbacks
 {
     statusbar::sg14::inplace_function<void(Context&, TimePoint), 64> init_iface{};
     statusbar::sg14::inplace_function<void(Context&, TimePoint), 64> start_protocols{};
-    statusbar::sg14::inplace_function<void(Context&, TimePoint), 64> enter_wait_vlan{};
     statusbar::sg14::inplace_function<void(Context&, TimePoint), 64> enter_ready{};
     statusbar::sg14::inplace_function<void(Context&, TimePoint), 64> degrade_stop_streams{};
     statusbar::sg14::inplace_function<void(Context&, TimePoint), 64> stop_all{};
     statusbar::sg14::inplace_function<void(Context&, TimePoint), 64> timeout_gptp{};  // Called when gPTP lock times out
-    statusbar::sg14::inplace_function<void(Context&, TimePoint), 64> timeout_vlan{};  // Called when VLAN registration times out
 };
 
 struct Context
@@ -35,12 +33,19 @@ struct Context
     // facts
     bool link_up{false};
     bool gptp_locked{false};
-    bool vlan_base_ready{false};
 
     // diagnostics
-    std::string last_action{};
+    std::string_view last_action{};
 };
 
+// Lifecycle model: ADP/AECP/ACMP are independent and run from link-up
+// (handled outside this SM). This SM gates the gPTP-dependent work — SRP
+// (MVRP+MSRP) and streaming — purely on the gPTP lock state, with no VLAN
+// registration gate:
+//
+//   Down --LinkUp--> Init (gPTP starting) --GptpLocked--> Ready (SRP+streaming)
+//   Ready --GptpLost--> Degraded --GptpLocked--> Ready   (dynamic re-lock)
+//   any --LinkDown--> Down;  Init --Timeout--> Down       (gPTP-lock watchdog)
 struct Def
 {
     using Context = supervisor_sm::Context;
@@ -50,7 +55,6 @@ struct Def
         Start = 0,
         Down,
         Init,
-        WaitVlanBase,
         Ready,
         Degraded,
         Count
@@ -62,20 +66,17 @@ struct Def
         LinkDown,
         GptpLocked,
         GptpLost,
-        VlanBaseReady,
-        Timeout,  // Watchdog timer expired in waiting states
+        Timeout,  // gPTP-lock watchdog expired in Init
         Count
     };
 };
 
 void init_iface(Context& ctx, TimePoint time);
 void start_protocols(Context& ctx, TimePoint time);
-void enter_wait_vlan(Context& ctx, TimePoint time);
 void enter_ready(Context& ctx, TimePoint time);
 void degrade_stop_streams(Context& ctx, TimePoint time);
 void stop_all(Context& ctx, TimePoint time);
 void timeout_gptp(Context& ctx, TimePoint time);
-void timeout_vlan(Context& ctx, TimePoint time);
 
 inline constexpr auto table = []() -> TransitionTable<Def> {
     using S = Def::State;
@@ -88,19 +89,16 @@ inline constexpr auto table = []() -> TransitionTable<Def> {
     t.at(S::Down, E::LinkUp) = T::action<start_protocols>(S::Init);
     t.at(S::Down, E::LinkDown) = T::transition(S::Down);
 
-    t.at(S::Init, E::GptpLocked) = T::action<enter_wait_vlan>(S::WaitVlanBase);
+    // gPTP lock alone enables SRP + streaming (no VLAN-registration gate).
+    t.at(S::Init, E::GptpLocked) = T::action<enter_ready>(S::Ready);
     t.at(S::Init, E::LinkDown) = T::action<stop_all>(S::Down);
     t.at(S::Init, E::Timeout) = T::action<timeout_gptp>(S::Down);  // gPTP lock timeout
-
-    t.at(S::WaitVlanBase, E::VlanBaseReady) = T::action<enter_ready>(S::Ready);
-    t.at(S::WaitVlanBase, E::GptpLost) = T::action<degrade_stop_streams>(S::Degraded);
-    t.at(S::WaitVlanBase, E::LinkDown) = T::action<stop_all>(S::Down);
-    t.at(S::WaitVlanBase, E::Timeout) = T::action<timeout_vlan>(S::Degraded);  // VLAN timeout
 
     t.at(S::Ready, E::GptpLost) = T::action<degrade_stop_streams>(S::Degraded);
     t.at(S::Ready, E::LinkDown) = T::action<stop_all>(S::Down);
 
-    t.at(S::Degraded, E::GptpLocked) = T::action<enter_wait_vlan>(S::WaitVlanBase);
+    // gPTP came back: restart SRP + streaming.
+    t.at(S::Degraded, E::GptpLocked) = T::action<enter_ready>(S::Ready);
     t.at(S::Degraded, E::LinkDown) = T::action<stop_all>(S::Down);
 
     return t;

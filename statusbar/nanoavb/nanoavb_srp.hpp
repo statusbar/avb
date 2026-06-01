@@ -117,7 +117,7 @@ struct MvrpCallbacks
     /// Called when the handler needs to send an MVRP packet
     /// @param packet The raw MVRP packet data to send
     /// @return true if send was successful
-    std::function<bool(std::span<uint8_t const> packet)> send_packet;
+    statusbar::sg14::inplace_function<bool(std::span<uint8_t const> packet), 64> send_packet;
 
     /// Called when VLAN registration state changes
     statusbar::sg14::inplace_function<void(uint16_t vlan_id, VlanState state), 64> on_vlan_state_change;
@@ -140,7 +140,9 @@ class MvrpHandler
         : callbacks_{std::move(callbacks)}
         , participant_{config}
     {
-        vlans_.reserve(config.max_vlans);
+        // vlans_ is fixed-capacity (inplace_vector); nothing to reserve. The
+        // participant_ ctor already validates config.max_vlans against the
+        // compile-time limit (throws std::bad_alloc if it exceeds capacity).
     }
 
     /// Get the MVRP EtherType
@@ -181,7 +183,9 @@ class MvrpHandler
 
   private:
     MvrpCallbacks callbacks_;
-    std::vector<VlanInfo> vlans_;
+    // Fixed-capacity (no heap): VLAN count per endpoint is tiny in practice.
+    // Capacity matches the wrapped MvrpParticipant's compile-time limit.
+    statusbar::sg14::inplace_vector<VlanInfo, statusbar::srp::mvrp::DefaultMvrpLimits::max_vlans> vlans_;
     statusbar::srp::mvrp::MvrpParticipant participant_;
     bool started_{false};
 };
@@ -196,13 +200,19 @@ struct MsrpCallbacks
     /// Called when the handler needs to send an MSRP packet
     /// @param packet The raw MSRP packet data to send
     /// @return true if send was successful
-    std::function<bool(std::span<uint8_t const> packet)> send_packet;
+    statusbar::sg14::inplace_function<bool(std::span<uint8_t const> packet), 64> send_packet;
 
     /// Called when talker stream reservation state changes
     statusbar::sg14::inplace_function<void(StreamId const& stream_id, TalkerReservationState state), 64> on_talker_state_change;
 
     /// Called when listener stream reservation state changes
     statusbar::sg14::inplace_function<void(StreamId const& stream_id, ListenerReservationState state), 64> on_listener_state_change;
+
+    /// Called when the set of remote listeners for one of OUR advertised talker
+    /// streams changes. `ready` is true when at least one registered listener
+    /// permits transmit on `stream_id` (the talker may start sending), false
+    /// otherwise. Fires from receive_packet()/tick() on listener register/leave.
+    statusbar::sg14::inplace_function<void(StreamId const& stream_id, bool ready), 64> on_talker_listener;
 };
 
 //
@@ -217,14 +227,59 @@ class MsrpHandler
     explicit MsrpHandler(statusbar::srp::msrp::MsrpConfig const& config, MsrpCallbacks callbacks = {})
         : callbacks_{std::move(callbacks)}
         , participant_{config}
-    {}
+    {
+        // Observe remote listener declarations so we can tell a talker when a
+        // listener becomes ready (or stops being ready) for one of its streams.
+        // Safe: MsrpHandler lives in the non-movable NanoAvbComponents, so
+        // `this` is stable for the lifetime of the captured observer.
+        (void)participant_.subscribe(
+            statusbar::srp::msrp::Observer{
+                .on_listener = [this](
+                                   tsn::StreamId const& sid,
+                                   statusbar::srp::msrp::ListenerDeclaration /*decl*/,
+                                   statusbar::srp::msrp::Operation /*op*/) { notify_talker_listener(sid); },
+                .on_listener_leave = [this](tsn::StreamId const& sid) { notify_talker_listener(sid); },
+            });
+    }
 
     [[nodiscard]] static constexpr auto ethertype() noexcept -> uint16_t { return srp::MSRP_ETHERTYPE; }
     [[nodiscard]] static constexpr auto multicast_address() noexcept -> uint64_t { return srp::MSRP_MULTICAST_ADDRESS; }
 
     void set_callbacks(MsrpCallbacks callbacks) { callbacks_ = std::move(callbacks); }
+
+    /// Set just the on_talker_listener hook without disturbing the others
+    /// (set_callbacks replaces the whole struct; this updates one field).
+    void set_on_talker_listener(statusbar::sg14::inplace_function<void(StreamId const&, bool), 64> cb)
+    {
+        callbacks_.on_talker_listener = std::move(cb);
+    }
+
+    /// Diagnostic breakdown of why the talker gate is open/closed for a stream
+    /// (record present? operation? registrar In? Ready substate?), for logging
+    /// the listener-ready flap. See MsrpParticipant::listener_permit_debug.
+    [[nodiscard]] auto listener_permit_debug(StreamId const& stream_id) const noexcept
+    {
+        return participant_.listener_permit_debug(stream_id);
+    }
     void set_domain(DomainInfo const& domain) noexcept { domain_ = domain; }
     [[nodiscard]] auto domain() const noexcept -> DomainInfo const& { return domain_; }
+
+    /// Sticky-Listener workaround passthrough. When enabled, registered Listener
+    /// attributes are re-declared on every periodic/LeaveAll pass so a bridge
+    /// keeps the forwarding path to a downstream listener warm. Needed for
+    /// jdk01E -> the DSP processor via a Luminex switch (cfea332 silenced the echo).
+    /// See MsrpParticipant::set_redeclare_registered_listeners.
+    void set_redeclare_registered_listeners(bool enabled) noexcept
+    {
+        participant_.set_redeclare_registered_listeners(enabled);
+    }
+
+    /// Suppress-LeaveAll workaround passthrough. When enabled, this participant
+    /// never originates a LeaveAll; it only re-asserts via the periodic timer.
+    /// Needed for jdk01E -> the DSP processor via a Luminex switch whose stream forwarding
+    /// blinks when we send periodic LeaveAlls. See
+    /// MsrpParticipant::set_suppress_leaveall.
+    void set_suppress_leaveall(bool enabled) noexcept { participant_.set_suppress_leaveall(enabled); }
 
     [[nodiscard]] auto talker_advertise(TalkerStreamSrpInfo const& info, TimePoint now) -> StatusValue<size_t>
     {
@@ -274,6 +329,35 @@ class MsrpHandler
             }
         }
         return failure(make_error_code(NanoAvbError::InvalidStreamIndex));
+    }
+
+    /// Declare this port's MSRP SR class domain(s) so the bridge can locate the
+    /// SRP domain boundary (IEEE 802.1Q 35.2.1.4 / 35.2.2.9). Without an explicit
+    /// declaration the bridge treats the port as a boundary for every SR class it
+    /// supports, and converts inbound Talker Advertise declarations into Talker
+    /// Failed with failure_code 8 ("Egress port is not AVB-capable") -- so a remote
+    /// talker's stream can never reserve a path to us. We declare BOTH Class A
+    /// (SRclassID 6, priority 3) and Class B (SRclassID 5, priority 2) on the
+    /// configured VID, matching the default-case domain a bridge advertises
+    /// (FirstValue {5,2,VID} with NumberOfValues=2). Idempotent; call on link-up.
+    [[nodiscard]] auto declare_domain(TimePoint now) -> Status
+    {
+        if (!started_) {
+            participant_.start(now);
+            started_ = true;
+        }
+        statusbar::srp::msrp::DomainFirstValue class_b{};
+        class_b.sr_class_id = statusbar::srp::msrp::SR_CLASS_B;  // 5
+        class_b.sr_class_priority = 2;
+        class_b.sr_class_vid = domain_.sr_class_vid;
+        (void)participant_.declare_domain(class_b, now);
+
+        statusbar::srp::msrp::DomainFirstValue class_a{};
+        class_a.sr_class_id = statusbar::srp::msrp::SR_CLASS_A;                       // 6
+        class_a.sr_class_priority = statusbar::srp::msrp::default_sr_class_priority;  // 3
+        class_a.sr_class_vid = domain_.sr_class_vid;
+        (void)participant_.declare_domain(class_a, now);
+        return success();
     }
 
     [[nodiscard]] auto get_talker_stream(StreamId const& stream_id) const noexcept -> TalkerStreamSrpInfo const*
@@ -383,6 +467,15 @@ class MsrpHandler
     [[nodiscard]] auto listener_streams() const noexcept -> std::span<ListenerStreamSrpInfo const> { return listener_streams_; }
 
   private:
+    /// Forward a listener register/leave for one of OUR talker streams to the
+    /// on_talker_listener hook, reporting the aggregate "may transmit" state.
+    void notify_talker_listener(tsn::StreamId const& sid)
+    {
+        if (get_talker_stream(sid) != nullptr && callbacks_.on_talker_listener) {
+            callbacks_.on_talker_listener(sid, participant_.listener_permits_transmit(sid));
+        }
+    }
+
     MsrpCallbacks callbacks_;
     DomainInfo domain_;
     statusbar::sg14::inplace_vector<TalkerStreamSrpInfo, MaxStreams> talker_streams_;

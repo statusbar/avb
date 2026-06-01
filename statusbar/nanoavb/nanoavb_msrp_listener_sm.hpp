@@ -32,7 +32,7 @@ struct Context
     Callbacks callbacks;
     bool reserved{false};
     bool failed{false};
-    std::string last_action;
+    std::string_view last_action;
 };
 
 struct Def

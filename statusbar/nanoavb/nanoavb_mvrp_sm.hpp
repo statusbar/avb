@@ -34,7 +34,7 @@ struct Context
     uint16_t vid{0};
     uint32_t refcount{0};
     bool joined{false};
-    std::string last_action;
+    std::string_view last_action;
 };
 
 struct Def

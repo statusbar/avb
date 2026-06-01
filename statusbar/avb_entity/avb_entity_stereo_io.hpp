@@ -159,7 +159,7 @@ class AvbEntityStereoIO
     [[nodiscard]] auto is_ready() const noexcept -> bool;
 
     /// Get current supervisor state as string
-    [[nodiscard]] auto state_string() const -> std::string;
+    [[nodiscard]] auto state_string() const -> std::string_view;
 
     /// Print current state of all state machines
     auto print_state() const -> void;
@@ -210,11 +210,13 @@ class AvbEntityStereoIO
     /// Create the entity model with stereo I/O descriptors
     [[nodiscard]] auto create_entity_model() const -> nanoavb::EntityModel;
 
-    /// Create NanoAVB components from entity model
-    [[nodiscard]] auto create_components() -> nanoavb::NanoAvbComponents;
-
     /// Wire up state machine callbacks
     auto wire_callbacks() -> void;
+
+    /// Build the MSRP talker reservation (TSpec) for our stereo AM824 stream,
+    /// sourcing stream id / destination / VLAN from the ACMP-configured talker
+    /// stream 0 so MSRP, ACMP, and the AVTP stream share one identity.
+    [[nodiscard]] auto make_talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo;
 
     /// Process received AM824 packet through DSP and queue for transmission
     /// @param packet Raw AM824 packet data received from listener stream

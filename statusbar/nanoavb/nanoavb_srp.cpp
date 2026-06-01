@@ -8,6 +8,8 @@
 #include "statusbar/srp/srp_mvrp.hpp"
 #include "statusbar/srp/srp_mvrp_participant.hpp"
 
+#include <algorithm>
+
 namespace statusbar::nanoavb {
 
 //
@@ -38,7 +40,19 @@ auto MvrpHandler::register_vlan(uint16_t vlan_id, TimePoint now) -> Status
         }
     }
 
-    vlans_.push_back({.vlan_id = vlan_id, .state = VlanState::Pending});
+    // New VLAN. vlans_ is fixed-capacity (no heap): take a free slot if one
+    // exists, otherwise reclaim a slot held by a withdrawn (Unregistered)
+    // VLAN -- a live VLAN never loses its slot to a newcomer. Only when every
+    // slot holds an actively-registered VLAN do we reject (effectively
+    // unreachable on a real AVB network: typically 1-2 VLANs).
+    VlanInfo const rec{.vlan_id = vlan_id, .state = VlanState::Pending};
+    if (vlans_.try_push_back(rec) == nullptr) {
+        auto* const slot = std::ranges::find(vlans_, VlanState::Unregistered, &VlanInfo::state);
+        if (slot == vlans_.end()) {
+            return failure(make_error_code(NanoAvbError::VlanTableFull));
+        }
+        *slot = rec;
+    }
 
     if (!started_) {
         participant_.start(now);

@@ -495,6 +495,56 @@ TEST(nanoavb_acmp_listener, is_connected_initially_false)
     EXPECT_FALSE(listener.is_connected(1));
 }
 
+// Regression: a CONNECT_RX whose send_connect_tx takes an immediate error path
+// (here LISTENER_UNKNOWN_ID for an out-of-range sink) clear_pending()s but the
+// transition table still advances the SM into ConnectTxResp -- a dead-end with
+// nothing pending. The listener would then ignore every later controller command
+// (CONNECT_RX, GET_RX_STATE) forever. Hardware-observed on jdk01a: the listener
+// went silent after hours while the talker kept answering. The per-tick watchdog
+// must detect the wedge (non-Waiting + nothing pending) and recover to Waiting.
+TEST(nanoavb_acmp_listener, wedge_on_error_path_recovers_via_watchdog)
+{
+    auto listener_id = make_entity_id(0x01);
+    auto talker_id = make_entity_id(0x02);
+
+    int responses = 0;
+    AcmpCommandResponse last_response{};
+    AcmpListenerCallbacks callbacks;
+    callbacks.tx_command = [](AcmpCommandResponse const&) { return true; };
+    callbacks.tx_response = [&](AcmpCommandResponse const& r) {
+        ++responses;
+        last_response = r;
+        return true;
+    };
+
+    NanoAvbAcmpListener listener{listener_id, callbacks, 2};  // valid sinks: 0, 1
+    listener.start();
+    auto now = statusbar::sm::TimePoint{};
+
+    // CONNECT_RX for sink 5 (>= max_streams) -> LISTENER_UNKNOWN_ID error path.
+    auto bad = make_connect_rx_command(talker_id, 0, listener_id, 5);
+    (void)listener.receive_controller_command(bad, now);
+    EXPECT_EQ(last_response.status(), ACMP_STATUS_LISTENER_UNKNOWN_ID);
+    EXPECT_TRUE(listener.current_state() != ListenerState::Waiting);  // wedged in ConnectTxResp
+    EXPECT_FALSE(listener.has_pending());
+
+    // While wedged, a valid GET_RX_STATE for sink 0 is silently dropped.
+    responses = 0;
+    auto probe = make_get_rx_state_command(listener_id, 0);
+    (void)listener.receive_controller_command(probe, now);
+    EXPECT_EQ(responses, 0);
+
+    // The per-tick watchdog recovers the SM to Waiting.
+    listener.tick(now);
+    EXPECT_EQ(listener.current_state(), ListenerState::Waiting);
+
+    // ...and the listener services controller commands again.
+    responses = 0;
+    (void)listener.receive_controller_command(probe, now);
+    EXPECT_EQ(responses, 1);
+    EXPECT_EQ(last_response.message_type(), ACMP_MESSAGE_TYPE_GET_RX_STATE_RESPONSE);
+}
+
 TEST(nanoavb_acmp_callbacks, talker_on_connect_called)
 {
     auto talker_id = make_entity_id(0x01);

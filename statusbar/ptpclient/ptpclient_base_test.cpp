@@ -186,6 +186,36 @@ TEST(ptp_fit_time, residuals_reported)
     EXPECT_TRUE(result.max_residual >= result.rms_residual);
 }
 
+TEST(ptp_fit_time, steep_clean_line_has_low_residual)
+{
+    // A clean line with a STEEP slope (+10%), as happens when CLOCK_MONOTONIC is
+    // slewed by phc2sys while the bridge tracks it. Fix 1: the residual must be
+    // measured against the UNCLAMPED best-fit slope, so a clean steep line reads
+    // as ~zero residual (healthy) — it must NOT be pinned to ±max_rate_ppm and
+    // then measured against the wrong line (which would manufacture a huge
+    // residual and a false "unhealthy").
+    constexpr double steep_rate = 1.10;  // +10% (100000 ppm)
+    std::array<TimeSample, 32> samples{};
+    for (int i = 0; i < 32; ++i) {
+        int64_t const mono = static_cast<int64_t>(i) * 1'000'000LL;
+        int64_t const ptp = static_cast<int64_t>(static_cast<double>(mono) * steep_rate);
+        samples[i] = {.monotonic_ns = mono, .ptp_ns = ptp, .bracket_ns = 10};
+    }
+
+    // Narrow clamp (200 ppm): the published slope is clamped, but because the
+    // residual is computed against the unclamped slope it stays ~0.
+    auto narrow = fit_time_mapping(samples.data(), samples.size(), 200.0);
+    EXPECT_TRUE(narrow.valid);
+    EXPECT_TRUE(narrow.rms_residual < 1.0);              // clean line -> ~0 residual
+    EXPECT_TRUE(narrow.slope <= 1.0 + 200.0e-6 + 1e-9);  // published slope still clamped
+
+    // Wide clamp (±20%): the real +10% slope passes through unclamped.
+    auto wide = fit_time_mapping(samples.data(), samples.size(), 200'000.0);
+    EXPECT_TRUE(wide.valid);
+    EXPECT_TRUE(wide.rms_residual < 1.0);
+    EXPECT_TRUE(std::fabs(wide.slope - steep_rate) < 1e-3);  // unclamped -> real slope
+}
+
 //
 // Main test runner
 //

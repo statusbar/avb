@@ -61,44 +61,52 @@ TEST(nanoavb_supervisor_sm, link_up_to_init)
     EXPECT_EQ(ctx.last_action, "start_protocols");
 }
 
-TEST(nanoavb_supervisor_sm, gptp_locked_to_wait_vlan)
-{
-    supervisor::Machine machine;
-    supervisor::Context ctx;
-    bool wait_vlan_called = false;
-    ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
-    ctx.callbacks.start_protocols = [](supervisor::Context&, TimePoint) {};
-    ctx.callbacks.enter_wait_vlan = [&](supervisor::Context&, TimePoint) { wait_vlan_called = true; };
-
-    // Down -> Init -> WaitVlanBase
-    machine.handle_event(ctx, supervisor::Def::Event::UCT, TimePoint{});
-    machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
-    machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
-
-    EXPECT_EQ(machine.current_state(), supervisor::Def::State::WaitVlanBase);
-    EXPECT_TRUE(wait_vlan_called);
-    EXPECT_EQ(ctx.last_action, "enter_wait_vlan");
-}
-
-TEST(nanoavb_supervisor_sm, vlan_ready_to_ready)
+TEST(nanoavb_supervisor_sm, gptp_locked_to_ready)
 {
     supervisor::Machine machine;
     supervisor::Context ctx;
     bool ready_called = false;
     ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.start_protocols = [](supervisor::Context&, TimePoint) {};
-    ctx.callbacks.enter_wait_vlan = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.enter_ready = [&](supervisor::Context&, TimePoint) { ready_called = true; };
 
-    // Down -> Init -> WaitVlanBase -> Ready
+    // Down -> Init -> Ready (gPTP lock alone enables SRP+streaming; no VLAN gate)
     machine.handle_event(ctx, supervisor::Def::Event::UCT, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
-    machine.handle_event(ctx, supervisor::Def::Event::VlanBaseReady, TimePoint{});
 
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Ready);
     EXPECT_TRUE(ready_called);
     EXPECT_EQ(ctx.last_action, "enter_ready");
+}
+
+TEST(nanoavb_supervisor_sm, gptp_lost_then_relock_is_dynamic)
+{
+    supervisor::Machine machine;
+    supervisor::Context ctx;
+    int ready_count = 0;
+    int degrade_count = 0;
+    ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
+    ctx.callbacks.start_protocols = [](supervisor::Context&, TimePoint) {};
+    ctx.callbacks.enter_ready = [&](supervisor::Context&, TimePoint) { ++ready_count; };
+    ctx.callbacks.degrade_stop_streams = [&](supervisor::Context&, TimePoint) { ++degrade_count; };
+
+    machine.handle_event(ctx, supervisor::Def::Event::UCT, TimePoint{});
+    machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
+    machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
+    EXPECT_EQ(machine.current_state(), supervisor::Def::State::Ready);
+
+    // gPTP lost -> Degraded (tear down SRP + streams)
+    machine.handle_event(ctx, supervisor::Def::Event::GptpLost, TimePoint{});
+    EXPECT_EQ(machine.current_state(), supervisor::Def::State::Degraded);
+    EXPECT_EQ(ctx.last_action, "degrade_stop_streams");
+
+    // gPTP re-locked -> Ready again (dynamic)
+    machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
+    EXPECT_EQ(machine.current_state(), supervisor::Def::State::Ready);
+
+    EXPECT_EQ(ready_count, 2);
+    EXPECT_EQ(degrade_count, 1);
 }
 
 TEST(nanoavb_supervisor_sm, timeout_in_init_goes_to_down)
@@ -126,33 +134,6 @@ TEST(nanoavb_supervisor_sm, timeout_in_init_goes_to_down)
     EXPECT_EQ(ctx.last_action, "timeout_gptp");
 }
 
-TEST(nanoavb_supervisor_sm, timeout_in_wait_vlan_goes_to_degraded)
-{
-    supervisor::Machine machine;
-    supervisor::Context ctx;
-    bool timeout_vlan_called = false;
-    bool degrade_called = false;
-    ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
-    ctx.callbacks.start_protocols = [](supervisor::Context&, TimePoint) {};
-    ctx.callbacks.enter_wait_vlan = [](supervisor::Context&, TimePoint) {};
-    ctx.callbacks.timeout_vlan = [&](supervisor::Context&, TimePoint) { timeout_vlan_called = true; };
-    ctx.callbacks.degrade_stop_streams = [&](supervisor::Context&, TimePoint) { degrade_called = true; };
-
-    // Down -> Init -> WaitVlanBase
-    machine.handle_event(ctx, supervisor::Def::Event::UCT, TimePoint{});
-    machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
-    machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
-    EXPECT_EQ(machine.current_state(), supervisor::Def::State::WaitVlanBase);
-
-    // Timeout in WaitVlanBase -> Degraded (VLAN timeout)
-    machine.handle_event(ctx, supervisor::Def::Event::Timeout, TimePoint{});
-
-    EXPECT_EQ(machine.current_state(), supervisor::Def::State::Degraded);
-    EXPECT_TRUE(timeout_vlan_called);
-    EXPECT_TRUE(degrade_called);
-    EXPECT_EQ(ctx.last_action, "timeout_vlan");
-}
-
 TEST(nanoavb_supervisor_sm, link_down_from_any_state_to_down)
 {
     supervisor::Machine machine;
@@ -160,15 +141,13 @@ TEST(nanoavb_supervisor_sm, link_down_from_any_state_to_down)
     int stop_count = 0;
     ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.start_protocols = [](supervisor::Context&, TimePoint) {};
-    ctx.callbacks.enter_wait_vlan = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.enter_ready = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.stop_all = [&](supervisor::Context&, TimePoint) { ++stop_count; };
 
-    // Get to Ready
+    // Get to Ready (gPTP lock alone)
     machine.handle_event(ctx, supervisor::Def::Event::UCT, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
-    machine.handle_event(ctx, supervisor::Def::Event::VlanBaseReady, TimePoint{});
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Ready);
 
     // LinkDown from Ready -> Down
@@ -196,24 +175,23 @@ TEST(nanoavb_supervisor_sm, null_callbacks_no_crash)
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Down);
 }
 
-TEST(nanoavb_supervisor_sm, timeout_vlan_null_callbacks)
+TEST(nanoavb_supervisor_sm, gptp_lost_null_callbacks)
 {
     supervisor::Machine machine;
     supervisor::Context ctx;
 
-    // Only set the callbacks needed to reach WaitVlanBase
+    // Only set the callbacks needed to reach Ready; leave degrade_stop_streams null.
     ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.start_protocols = [](supervisor::Context&, TimePoint) {};
-    ctx.callbacks.enter_wait_vlan = [](supervisor::Context&, TimePoint) {};
-    // Leave degrade_stop_streams and timeout_vlan null
+    ctx.callbacks.enter_ready = [](supervisor::Context&, TimePoint) {};
 
     machine.handle_event(ctx, supervisor::Def::Event::UCT, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
-    EXPECT_EQ(machine.current_state(), supervisor::Def::State::WaitVlanBase);
+    EXPECT_EQ(machine.current_state(), supervisor::Def::State::Ready);
 
-    // Timeout in WaitVlanBase -> Degraded (calls timeout_vlan + degrade_stop_streams, both null)
-    machine.handle_event(ctx, supervisor::Def::Event::Timeout, TimePoint{});
+    // GptpLost in Ready -> Degraded (calls degrade_stop_streams, which is null — must not crash)
+    machine.handle_event(ctx, supervisor::Def::Event::GptpLost, TimePoint{});
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Degraded);
 }
 
@@ -622,14 +600,12 @@ TEST(nanoavb_supervisor_degrade, gptp_lost_ready_triggers_degrade)
     bool called = false;
     ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.start_protocols = [](supervisor::Context&, TimePoint) {};
-    ctx.callbacks.enter_wait_vlan = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.enter_ready = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.degrade_stop_streams = [&](supervisor::Context&, TimePoint) { called = true; };
 
     machine.handle_event(ctx, supervisor::Def::Event::UCT, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
-    machine.handle_event(ctx, supervisor::Def::Event::VlanBaseReady, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::GptpLost, TimePoint{});
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Degraded);
     EXPECT_TRUE(called);
@@ -641,19 +617,18 @@ TEST(nanoavb_supervisor_degrade, degraded_recovers_on_gptp_lock)
     supervisor::Context ctx;
     ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.start_protocols = [](supervisor::Context&, TimePoint) {};
-    ctx.callbacks.enter_wait_vlan = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.enter_ready = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.degrade_stop_streams = [](supervisor::Context&, TimePoint) {};
 
     machine.handle_event(ctx, supervisor::Def::Event::UCT, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::LinkUp, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
-    machine.handle_event(ctx, supervisor::Def::Event::VlanBaseReady, TimePoint{});
     machine.handle_event(ctx, supervisor::Def::Event::GptpLost, TimePoint{});
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Degraded);
 
+    // gPTP re-locks: straight back to Ready (no VLAN gate).
     machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
-    EXPECT_EQ(machine.current_state(), supervisor::Def::State::WaitVlanBase);
+    EXPECT_EQ(machine.current_state(), supervisor::Def::State::Ready);
 }
 
 // ===========================================================================

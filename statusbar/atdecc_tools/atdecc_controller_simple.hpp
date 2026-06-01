@@ -16,6 +16,7 @@
 
 #include "statusbar/atdecc/atdecc_acmp_pdu.hpp"
 #include "statusbar/atdecc/atdecc_adp.hpp"
+#include "statusbar/atdecc_tools/atdecc_aem_validate.hpp"
 #include "statusbar/atdecc_tools/atdecc_controller_model.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb_controller.hpp"
@@ -82,6 +83,11 @@ class ControllerSimple : public net::Pollable
     /// Build a fresh snapshot of discovered entities.
     auto get_display_entities() -> std::vector<EntityDisplayInfo>;
 
+    /// Raw descriptors cached for an entity from the READ_DESCRIPTOR crawl
+    /// (run fetch_entity_descriptors first and wait for EntityDetailReadyEvent).
+    /// Only successfully-read descriptors are returned. For model validation.
+    [[nodiscard]] auto cached_descriptors(ieee::Eui64 const& id) const -> std::vector<RawDescriptor>;
+
     /// Dispatch a controller action (from TUI, Lua, autonomous service, etc.).
     void dispatch(ControllerAction const& action, int64_t now_ns);
 
@@ -90,7 +96,30 @@ class ControllerSimple : public net::Pollable
     void fetch_entity_descriptors(ieee::Eui64 entity_id, int64_t now_ns);
 
     /// Queue GET_RX_STATE for all known listener entities (e.g. on refresh).
+    /// No-op unless auto rx-state probing is enabled (see set_auto_probe_rx_state).
     void queue_rx_state_for_all();
+
+    /// Enable/disable automatic GET_RX_STATE probing of every listener sink on
+    /// entity discovery (and on DiscoverAll). OFF by default: a one-shot command
+    /// like connect/list must not fan GET_RX_STATE at every sink on the LAN --
+    /// an unresponsive multi-sink entity (e.g. a 18-sink the DSP processor) would peg the
+    /// ACMP in-flight window and starve the actual CONNECT_RX_COMMAND. Live
+    /// connection-tracking UIs (TUI) turn it ON to keep RX state fresh.
+    void set_auto_probe_rx_state(bool on) noexcept { auto_probe_rx_state_ = on; }
+
+    /// Enable/disable raw ACMP tracing. When ON, every observed ACMP PDU (command
+    /// or response) surfaces as an AcmpTraceEvent via drain_events(), letting a
+    /// diagnostic caller reconstruct a connect handshake leg by leg. OFF by
+    /// default so normal callers (supervise/list) aren't flooded with bus traffic.
+    void set_acmp_trace(bool on) noexcept { acmp_trace_ = on; }
+
+    /// Immediately send one ACMP GET_RX_STATE to a specific listener sink. The
+    /// reply (or its absence) surfaces as an RxStateEvent via drain_events().
+    void query_rx_state(ieee::Eui64 listener_id, uint16_t unique_id, int64_t now_ns);
+
+    /// Immediately send one ACMP GET_TX_STATE to a specific talker source (for
+    /// comparing talker vs listener responsiveness during diagnosis).
+    void query_tx_state(ieee::Eui64 talker_id, uint16_t unique_id, int64_t now_ns);
 
     /// Drain pending events (connection changes, detail ready, status, etc.).
     auto drain_events() -> std::vector<ControllerEvent>;
@@ -138,6 +167,11 @@ class ControllerSimple : public net::Pollable
     net::RawnetContext context_;
     nanoavb::NanoAvbAemController controller_;
     std::array<uint8_t, 2048> payload_buf_{};
+
+    // Auto GET_RX_STATE probing on discovery. OFF by default so one-shot commands
+    // (connect/list) don't saturate the ACMP in-flight window; the TUI opts in.
+    bool auto_probe_rx_state_{false};
+    bool acmp_trace_{false};
 
     std::vector<ieee::Eui64> known_entity_ids_;
     std::map<ieee::Eui64, std::string> entity_names_;

@@ -104,6 +104,9 @@ int main(int argc, char* argv[])
     // Create controller pollable
     auto pollable = std::make_unique<atdecc_tools::ControllerSimple>(std::move(rawnet), controller_id);
     auto* pollable_ptr = pollable.get();
+    // Interactive UI: keep live RX-state fresh by auto-probing GET_RX_STATE on
+    // discovery. (One-shot tools leave this off to avoid in-flight starvation.)
+    pollable_ptr->set_auto_probe_rx_state(true);
 
     // Create TUI app (presentation layer). It subscribes to events from
     // the business layer (ControllerSimple) and emits actions back.

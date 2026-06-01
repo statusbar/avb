@@ -1,15 +1,15 @@
 cmake_minimum_required(VERSION 3.31)
 project(
   statusbar-avb
-  VERSION 1.1.0
+  VERSION 1.2.0
   LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 enable_testing()
 
-# Modules register bench tools into this aggregate target. The outer
-# aggregate build supplies a single shared target instead.
+# Modules register bench tools into this aggregate target. The outer aggregate
+# build supplies a single shared target instead.
 if(NOT STATUSBAR_AGGREGATE_BUILD)
   add_custom_target(run-all-benches)
 endif()
@@ -34,6 +34,11 @@ set_target_properties(statusbar-gptp PROPERTIES EXPORT_NAME gptp)
 set_target_properties(statusbar-nanoavb PROPERTIES EXPORT_NAME nanoavb)
 set_target_properties(statusbar-ptpclient PROPERTIES EXPORT_NAME ptpclient)
 set_target_properties(statusbar-srp PROPERTIES EXPORT_NAME srp)
+# Networking and measurement modules.
+set_target_properties(statusbar-netdump PROPERTIES EXPORT_NAME netdump)
+set_target_properties(statusbar-owlm PROPERTIES EXPORT_NAME owlm)
+set_target_properties(statusbar-stun PROPERTIES EXPORT_NAME stun)
+set_target_properties(statusbar-udptun PROPERTIES EXPORT_NAME udptun)
 
 # Give every installed executable a statusbar- prefixed on-disk name, so the
 # bin/ directory is uniform (tools that set no OUTPUT_NAME, and examples, would
@@ -58,9 +63,9 @@ foreach(_t ${_exe_targets})
 endforeach()
 
 # ---- install + export ----
-# Skipped under the outer aggregate build, which builds, not installs.
-# Install rules are split into runtime (tools / shared libs) and devel (static
-# libs, headers, CMake config) components for CPack.
+# Skipped under the outer aggregate build, which builds, not installs. Install
+# rules are split into runtime (tools / shared libs) and devel (static libs,
+# headers, CMake config) components for CPack.
 if(NOT STATUSBAR_AGGREGATE_BUILD)
   get_property(_install_targets GLOBAL PROPERTY STATUSBAR_INSTALL_TARGETS)
   install(
@@ -94,7 +99,7 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/statusbar-avb)
   write_basic_package_version_file(
     ${CMAKE_CURRENT_BINARY_DIR}/statusbar-avbConfigVersion.cmake
-    VERSION 1.1.0
+    VERSION 1.2.0
     COMPATIBILITY AnyNewerVersion)
   install(
     FILES ${CMAKE_CURRENT_BINARY_DIR}/statusbar-avbConfig.cmake
@@ -110,6 +115,36 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
       PATTERN "*.md"
       PATTERN "*.svg"
       PATTERN "*.png")
+  endif()
+
+  # ---- udev rule (runtime component) ----
+  # Grant non-root read access to the PTP hardware clock so the AVTP talker can
+  # timestamp in the gPTP domain instead of silently falling back to the system
+  # clock. Absolute DESTINATION (outside the /usr/local prefix) so udev finds
+  # it.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    install(
+      FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/udev/60-statusbar-ptp.rules
+      DESTINATION /lib/udev/rules.d
+      COMPONENT runtime)
+
+    # ---- entity systemd service + /etc config (runtime component) ----
+    # Optional run-at-boot for the AVB audio entity. The unit is shipped
+    # DISABLED (postinst only daemon-reloads); an operator enables it after
+    # editing the conffile. Absolute DESTINATIONs (outside the /usr/local
+    # prefix) so systemd and the operator find them in the standard places.
+    # entity.toml is registered as a dpkg conffile (see CONTROL_EXTRA below), so
+    # per-site edits survive package upgrades. It ships GENERIC defaults only --
+    # no site-specific peers/keys.
+    install(
+      FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/packaging/systemd/statusbar-avb-entity.service
+      DESTINATION /lib/systemd/system
+      COMPONENT runtime)
+    install(
+      FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/etc/entity.toml
+      DESTINATION /etc/statusbar-avb
+      COMPONENT runtime)
   endif()
 
   # ---- Python helpers (runtime component) ----
@@ -135,6 +170,17 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
       RENAME statusbar-aemxml-cross-check
       COMPONENT runtime)
   endif()
+
+  # owlm_analyze post-processes the CSVs produced by statusbar-owlm-tool
+  # --csv-output. Ships as /usr/local/bin/statusbar-owlm-analyze with apt-
+  # resolved runtime deps (numpy / pandas / matplotlib).
+  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/python/owlm/owlm_analyze.py)
+    install(
+      PROGRAMS python/owlm/owlm_analyze.py
+      DESTINATION ${CMAKE_INSTALL_BINDIR}
+      RENAME statusbar-owlm-analyze
+      COMPONENT runtime)
+  endif()
 endif()
 
 # ---- packaging (CPack: TGZ + ZIP, plus DEB/RPM on Linux) ----
@@ -143,7 +189,7 @@ endif()
 if(NOT STATUSBAR_AGGREGATE_BUILD)
   set(CPACK_PACKAGE_NAME "statusbar-avb")
   set(CPACK_PACKAGE_VENDOR "Jeff Koftinoff")
-  set(CPACK_PACKAGE_VERSION "1.1.0")
+  set(CPACK_PACKAGE_VERSION "1.2.0")
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
       "AVB/TSN protocol stack — SRP, AVTP, gPTP, ATDECC, NanoAVB, and AVTP crypto — with ATDECC controller and AVTP command-line tools."
   )
@@ -171,20 +217,50 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
   set(CPACK_COMPONENTS_ALL runtime devel)
   set(CPACK_DEBIAN_DEVEL_PACKAGE_NAME "statusbar-avb-dev")
   set(CPACK_RPM_DEVEL_PACKAGE_NAME "statusbar-avb-devel")
-  # aemxml is pure stdlib Python — only python3 is needed at runtime.
-  set(CPACK_DEBIAN_RUNTIME_PACKAGE_DEPENDS "python3")
+  # aemxml is pure stdlib Python; owlm_analyze needs numpy/pandas/matplotlib;
+  # libcap2-bin provides `setcap` for the postinst capability grant.
+  set(CPACK_DEBIAN_RUNTIME_PACKAGE_DEPENDS
+      "python3, python3-numpy, python3-pandas, python3-matplotlib, libcap2-bin")
   # -dev pulls its own runtime so its cmake config's IMPORTED targets resolve.
+  # >= (not =) so an auto-incremented Debian revision (1.2.0-<rev>, see the
+  # container-build scripts) still satisfies the cross-dependencies.
   set(CPACK_DEBIAN_DEVEL_PACKAGE_DEPENDS
-      "statusbar-avb (= 1.1.0), statusbar-audio-dev (= 1.1.0), statusbar-core-dev (= 1.1.0), statusbar-crypto-dev (= 1.1.0)"
+      "statusbar-avb (>= 1.2.0), statusbar-audio-dev (>= 1.2.0), statusbar-core-dev (>= 1.2.0), statusbar-crypto-dev (>= 1.2.0)"
   )
   set(CPACK_RPM_DEVEL_PACKAGE_REQUIRES
-      "statusbar-avb = 1.1.0, statusbar-audio-devel = 1.1.0, statusbar-core-devel = 1.1.0, statusbar-crypto-devel = 1.1.0"
+      "statusbar-avb >= 1.2.0, statusbar-audio-devel >= 1.2.0, statusbar-core-devel >= 1.2.0, statusbar-crypto-devel >= 1.2.0"
   )
   set(CPACK_COMPONENT_DEVEL_DESCRIPTION
       "C++ headers, static libraries and CMake package config")
   set(CPACK_GENERATOR "TGZ;ZIP")
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND CPACK_GENERATOR "DEB")
+    # Grant raw-ethernet + realtime capabilities to the installed tools on
+    # install, so the L2/RT executables run without root (deploy .deb -> ssh ->
+    # run). Baked into the runtime package's postinst; DEB-only. @ONLY keeps the
+    # shell `$1`/`${...}` syntax intact and substitutes only @SETCAP_BINDIR@.
+    set(SETCAP_BINDIR "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/postinst.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/packaging/deb/postinst" @ONLY)
+    file(
+      CHMOD
+      "${CMAKE_CURRENT_BINARY_DIR}/packaging/deb/postinst"
+      PERMISSIONS
+      OWNER_READ
+      OWNER_WRITE
+      OWNER_EXECUTE
+      GROUP_READ
+      GROUP_EXECUTE
+      WORLD_READ
+      WORLD_EXECUTE)
+    # postinst (setcap + daemon-reload), prerm (stop the entity unit on
+    # remove/upgrade), postrm (daemon-reload), and conffiles (mark
+    # /etc/statusbar-avb/entity.toml so per-site edits survive upgrades).
+    set(CPACK_DEBIAN_RUNTIME_PACKAGE_CONTROL_EXTRA
+        "${CMAKE_CURRENT_BINARY_DIR}/packaging/deb/postinst"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/prerm"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/postrm"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/deb/conffiles")
     find_program(_rpmbuild rpmbuild)
     if(_rpmbuild)
       list(APPEND CPACK_GENERATOR "RPM")
@@ -216,8 +292,10 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
             ${CMAKE_CURRENT_SOURCE_DIR}/docs/sm/srp
     COMMAND ${_sm_render} $<TARGET_FILE:nanoavb_supervisor_sm_tool>
             ${CMAKE_CURRENT_SOURCE_DIR}/docs/sm/nanoavb
+    COMMAND ${_sm_render} $<TARGET_FILE:stun_sm_tool>
+            ${CMAKE_CURRENT_SOURCE_DIR}/docs/sm/stun
     DEPENDS atdecc_sm_tool avtp_sm_tool gptp_sm_tool srp_sm_tool
-            nanoavb_supervisor_sm_tool
+            nanoavb_supervisor_sm_tool stun_sm_tool
     COMMENT
       "Regenerating per-SM Markdown + SVG under avb/docs/sm/ (needs graphviz)"
     VERBATIM USES_TERMINAL)

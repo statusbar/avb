@@ -162,12 +162,14 @@ TEST(am824_io_audio, process_audio_callback_receives_correct_size)
 
 TEST(am824_io_constants, sample_rate)
 {
-    EXPECT_EQ(AvbEntityAm824IO::SAMPLE_RATE, 48000U);
+    // 96 kHz to match the descriptor model and the third-party devices endpoints.
+    EXPECT_EQ(AvbEntityAm824IO::SAMPLE_RATE, 96000U);
 }
 
 TEST(am824_io_constants, samples_per_packet)
 {
-    EXPECT_EQ(AvbEntityAm824IO::SAMPLES_PER_PACKET, 6U);
+    // SR class A: sample_rate / 8000 packets-per-second = 96000/8000 = 12.
+    EXPECT_EQ(AvbEntityAm824IO::SAMPLES_PER_PACKET, 12U);
 }
 
 //
@@ -421,11 +423,19 @@ TEST(am824_io_audio, callback_receives_filtered_data)
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     (*result)->process_audio(now);
 
-    // The audio buffer starts as zeros, so all samples should be zero
+    // process_audio now drives a per-channel sine source through the (flat)
+    // filter, so the callback receives a non-silent, bounded signal.
     EXPECT_EQ(captured_samples.size(), AvbEntityAm824IO::SAMPLES_PER_PACKET * 8U);
+    float max_abs = 0.0f;
     for (auto s : captured_samples) {
-        EXPECT_TRUE(s == 0.0f);
+        EXPECT_TRUE(s >= -1.0f && s <= 1.0f);  // bounded
+        max_abs = std::max(max_abs, std::abs(s));
     }
+    EXPECT_TRUE(max_abs > 0.0f);  // not silence
+
+    // Each channel uses a distinct initial phase, so no two adjacent channels
+    // carry the identical first sample.
+    EXPECT_TRUE(captured_samples[0] != captured_samples[1]);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_am824_io_test)

@@ -34,7 +34,7 @@ struct Context
     Callbacks callbacks{};
     bool audio_ready{false};
     bool send_allowed{false};  // computed by your supervisor / gate logic
-    std::string last_action{};
+    std::string_view last_action{};
 };
 
 struct Def

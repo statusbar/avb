@@ -252,6 +252,50 @@ struct TalkerFailedFirstValue
 
 static_assert(sizeof(TalkerFailedFirstValue) == 34);
 
+//
+// FirstValue incrementation - IEEE 802.1Q-2014 Clause 35.2.2.{7,8,9}
+//
+// A VectorAttribute with NumberOfValues > 1 carries a single FirstValue; the
+// attribute value for each subsequent AttributeEvent is the previous value
+// incremented "in a manner defined by the application" (Clause 10.8.2.7). MSRP's
+// per-AttributeType rules, as enumerated by AVnu End-Station test
+// MSRP.End.c.35.1.11, are:
+//
+//   - Listener:        +1 to the StreamID Unique ID.
+//   - Talker Advertise/Failed: +1 to BOTH the StreamID Unique ID and the
+//                      DataFrameParameters destination_address.
+//   - Domain:          +1 to BOTH SRclassID and SRclassPriority (VID unchanged).
+//
+// These are the canonical step functions used both when decoding a received
+// multi-value vector and when coalescing consecutive declarations on transmit.
+
+/// Listener: advance to the next attribute value in a multi-value vector.
+constexpr void increment_first_value(ListenerFirstValue& fv) noexcept
+{
+    fv.stream_id.increment_unique_id();
+}
+
+/// Talker Advertise: advance to the next attribute value in a multi-value vector.
+constexpr void increment_first_value(TalkerAdvertiseFirstValue& fv) noexcept
+{
+    fv.stream_id.increment_unique_id();
+    fv.destination_address.from_uint64(fv.destination_address.to_uint64() + 1);
+}
+
+/// Talker Failed: advance to the next attribute value (increments the embedded
+/// Talker Advertise; FailureInformation is carried unchanged).
+constexpr void increment_first_value(TalkerFailedFirstValue& fv) noexcept
+{
+    increment_first_value(fv.advertise);
+}
+
+/// Domain: advance to the next attribute value in a multi-value vector.
+constexpr void increment_first_value(DomainFirstValue& fv) noexcept
+{
+    fv.sr_class_id = static_cast<uint8_t>(fv.sr_class_id.get() + 1);
+    fv.sr_class_priority = static_cast<uint8_t>(fv.sr_class_priority.get() + 1);
+}
+
 }  // namespace statusbar::srp::msrp
 
 // Serialization traits

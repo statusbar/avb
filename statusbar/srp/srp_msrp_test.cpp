@@ -398,6 +398,56 @@ TEST(msrp_talker_failed, serialization_round_trip)
 }
 
 //
+// FirstValue incrementation rules - IEEE 802.1Q 35.2.2.{7,8,9}
+// (AVnu End-Station test MSRP.End.c.35.1.11)
+//
+
+TEST(msrp_increment, listener_adds_one_to_unique_id_only)
+{
+    ListenerFirstValue fv{};
+    fv.stream_id = StreamId{Eui48{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, 0x0007};
+    auto const before = fv.stream_id.to_uint64();
+    increment_first_value(fv);
+    EXPECT_EQ(fv.stream_id.get_unique_id(), 0x0008);
+    EXPECT_EQ(fv.stream_id.to_uint64(), before + 1);  // only the low 16 bits move
+}
+
+TEST(msrp_increment, talker_advertise_adds_one_to_unique_id_and_dest_mac)
+{
+    TalkerAdvertiseFirstValue fv{};
+    fv.stream_id = StreamId{Eui48{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, 0x0001};
+    fv.destination_address = Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0x34};
+    auto const dest_before = fv.destination_address.to_uint64();
+    increment_first_value(fv);
+    EXPECT_EQ(fv.stream_id.get_unique_id(), 0x0002);
+    EXPECT_EQ(fv.destination_address.to_uint64(), dest_before + 1);
+}
+
+TEST(msrp_increment, talker_failed_increments_advertise_and_keeps_failure_info)
+{
+    TalkerFailedFirstValue fv{};
+    fv.advertise.stream_id = StreamId{Eui48{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, 0x0010};
+    fv.advertise.destination_address = Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0x34};
+    fv.set_failure_code(FailureCode::InsufficientBandwidth);
+    increment_first_value(fv);
+    EXPECT_EQ(fv.advertise.stream_id.get_unique_id(), 0x0011);
+    EXPECT_EQ(fv.advertise.destination_address.to_uint64(), 0x91e0f0001235ULL);
+    EXPECT_EQ(static_cast<int>(fv.get_failure_code()), static_cast<int>(FailureCode::InsufficientBandwidth));
+}
+
+TEST(msrp_increment, domain_adds_one_to_class_id_and_priority_not_vid)
+{
+    DomainFirstValue fv{};
+    fv.sr_class_id = SR_CLASS_B;  // 5
+    fv.sr_class_priority = 2;
+    fv.sr_class_vid = default_sr_class_vid;
+    increment_first_value(fv);
+    EXPECT_EQ(fv.sr_class_id.get(), SR_CLASS_A);  // 6
+    EXPECT_EQ(fv.sr_class_priority.get(), 3);
+    EXPECT_EQ(fv.sr_class_vid.get(), default_sr_class_vid);  // VID is NOT incremented
+}
+
+//
 // Main test runner
 //
 

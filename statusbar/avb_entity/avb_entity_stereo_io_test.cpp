@@ -130,7 +130,7 @@ TEST(stereo_io_state, initial_state_string)
     AvbEntityStereoIO entity{config};
 
     // Initial state should be Start
-    std::string state = entity.state_string();
+    auto state = entity.state_string();
     EXPECT_EQ(state, "Start");
 }
 
@@ -323,10 +323,10 @@ TEST(stereo_io_sm, link_down_after_up)
     auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
 
     entity.on_link_up(now);
-    std::string state_after_up = entity.state_string();
+    auto state_after_up = entity.state_string();
     entity.on_link_down(now);
     // After link_down, state should change (typically back to Down)
-    std::string state_after_down = entity.state_string();
+    auto state_after_down = entity.state_string();
     EXPECT_TRUE(state_after_down != state_after_up || state_after_down == "Down");
 }
 

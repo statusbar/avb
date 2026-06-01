@@ -322,11 +322,44 @@ class GptpAnnounceHandler : public net::Pollable
 // NanoAVB Components Container
 //
 
-/// Holds all NanoAVB protocol handlers (without network handlers)
+/// Holds all NanoAVB protocol handlers (without network handlers).
+///
+/// `aem_handler` and `adp_advertiser` hold references into `entity_model` (and
+/// `aem_handler` is itself self-referential), so this type is **non-copyable
+/// and non-movable**: construct it in place and never relocate it. The
+/// constructor wires each handler against the *member* `entity_model`
+/// (declaration order guarantees it is constructed first), keeping the
+/// cross-references valid for the object's whole lifetime. Build it directly as
+/// a value member (entities) or on the heap via the builder (returns a
+/// unique_ptr) — never return it by value or std::move it.
 struct NanoAvbComponents
 {
     using TimePoint = sm::TimePoint;
 
+    /// Construct all handlers, wiring AEM/ADP/ACMP against the owned
+    /// `entity_model` member. Post-construction setup that needs site-specific
+    /// values (talker stream config, VLAN registration, MSRP domain) is done by
+    /// the caller on the constructed members.
+    /// @param model                 Entity model to take ownership of.
+    /// @param adp_config            ADP advertiser configuration.
+    /// @param talker_max_streams    Max talker streams.
+    /// @param talker_max_listeners  Max listeners per talker stream.
+    /// @param listener_max_streams  Max listener streams.
+    NanoAvbComponents(
+        EntityModel model,
+        AdpAdvertiserConfig adp_config,
+        size_t talker_max_streams,
+        size_t talker_max_listeners,
+        size_t listener_max_streams);
+
+    NanoAvbComponents(NanoAvbComponents const&) = delete;
+    auto operator=(NanoAvbComponents const&) -> NanoAvbComponents& = delete;
+    NanoAvbComponents(NanoAvbComponents&&) = delete;
+    auto operator=(NanoAvbComponents&&) -> NanoAvbComponents& = delete;
+    ~NanoAvbComponents() = default;
+
+    // Declaration order matters: `entity_model` must precede the handlers that
+    // reference it so it is fully constructed when they are wired.
     EntityModel entity_model;
     AemCommandHandler aem_handler;
     NanoAvbAdpAdvertiser adp_advertiser;
@@ -415,9 +448,11 @@ class NanoAvbComponentsBuilder
         return *this;
     }
 
-    /// Build the components, validating all required fields are set
-    /// @return StatusValue containing NanoAvbComponents or error
-    [[nodiscard]] auto build() -> StatusValue<NanoAvbComponents>;
+    /// Build the components, validating all required fields are set.
+    /// Returns a unique_ptr because NanoAvbComponents is non-movable (it holds
+    /// internal cross-references) and so cannot be returned by value.
+    /// @return StatusValue containing a unique_ptr<NanoAvbComponents> or error
+    [[nodiscard]] auto build() -> StatusValue<std::unique_ptr<NanoAvbComponents>>;
 
   private:
     EntityModel entity_model_{};

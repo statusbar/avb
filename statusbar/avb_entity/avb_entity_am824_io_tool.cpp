@@ -200,12 +200,12 @@ void print_entity_config(Config const& config, avb_entity::AvbEntityAm824IO cons
     std::print("AVB Entity AM824 I/O Tool\n");
     std::print("=========================\n");
     std::print("Descriptor Storage: {}\n", config.descriptor_storage_path);
-    std::print("Entity ID:        {}\n", ieee::to_string(config.entity.entity_id));
-    std::print("Entity Model ID:  {}\n", ieee::to_string(config.entity.entity_model_id));
+    std::print("Entity ID:        {}\n", ieee::to_string(config.entity.entity_id).view());
+    std::print("Entity Model ID:  {}\n", ieee::to_string(config.entity.entity_model_id).view());
     std::print("Entity Name:      {}\n", config.entity.entity_name);
     std::print("Interface:        {}\n", config.entity.interface_name);
     std::print("VLAN ID:          {}\n", config.entity.vlan_id);
-    std::print("Talker Dest MAC:  {}\n", ieee::to_string(config.entity.talker_dest_mac));
+    std::print("Talker Dest MAC:  {}\n", ieee::to_string(config.entity.talker_dest_mac).view());
     std::print("Channels:         {}\n", entity.channels());
     std::print("\nDSP Filter:\n");
     std::print("  Frequency:      {:.1f} Hz\n", config.entity.filter_freq_hz);
@@ -293,11 +293,11 @@ MainLoopResult run_main_loop(
     auto startup_time = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     entity.on_link_up(startup_time);
 
-    // Watchdog timeout configuration
+    // Watchdog timeout configuration (gPTP lock only; there is no VLAN gate).
     constexpr auto GPTP_LOCK_TIMEOUT = std::chrono::seconds{10};
-    constexpr auto VLAN_REGISTER_TIMEOUT = std::chrono::seconds{5};
     auto last_state_change_time = std::chrono::steady_clock::now();
-    std::string last_state = entity.state_string();
+    auto last_state = entity.state_string();
+    auto last_telemetry_time = std::chrono::steady_clock::now();
 
     // Wire up gPTP announce callback to update ADP advertiser
     if (net_handlers) {
@@ -346,9 +346,31 @@ MainLoopResult run_main_loop(
         if (current_state == "Init" && time_in_state > GPTP_LOCK_TIMEOUT) {
             entity.on_timeout(sm_now);
             last_state_change_time = now;
-        } else if (current_state == "WaitVlanBase" && time_in_state > VLAN_REGISTER_TIMEOUT) {
-            entity.on_timeout(sm_now);
-            last_state_change_time = now;
+        }
+
+        // Periodic PTP-bridge / timer telemetry on the main thread, so it keeps
+        // reporting even when the media timer stalls (that's the diagnostic
+        // point). stderr is unbuffered → visible immediately under systemd/nohup.
+        if (config.verbose && ctx.bridge && now - last_telemetry_time >= std::chrono::seconds(1)) {
+            last_telemetry_time = now;
+            auto const bt = ctx.bridge->telemetry();
+            std::print(
+                stderr,
+                "[bridge] healthy={} epoch={} samp={} rms={}ns bracket(min/mean/max)={}/{}/{}ns "
+                "reject={} step={} last_step_resid={}ns overruns={} | timer recovery={} missed={}\n",
+                bt.healthy,
+                bt.epoch,
+                bt.sample_count,
+                bt.rms_residual_ns,
+                bt.bracket_min_ns,
+                bt.bracket_mean_ns,
+                bt.bracket_max_ns,
+                bt.reject_count,
+                bt.step_count,
+                bt.last_step_residual_ns,
+                bt.regression_overruns,
+                timer.recovery_count(),
+                timer.missed_cycles());
         }
     }
 

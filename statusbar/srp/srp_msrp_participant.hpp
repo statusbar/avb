@@ -103,6 +103,18 @@ struct ListenerRecord
         return registrar_sm.current_state() == registrar_sm::Def::State::In;
     }
 
+    /// A registration is valid while the registrar is In OR Lv (Leaving): per
+    /// IEEE 802.1Q 10.7.7 the attribute stays registered through the LeaveTimer
+    /// window, so a routine periodic LeaveAll refresh (In -> Lv -> In, every
+    /// ~10-15 s) must NOT be seen as a deregistration. Only Mt (LeaveTimer
+    /// expired with no re-Join) means the peer truly left. Gating reservations
+    /// (e.g. talker transmit) on In-only makes them flap on every LeaveAll.
+    [[nodiscard]] auto registrar_is_registered() const noexcept -> bool
+    {
+        auto const s = registrar_sm.current_state();
+        return s == registrar_sm::Def::State::In || s == registrar_sm::Def::State::Lv;
+    }
+
     [[nodiscard]] auto is_dead() const noexcept -> bool
     {
         return applicant_sm.current_state() == applicant_sm::Def::State::Vo &&
@@ -222,7 +234,7 @@ class MsrpParticipantT
 {
   public:
     using SubscriptionId = uint32_t;
-    using SendPduFn = std::function<bool(std::span<uint8_t const>)>;
+    using SendPduFn = statusbar::sg14::inplace_function<bool(std::span<uint8_t const>), 64>;
 
     /// Conservative upper bound on the size of a single outgoing
     /// MSRPDU. The participant allocates one fixed-size buffer of
@@ -324,6 +336,19 @@ class MsrpParticipantT
     /// \endcode
     [[nodiscard]] auto listener_permits_transmit(tsn::StreamId const& stream_id) const noexcept -> bool;
 
+    /// Diagnostic breakdown of listener_permits_transmit for one stream id: the
+    /// exact reason the talker gate is open or closed, for logging the
+    /// listener-ready flap. `permits` equals listener_permits_transmit().
+    struct ListenerPermitDebug
+    {
+        bool has_record{false};
+        Operation operation{Operation::Register};
+        bool registrar_in{false};
+        ListenerDeclaration substate{ListenerDeclaration::Ignore};
+        bool permits{false};
+    };
+    [[nodiscard]] auto listener_permit_debug(tsn::StreamId const& stream_id) const noexcept -> ListenerPermitDebug;
+
     /// Look up a locally known Domain by sr_class_id.
     [[nodiscard]] auto find_domain(uint8_t sr_class_id) const noexcept -> DomainFirstValue const*;
 
@@ -362,6 +387,40 @@ class MsrpParticipantT
     void set_pruning_enabled(bool enabled) noexcept { pruning_enabled_ = enabled; }
 
     [[nodiscard]] auto pruning_enabled() const noexcept -> bool { return pruning_enabled_; }
+
+    /// Sticky-Listener workaround. When enabled, REGISTERED (operation==Register)
+    /// Listener attributes are re-declared on every periodic/LeaveAll pass, not
+    /// just our own declarations. This re-introduces, for the Listener type ONLY,
+    /// the "sticky, never released" echo that cfea332 removed: an end station that
+    /// is a TALKER holds a registered Listener record for its own stream (the
+    /// downstream listener's Listener-Ready, propagated back to us by the bridge),
+    /// and echoing it keeps the bridge's forwarding path to that listener warm.
+    /// We deliberately do NOT extend this to the Talker type: re-declaring a
+    /// registered TalkerAdvertise makes the bridge see a SECOND source for the
+    /// StreamID and reject it with TalkerFailed code 19 (the cfea332 bug). A
+    /// Listener has no such two-source conflict, so this echo is safe.
+    /// Observed need: jdk01E -> the DSP processor (via a Luminex switch) stops being
+    /// forwarded after cfea332 silenced the Listener echo. Default OFF (strict
+    /// end-station behaviour); enable per host where a bridge needs the refresh.
+    void set_redeclare_registered_listeners(bool enabled) noexcept { redeclare_registered_listeners_ = enabled; }
+
+    [[nodiscard]] auto redeclare_registered_listeners() const noexcept -> bool { return redeclare_registered_listeners_; }
+
+    /// Suppress-LeaveAll workaround. When enabled, the periodic LeaveAll timer
+    /// NEVER transmits a LeaveAll on the wire and never drives our applicants
+    /// into the leave/re-declare path: we just keep re-asserting our attributes
+    /// via the periodic (1 Hz JoinIn/JoinMt) timer and never RELEASE them. This
+    /// reproduces the pre-006bf73 era (when a hardcoded leave_all_flag=false meant
+    /// we never sent a LeaveAll) that fed a the DSP processor through a Luminex switch
+    /// reliably. Hypothesis: the Luminex installs stream forwarding on a listener
+    /// join but drops it when our LeaveAll drives the registration through Leaving,
+    /// and only re-installs on a fresh join -- so a periodic LeaveAll makes E->the DSP processor
+    /// forwarding blink. We still RECEIVE and honour peer LeaveAlls; we just don't
+    /// originate them. Default OFF (spec-compliant periodic LeaveAll); enable per
+    /// host that talks to a bridge with this behaviour.
+    void set_suppress_leaveall(bool enabled) noexcept { suppress_leaveall_ = enabled; }
+
+    [[nodiscard]] auto suppress_leaveall() const noexcept -> bool { return suppress_leaveall_; }
 
     /// Add a tsn::StreamId to the interesting set. Has no effect if the
     /// pruning filter is disabled. Returns failure if table is full.
@@ -427,7 +486,23 @@ class MsrpParticipantT
     // insert-sorted for add(). Capacity fixed at compile time.
     //
     bool pruning_enabled_{false};
+    // Sticky-Listener workaround (see set_redeclare_registered_listeners). When
+    // true, registered Listener attributes are re-declared like our own.
+    bool redeclare_registered_listeners_{false};
+    // Suppress-LeaveAll workaround (see set_suppress_leaveall). When true, we
+    // never originate a LeaveAll; we only re-assert via the periodic timer.
+    bool suppress_leaveall_{false};
     statusbar::sg14::inplace_vector<uint64_t, Limits::max_interesting_stream_ids> interesting_stream_ids_;
+
+    // Set by decode_vector_attribute when a received PDU carries a LeaveAll;
+    // receive_pdu uses it to re-declare our attributes IMMEDIATELY rather than
+    // waiting the full JoinTime (~100 ms). A bridge that issued the LeaveAll
+    // declares our just-leaving registration as Mt toward downstream listeners on
+    // its own join timer (~100 ms); a re-declare that lands just after that
+    // window lets the listener (a the DSP processor via a Luminex switch) see our
+    // talker blink out and drop its reservation. Re-declaring synchronously beats
+    // that window.
+    bool rx_leaveall_seen_{false};
 
     // ============================================================
     // Internal helpers
@@ -485,6 +560,7 @@ class MsrpParticipantT
         applicant_sm::Def::Event applicant_event,
         registrar_sm::Def::Event registrar_event,
         ListenerDeclaration decl,
+        AttributeEvent wire_event,
         TimePoint now);
 
     void handle_domain_rx(
@@ -498,7 +574,7 @@ class MsrpParticipantT
     //
     // PDU encode
     //
-    void build_and_send_pdu(TimePoint now);
+    void build_and_send_pdu(TimePoint now, bool leave_all = false);
 
     template <typename RecordVec>
     auto append_attribute_message(

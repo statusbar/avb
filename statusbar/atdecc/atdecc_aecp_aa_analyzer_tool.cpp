@@ -99,7 +99,9 @@ static void print_address_tracker(char const* mode, AddressTracker const& trk)
 static void print_conversation_report(ConversationStats const& conv, uint64_t capture_start_us)
 {
     std::println(
-        "\n--- AA Conversation: controller={} -> target={} ---\n", ieee::to_string(conv.controller), ieee::to_string(conv.target));
+        "\n--- AA Conversation: controller={} -> target={} ---\n",
+        ieee::to_string(conv.controller).view(),
+        ieee::to_string(conv.target).view());
 
     std::println("  Summary:");
     std::println("    Commands sent:       {}", conv.commands_sent);
@@ -180,8 +182,8 @@ static void print_upload_session_report(UploadSession const& session, size_t ind
     std::println(
         "\n--- Upload Session #{}: controller={} -> target={}, descriptor_index={} ---\n",
         index + 1,
-        ieee::to_string(session.controller),
-        ieee::to_string(session.target),
+        ieee::to_string(session.controller).view(),
+        ieee::to_string(session.target).view(),
         session.descriptor_index);
 
     std::println("  Phase:               {}", upload_phase_name(session.phase));

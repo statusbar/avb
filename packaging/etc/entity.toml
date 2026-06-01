@@ -1,0 +1,54 @@
+# /etc/statusbar-avb/entity.toml
+#
+# Configuration for the `statusbar-avb-entity` systemd service.
+#
+# The service is DISABLED by default on install. To run the entity at boot:
+#
+#     sudo nano /etc/statusbar-avb/entity.toml      # customize for this site
+#     sudo systemctl enable --now statusbar-avb-entity
+#
+# Every option below maps 1:1 to a `statusbar-avb-audio-io` command-line flag
+# (--interface, --tone.freq_hz, ...): the CLI and this file share one config
+# system. Run `statusbar-avb-audio-io --help` for the full list. You can still
+# run the binary by hand for debugging, with or without --config-load.
+#
+# This shipped file contains only GENERIC defaults. Anything site-specific
+# (remote tunnel peers, rendezvous keys, CPU pinning, custom descriptors) is
+# left commented out below -- fill it in per deployment.
+
+# Network interface the entity binds to.
+interface = "eth0"
+
+# AEM descriptor (entity model) blob. The package ships the canonical one here.
+descriptor-storage = "/usr/local/share/statusbar-avb/entity_audio.bin"
+
+# Built-in test-tone frequency (Hz), emitted when no other audio source is
+# connected.
+[tone]
+freq_hz = 440.0
+
+# Talker gate: only put a stream on the wire once a downstream listener is
+# MSRP-ready / ACMP-connected. Set false to stream unconditionally from
+# link-up (legacy / debugging).
+[gate]
+talker_on_listener = true
+
+# ----------------------------------------------------------------------------
+# Optional, SITE-SPECIFIC settings -- intentionally not shipped. Uncomment and
+# fill in per deployment.
+# ----------------------------------------------------------------------------
+
+# Pin the realtime media-timer thread to an isolated CPU core (e.g. with
+# isolcpus=2-3 on the kernel cmdline):
+# [ptp]
+# cpu = 3
+
+# Inter-site UDP audio tunnel. Peer addresses, rendezvous server and keys are
+# SITE-SPECIFIC and are NOT shipped in this file -- add them per deployment:
+# [udptun]
+# enable = true
+# peer = "203.0.113.10:5004"
+# rendezvous = "reflex.statusbar.com:3478"
+# rendezvous_key = "CHANGE-ME"
+# rendezvous_session_id = "CHANGE-ME"
+# rendezvous_role = "ingest"

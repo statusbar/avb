@@ -93,6 +93,51 @@ TEST(nanoavb_srp_mvrp, multiple_vlans)
     EXPECT_EQ(handler.get_vlan_state(200), VlanState::Pending);
 }
 
+TEST(nanoavb_srp_mvrp, register_vlan_table_full)
+{
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}};
+    auto const now = TimePoint{std::chrono::seconds{1}};
+
+    // Fill every slot with a live registration (default capacity = 16).
+    for (uint16_t vid = 1; vid <= 16; ++vid) {
+        EXPECT_TRUE(handler.register_vlan(vid, now).has_value());
+    }
+    EXPECT_EQ(handler.vlans().size(), 16);
+
+    // A 17th distinct VLAN while all slots are live is rejected; no live
+    // VLAN loses its slot to the newcomer and the table is unchanged.
+    auto const result = handler.register_vlan(17, now);
+    EXPECT_FALSE(result.has_value());
+    EXPECT_TRUE(result.error() == make_error_code(NanoAvbError::VlanTableFull));
+    EXPECT_EQ(handler.vlans().size(), 16);
+    EXPECT_EQ(handler.get_vlan_state(17), VlanState::Unregistered);
+    EXPECT_EQ(handler.get_vlan_state(1), VlanState::Pending);
+}
+
+TEST(nanoavb_srp_mvrp, register_vlan_reclaims_withdrawn_slot)
+{
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}};
+    auto const now = TimePoint{std::chrono::seconds{1}};
+
+    for (uint16_t vid = 1; vid <= 16; ++vid) {
+        EXPECT_TRUE(handler.register_vlan(vid, now).has_value());
+    }
+
+    // Withdraw one VLAN: the slot becomes a reclaimable tombstone (withdraw
+    // marks Unregistered, it does not erase), so size stays at capacity.
+    EXPECT_TRUE(handler.withdraw_vlan(8, now).has_value());
+    EXPECT_EQ(handler.get_vlan_state(8), VlanState::Unregistered);
+    EXPECT_EQ(handler.vlans().size(), 16);
+
+    // A new VLAN reclaims the withdrawn slot instead of being rejected.
+    EXPECT_TRUE(handler.register_vlan(17, now).has_value());
+    EXPECT_EQ(handler.get_vlan_state(17), VlanState::Pending);
+    EXPECT_EQ(handler.vlans().size(), 16);
+    // The withdrawn VLAN is gone; a live VLAN is untouched.
+    EXPECT_EQ(handler.get_vlan_state(8), VlanState::Unregistered);
+    EXPECT_EQ(handler.get_vlan_state(1), VlanState::Pending);
+}
+
 TEST(nanoavb_srp_mvrp, receive_short_packet)
 {
     MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}};
@@ -198,6 +243,77 @@ TEST(nanoavb_srp_msrp, talker_withdraw_nonexistent)
     auto result = handler.talker_withdraw(stream_id, TimePoint{std::chrono::seconds{1}});
     EXPECT_FALSE(result.has_value());
     EXPECT_TRUE(result.error() == make_error_code(NanoAvbError::InvalidStreamIndex));
+}
+
+// End-to-end: a talker handler advertising a stream is told (via the
+// on_talker_listener hook) when a remote listener becomes ready for it. Two
+// handlers exchange MSRPDUs through their send_packet callbacks.
+TEST(nanoavb_srp_msrp, on_talker_listener_fires_when_listener_ready)
+{
+    using statusbar::srp::msrp::MsrpConfig;
+
+    TimePoint now{std::chrono::seconds{1}};
+
+    std::vector<std::vector<uint8_t>> talker_out;
+    std::vector<std::vector<uint8_t>> listener_out;
+
+    MsrpHandler<> talker{MsrpConfig{}, MsrpCallbacks{.send_packet = [&talker_out](std::span<uint8_t const> p) {
+                             talker_out.emplace_back(p.begin(), p.end());
+                             return true;
+                         }}};
+    MsrpHandler<> listener{MsrpConfig{}, MsrpCallbacks{.send_packet = [&listener_out](std::span<uint8_t const> p) {
+                               listener_out.emplace_back(p.begin(), p.end());
+                               return true;
+                           }}};
+
+    statusbar::tsn::StreamId sid;
+    sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    sid.set_unique_id(7);
+
+    statusbar::tsn::StreamId other;
+    other.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    other.set_unique_id(99);
+
+    bool fired_for_sid = false;
+    bool ready_for_sid = false;
+    bool fired_for_other = false;
+    talker.set_on_talker_listener([&](StreamId const& s, bool ready) {
+        if (s == sid) {
+            fired_for_sid = true;
+            ready_for_sid = ready;
+        } else if (s == other) {
+            fired_for_other = true;
+        }
+    });
+
+    TalkerStreamSrpInfo info;
+    info.stream_id = sid;
+    info.max_frame_size = 416;
+    info.max_interval_frames = 1;
+    (void)talker.talker_advertise(info, now);
+    (void)listener.listener_ready(sid, now);
+    // A listener for a stream the talker does NOT advertise must be filtered out.
+    (void)listener.listener_ready(other, now);
+
+    auto pump = [&now](std::vector<std::vector<uint8_t>>& out, MsrpHandler<>& dst) {
+        for (auto const& p : out) {
+            dst.receive_packet(p, now);
+        }
+        out.clear();
+    };
+
+    for (int round = 0; round < 12; ++round) {
+        now += std::chrono::milliseconds{120};
+        talker.tick(now);
+        listener.tick(now);
+        pump(talker_out, listener);
+        pump(listener_out, talker);
+    }
+
+    EXPECT_TRUE(fired_for_sid);
+    EXPECT_TRUE(ready_for_sid);
+    // 'other' is not one of the talker's advertised streams -> never forwarded.
+    EXPECT_FALSE(fired_for_other);
 }
 
 //

@@ -21,6 +21,14 @@ DEB_OUTPUT="${DEB_OUTPUT:-$EXPORT_ROOT/deb-output}"
 TARGET_ARCH="${TARGET_PLATFORM##*/}"
 IMAGE="localhost/statusbar-deb-builder:$DEBIAN_VERSION-$TARGET_ARCH"
 
+# Debian package revision: a monotonic build id appended as the package's Debian
+# revision (version becomes 1.2.0-<rev>), so every rebuild produces a
+# strictly-newer package and `apt-get install` always upgrades it instead of
+# skipping a same-version reinstall. The upstream version (1.2.0) is bumped only
+# on real releases. Overridable; the umbrella container-build.sh sets one shared
+# value per run so a multi-package build gets a consistent revision.
+DEB_REVISION="${STATUSBAR_DEB_REVISION:-$(date -u +%Y%m%d%H%M%S)}"
+
 # Cross-arch builds (e.g. linux/arm64 on an x86_64 host) need qemu-user-static
 # registered with the kernel's binfmt_misc. Detect and explain instead of
 # letting the container die with a cryptic "exec format error".
@@ -99,6 +107,7 @@ echo "=== building statusbar-$PKG .deb packages (Debian $DEBIAN_VERSION) ==="
   -v "statusbar-deb-ccache-$TARGET_ARCH:/root/.ccache" \
   -e "DEPS=$DEPS" \
   -e "PKG=$PKG" \
+  -e "DEB_REVISION=$DEB_REVISION" \
   "$IMAGE" bash -euo pipefail -c '
     debs=()
     for d in $DEPS; do
@@ -111,10 +120,11 @@ echo "=== building statusbar-$PKG .deb packages (Debian $DEBIAN_VERSION) ==="
     cmake -Wno-dev -S /src -B /build -G Ninja \
       --toolchain /src/cmake/toolchain-clang.cmake \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DENABLE_FUZZING=OFF \
       -DCMAKE_C_COMPILER_LAUNCHER=ccache \
       -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
     cmake --build /build
-    ( cd /build && cpack -G DEB )
+    ( cd /build && cpack -G DEB -D CPACK_DEBIAN_PACKAGE_RELEASE="$DEB_REVISION" )
     rm -f /debs/statusbar-"$PKG"_*.deb /debs/statusbar-"$PKG"-dev_*.deb
     cp -v /build/*.deb /debs/
   '

@@ -56,13 +56,19 @@ void Am824StreamOutputContext::build_packet_header(Am824Pdu& pdu, uint8_t sample
         int64_t const dbc_offset = static_cast<int64_t>(ts_dbc) - static_cast<int64_t>(running_dbc);
         uint64_t const pts = base_pts + static_cast<uint64_t>(dbc_offset * static_cast<int64_t>(config.sample_period_ns));
 
-        // Store lower 32 bits as the AVTP timestamp
+        // Store lower 32 bits as the AVTP timestamp, and the same presentation
+        // time as the CIP SYT (61883 cycle-time). Without a valid (non-0xFFFF)
+        // SYT, receivers treat the packet as carrying no timing and cannot
+        // recover the media clock -> periodic sample slip / audible click.
         pdu.set_tv(true);
         pdu.set_avtp_timestamp(static_cast<uint32_t>(pts & 0xFFFF'FFFFU));
+        pdu.set_syt_timestamp(am824_presentation_to_syt(pts));
         ++timestamp_inserts;
     } else {
+        // No syt_interval boundary in this packet: no timestamp this packet.
         pdu.set_tv(false);
         pdu.set_avtp_timestamp(0);
+        pdu.set_syt_timestamp(0xFFFFU);
     }
 
     // Advance state

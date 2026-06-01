@@ -551,6 +551,23 @@ using AcmpCommandResponse = AcmpDu2021;
 /// @param pdu Original format ACMPDU to populate
 auto acmp_command_response_to_pdu(AcmpCommandResponse const& resp, AcmpDu& pdu) noexcept -> void;
 
+/// Serialize an ACMP command/response for Layer-2 transmission, pre-2021 form.
+///
+/// IEEE 1722.1-2021 grew the ACMPDU to 84/96 bytes (trailing ip_flags/ports/IP
+/// fields) and intends that larger PDU to be acceptable even on L2 (the standard's
+/// forward-compatibility rule: receivers must tolerate a control_data_length >= the
+/// version they know). In practice many shipping devices (e.g. third-party devices) never
+/// implemented that and silently drop any ACMPDU longer than the 1722.1-2013
+/// 56-byte / control_data_length=44 form. For interoperability we therefore emit
+/// the pre-2021 short form on L2. The extended form is only required (and only
+/// emitted) when the UDP flag is set, i.e. UDP-encapsulated ACMP.
+///
+/// @param resp ACMP command/response to serialize
+/// @param buffer Output buffer; must be at least AcmpDu2021::LENGTH (96) bytes
+/// @return the prefix of @p buffer to place on the wire
+[[nodiscard]] auto acmp_serialize_2016(AcmpCommandResponse const& resp, std::span<uint8_t> buffer) noexcept
+    -> std::span<uint8_t const>;
+
 /// ListenerStreamInfo - Per-stream state for ATDECC Listener (Clause 8.2.2.1.2)
 struct ListenerStreamInfo
 {

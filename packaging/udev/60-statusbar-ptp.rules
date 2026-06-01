@@ -1,0 +1,8 @@
+# statusbar-avb: allow non-root read access to PTP hardware clocks (/dev/ptp*).
+#
+# The AVTP talker reads the gPTP-disciplined PHC (opened O_RDONLY) to timestamp
+# stream packets in the gPTP time domain. Without read access it falls back to
+# the local system clock, putting avtp_timestamp in the wrong epoch so every
+# listener flags LATE_TIMESTAMP and the stream never locks. Read-only time access
+# is harmless -- ptp4l / phc2sys retain exclusive write/adjust access.
+SUBSYSTEM=="ptp", KERNEL=="ptp[0-9]*", MODE="0644"

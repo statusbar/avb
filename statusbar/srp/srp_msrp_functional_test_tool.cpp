@@ -503,10 +503,14 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
+#if __cpp_exceptions
     try {
+#endif
         return run(cfg);
+#if __cpp_exceptions
     } catch (std::exception const& e) {
         std::print(stderr, "error: {}\n", e.what());
         return EXIT_FAILURE;
     }
+#endif
 }

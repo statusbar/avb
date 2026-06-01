@@ -3,7 +3,62 @@
 
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 
+#include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
+
+#include <cstring>
+#include <span>
+
 namespace statusbar::nanoavb {
+
+namespace {
+
+/// Rewrite a freshly serialized IEEE 1722.1-2021 descriptor (`out[0..n)`) to
+/// its 1722.1-2013/2016 wire form in place, returning the 2016 length. Only
+/// the descriptor types whose fixed length grew in 2021 are altered; every
+/// other type is returned unchanged. Used when the entity is configured for
+/// `atdecc.version = "2016"` so controllers that reject 2021-length
+/// descriptors (e.g. Hive/Compass) can still enumerate the model.
+[[nodiscard]] auto downgrade_descriptor_to_legacy_2016(uint16_t type, std::span<uint8_t> out, size_t n) -> size_t
+{
+    using namespace atdecc::aem;
+    switch (type) {
+    case DESCRIPTOR_STREAM_INPUT:
+    case DESCRIPTOR_STREAM_OUTPUT: {
+        // 2021 wire: [0..138) header + stream_formats[138..n). 2016 wire:
+        // [0..132) header + formats[132..]. The three 2021-only fields
+        // (redundant_offset / number_of_redundant_streams / timing) sit at
+        // bytes 132..137 -- BEFORE the formats trailer -- so drop them and
+        // slide the trailer down 6 bytes, and rewrite formats_offset
+        // (big-endian, bytes 82..83) from 138 to 132.
+        constexpr size_t L2021 = DescriptorStream::LENGTH;          // 138
+        constexpr size_t L2016 = DescriptorStream::MINIMUM_LENGTH;  // 132
+        constexpr size_t FORMATS_OFFSET_POS = 82;
+        if (n < L2021) {
+            return n;
+        }
+        size_t const trailer = n - L2021;
+        out[FORMATS_OFFSET_POS] = static_cast<uint8_t>((L2016 >> 8) & 0xFFU);
+        out[FORMATS_OFFSET_POS + 1] = static_cast<uint8_t>(L2016 & 0xFFU);
+        if (trailer != 0) {
+            std::memmove(out.data() + L2016, out.data() + L2021, trailer);
+        }
+        return L2016 + trailer;
+    }
+    // Tail-only 2021 additions, no variable trailer -> plain truncate.
+    case DESCRIPTOR_AVB_INTERFACE:
+        return (n >= DescriptorAvbInterface::LENGTH) ? DescriptorAvbInterface::MINIMUM_LENGTH : n;
+    case DESCRIPTOR_AUDIO_CLUSTER:
+        return (n >= DescriptorAudioCluster::LENGTH) ? DescriptorAudioCluster::MINIMUM_LENGTH : n;
+    case DESCRIPTOR_CONTROL_BLOCK:
+        return (n >= DescriptorControlBlock::LENGTH) ? DescriptorControlBlock::MINIMUM_LENGTH : n;
+    case DESCRIPTOR_SIGNAL_TRANSCODER:
+        return (n >= DescriptorSignalTranscoder::LENGTH) ? DescriptorSignalTranscoder::MINIMUM_LENGTH : n;
+    default:
+        return n;
+    }
+}
+
+}  // namespace
 
 auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id) -> bool
 {
@@ -77,7 +132,16 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
             return handle_get_control(header, command_data);
 
         case AEM_COMMAND_GET_COUNTERS:
-            return handle_get_counters(header, command_data);
+            return handle_get_counters(header, command_data, out_buffer);
+
+        case AEM_COMMAND_GET_STREAM_INFO:
+            return handle_get_stream_info(header, command_data, out_buffer);
+
+        case AEM_COMMAND_GET_STREAM_FORMAT:
+            return handle_get_stream_format(header, command_data, out_buffer);
+
+        case AEM_COMMAND_GET_SAMPLING_RATE:
+            return handle_get_sampling_rate(header, command_data, out_buffer);
 
         case AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION:
             return handle_register_unsolicited(header);
@@ -93,51 +157,34 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
 auto AemCommandHandler::handle_read_descriptor(
     AemDu const& /*header*/, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
-    // READ_DESCRIPTOR command format:
-    // Bytes 0-1: Configuration index
-    // Bytes 2-3: Reserved
-    // Bytes 4-5: Descriptor type
-    // Bytes 6-7: Descriptor index
-
-    if (command_data.size() < 8) {
+    // READ_DESCRIPTOR command payload (AemReadDescriptorCommandPayload):
+    //   configuration_index(2) + reserved(2) + descriptor_type(2) + descriptor_index(2)
+    if (command_data.size() < AemReadDescriptorCommandPayload::LENGTH) {
         return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
     }
 
-    // Parse command parameters (network byte order)
-    doublet_t config_index_net;
-    doublet_t descriptor_type_net;
-    doublet_t descriptor_index_net;
-    span_load(config_index_net, command_data.subspan(0));
-    span_load(descriptor_type_net, command_data.subspan(4));
-    span_load(descriptor_index_net, command_data.subspan(6));
+    AemReadDescriptorCommandPayload cmd{};
+    span_load(cmd, command_data);
+    uint16_t const config_index = cmd.configuration_index;   // doublet_t -> host order
+    uint16_t const descriptor_type = cmd.descriptor_type;    // doublet_t -> host order
+    uint16_t const descriptor_index = cmd.descriptor_index;  // doublet_t -> host order
 
-    uint16_t const config_index = config_index_net;          // Implicit conversion to host order
-    uint16_t const descriptor_type = descriptor_type_net;    // Implicit conversion to host order
-    uint16_t const descriptor_index = descriptor_index_net;  // Implicit conversion to host order
+    // Response payload (IEEE 1722.1 Clause 7.4.5.2): a fixed
+    // AemReadDescriptorResponsePayload header (configuration_index + reserved),
+    // then the descriptor. The descriptor's OWN first fields are
+    // descriptor_type + descriptor_index, which get_descriptor_for_wire() emits
+    // — so we must NOT write type/index here as well. Doing so would shift the
+    // descriptor body 4 bytes (entity_id at offset 12 instead of 8,
+    // configurations_count reading as 0, and so on).
 
-    // Build response data:
-    // Bytes 0-1: Configuration index
-    // Bytes 2-3: Reserved
-    // Bytes 4-5: Descriptor type
-    // Bytes 6-7: Descriptor index
-    // Bytes 8+: Descriptor data
-
-    // Need room for the 8-byte READ_DESCRIPTOR header plus at least a
-    // minimal descriptor payload.
-    if (out_buffer.size() <= 8) {
+    // Need room for the header plus at least a minimal descriptor payload.
+    if (out_buffer.size() <= AemReadDescriptorResponsePayload::LENGTH) {
         return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
     }
 
-    // Echo back the command parameters using network byte order types.
-    doublet_t const config_idx_net = config_index;
-    doublet_t const reserved{0};
-    doublet_t const desc_type_net = descriptor_type;
-    doublet_t const desc_idx_net = descriptor_index;
-
-    span_store(out_buffer.subspan(0), config_idx_net);
-    span_store(out_buffer.subspan(2), reserved);
-    span_store(out_buffer.subspan(4), desc_type_net);
-    span_store(out_buffer.subspan(6), desc_idx_net);
+    // Echo back the configuration index; reserved stays zero.
+    AemReadDescriptorResponsePayload const resp{.configuration_index = config_index};
+    span_store(out_buffer, resp);
 
     // Dispatch to a locally-constructed AemEntityModel, which routes by
     // descriptor_type through a constexpr table to the appropriate
@@ -149,33 +196,183 @@ auto AemCommandHandler::handle_read_descriptor(
     AemEntityModel const aem_model{*handler_};
     DescriptorRef const ref{
         .configuration_index = config_index, .descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
-    auto const bytes_written = aem_model.get_descriptor_for_wire(ref, out_buffer.subspan(8));
+    auto const desc_out = out_buffer.subspan(AemReadDescriptorResponsePayload::LENGTH);
+    auto bytes_written = aem_model.get_descriptor_for_wire(ref, desc_out);
     if (bytes_written == 0) {
         return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
     }
 
-    return {.status = AEM_STATUS_SUCCESS, .size = 8 + bytes_written};
+    // Optionally downgrade 2021-length descriptors to their 2013/2016 wire
+    // sizes for controllers that reject the 2021 forms (atdecc.version=2016).
+    if (legacy_2016_) {
+        bytes_written = downgrade_descriptor_to_legacy_2016(descriptor_type, desc_out, bytes_written);
+    }
+
+    return {.status = AEM_STATUS_SUCCESS, .size = AemReadDescriptorResponsePayload::LENGTH + bytes_written};
+}
+
+auto AemCommandHandler::handle_get_stream_format(
+    AemDu const& /*header*/, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    using namespace atdecc::aem;
+    if (command_data.size() < AemGetStreamFormatCommandPayload::LENGTH) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    AemGetStreamFormatCommandPayload cmd{};
+    span_load(cmd, command_data);
+    uint16_t const descriptor_type = cmd.descriptor_type;
+    uint16_t const descriptor_index = cmd.descriptor_index;
+    if (descriptor_type != DESCRIPTOR_STREAM_INPUT && descriptor_type != DESCRIPTOR_STREAM_OUTPUT) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    }
+    if (out_buffer.size() < AemStreamFormatPayload::LENGTH) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    }
+    // Read the STREAM descriptor (current configuration) and lift its current_format.
+    std::array<uint8_t, AEM_DESCRIPTOR_SIZE> desc{};
+    AemEntityModel const aem_model{*handler_};
+    DescriptorRef const ref{.configuration_index = 0, .descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
+    auto const n = aem_model.get_descriptor_for_wire(ref, desc);
+    constexpr size_t FORMAT_OFFSET = offsetof(DescriptorStream, current_format);  // 74
+    if (n < FORMAT_OFFSET + 8) {
+        return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
+    }
+    AemStreamFormatPayload resp{};
+    resp.descriptor_type = descriptor_type;
+    resp.descriptor_index = descriptor_index;
+    std::copy_n(desc.data() + FORMAT_OFFSET, resp.stream_format.size(), resp.stream_format.begin());
+    span_store(out_buffer, resp);
+    return {.status = AEM_STATUS_SUCCESS, .size = AemStreamFormatPayload::LENGTH};
+}
+
+auto AemCommandHandler::handle_get_sampling_rate(
+    AemDu const& /*header*/, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    using namespace atdecc::aem;
+    if (command_data.size() < AemGetSamplingRateCommandPayload::LENGTH) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    AemGetSamplingRateCommandPayload cmd{};
+    span_load(cmd, command_data);
+    uint16_t const descriptor_type = cmd.descriptor_type;
+    uint16_t const descriptor_index = cmd.descriptor_index;
+    // GET_SAMPLING_RATE targets AUDIO_UNIT (VIDEO_CLUSTER / SENSOR_CLUSTER not modeled).
+    if (descriptor_type != DESCRIPTOR_AUDIO_UNIT) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    }
+    if (out_buffer.size() < AemSamplingRatePayload::LENGTH) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    }
+    std::array<uint8_t, AEM_DESCRIPTOR_SIZE> desc{};
+    AemEntityModel const aem_model{*handler_};
+    DescriptorRef const ref{.configuration_index = 0, .descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
+    auto const n = aem_model.get_descriptor_for_wire(ref, desc);
+    constexpr size_t SR_OFFSET = offsetof(DescriptorAudioUnit, current_sampling_rate);  // 136
+    if (n < SR_OFFSET + 4) {
+        return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
+    }
+    AemSamplingRatePayload resp{};
+    resp.descriptor_type = descriptor_type;
+    resp.descriptor_index = descriptor_index;
+    // current_sampling_rate is a network-order quadlet in the wire descriptor.
+    resp.sampling_rate = static_cast<uint32_t>(
+        (static_cast<uint32_t>(desc[SR_OFFSET]) << 24) | (static_cast<uint32_t>(desc[SR_OFFSET + 1]) << 16)
+        | (static_cast<uint32_t>(desc[SR_OFFSET + 2]) << 8) | static_cast<uint32_t>(desc[SR_OFFSET + 3]));
+    span_store(out_buffer, resp);
+    return {.status = AEM_STATUS_SUCCESS, .size = AemSamplingRatePayload::LENGTH};
+}
+
+auto AemCommandHandler::handle_get_counters(
+    AemDu const& /*header*/, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    // No counter provider wired => this entity does not implement GET_COUNTERS.
+    // Checked before argument validation so an entity without counters answers
+    // NOT_IMPLEMENTED rather than BAD_ARGUMENTS.
+    if (!callbacks_.get_counters) {
+        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+    }
+    // GET_COUNTERS command payload (AemGetCountersCommandPayload):
+    //   descriptor_type(2) + descriptor_index(2)
+    if (command_data.size() < AemGetCountersCommandPayload::LENGTH) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+
+    AemGetCountersCommandPayload cmd{};
+    span_load(cmd, command_data.first(AemGetCountersCommandPayload::LENGTH));
+    uint16_t const descriptor_type = cmd.descriptor_type;
+    uint16_t const descriptor_index = cmd.descriptor_index;
+
+    uint32_t counters_valid = 0;
+    std::array<uint32_t, 32> counters{};
+    if (!callbacks_.get_counters(descriptor_type, descriptor_index, counters_valid, counters)) {
+        return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
+    }
+
+    // Response (Clause 7.4.42.2): descriptor_type + descriptor_index + counters_valid
+    // (32-bit bitmap) + 32 counter values (4 bytes each).
+    if (out_buffer.size() < sizeof(AemCountersPayload)) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    }
+    AemCountersPayload resp{};
+    resp.descriptor_type = ieee::doublet_t{descriptor_type};
+    resp.descriptor_index = ieee::doublet_t{descriptor_index};
+    resp.counters_valid = ieee::quadlet_t{counters_valid};
+    for (size_t i = 0; i < counters.size(); ++i) {
+        resp.counters[i] = ieee::quadlet_t{counters[i]};
+    }
+    span_store(out_buffer.first(sizeof(AemCountersPayload)), resp);
+    return {.status = AEM_STATUS_SUCCESS, .size = sizeof(AemCountersPayload)};
+}
+
+auto AemCommandHandler::handle_get_stream_info(
+    AemDu const& /*header*/, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    // No stream-info provider wired => this entity does not implement
+    // GET_STREAM_INFO. Checked before argument validation so an entity without
+    // streams answers NOT_IMPLEMENTED rather than BAD_ARGUMENTS.
+    if (!callbacks_.get_stream_info) {
+        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+    }
+    // GET_STREAM_INFO command payload (AemGetStreamInfoCommandPayload):
+    //   descriptor_type(2) + descriptor_index(2)
+    if (command_data.size() < AemGetStreamInfoCommandPayload::LENGTH) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+
+    AemGetStreamInfoCommandPayload cmd{};
+    span_load(cmd, command_data.first(AemGetStreamInfoCommandPayload::LENGTH));
+    uint16_t const descriptor_type = cmd.descriptor_type;
+    uint16_t const descriptor_index = cmd.descriptor_index;
+
+    // Echo descriptor_type/index back; the app fills the rest plus the flag bits.
+    AemStreamInfoPayload resp{};
+    resp.descriptor_type = ieee::doublet_t{descriptor_type};
+    resp.descriptor_index = ieee::doublet_t{descriptor_index};
+    if (!callbacks_.get_stream_info(descriptor_type, descriptor_index, resp)) {
+        return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
+    }
+
+    if (out_buffer.size() < AemStreamInfoPayload::LENGTH) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    }
+    span_store(out_buffer.first(AemStreamInfoPayload::LENGTH), resp);
+    return {.status = AEM_STATUS_SUCCESS, .size = AemStreamInfoPayload::LENGTH};
 }
 
 auto AemCommandHandler::handle_acquire_entity(
     AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
-    // ACQUIRE_ENTITY command format:
-    // Bytes 0-3: Flags (PERSISTENT=0x01, RELEASE=0x80000000)
-    // Bytes 4-11: Owner ID (for query or release)
-    // Bytes 12-13: Descriptor type
-    // Bytes 14-15: Descriptor index
-
-    if (command_data.size() < 16) {
+    // ACQUIRE_ENTITY command payload (AemAcquireEntityPayload):
+    //   flags(4) + owner_entity_id(8) + descriptor_type(2) + descriptor_index(2)
+    if (command_data.size() < AemAcquireEntityPayload::LENGTH) {
         return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
     }
 
-    // Parse flags using network byte order type
-    quadlet_t flags_net;
-    span_load(flags_net, command_data);
-    uint32_t const flags = flags_net;  // Implicit conversion to host order
+    AemAcquireEntityPayload cmd{};
+    span_load(cmd, command_data);
+    uint32_t const flags = cmd.flags;  // host order via wire-type conversion
 
-    bool const release = (flags & 0x80000000) != 0;
+    bool const release = cmd.is_release();
 
     if (release) {
         // Release acquisition
@@ -195,7 +392,7 @@ auto AemCommandHandler::handle_acquire_entity(
     }
 
     // Acquire
-    bool const persistent = (flags & 0x01) != 0;
+    bool const persistent = cmd.is_persistent();
     if (!acquired_) {
         acquired_ = true;
         acquired_persistent_ = persistent;
@@ -240,43 +437,37 @@ auto AemCommandHandler::handle_acquire_entity(
 auto AemCommandHandler::build_acquire_response(AcquireLockResponseParams const& params, std::span<uint8_t> out_buffer)
     -> AemCommandResponse
 {
-    // Flags (network byte order)
-    quadlet_t const flags_net = params.flags;
-    span_store(out_buffer.subspan(0), flags_net);
-
-    // Owner ID (8 bytes)
-    std::copy(params.entity_id.span().begin(), params.entity_id.span().end(), out_buffer.data() + 4);
-
-    // Echo descriptor type and index from command
-    if (params.command_data.size() >= 16) {
-        out_buffer[12] = params.command_data[12];
-        out_buffer[13] = params.command_data[13];
-        out_buffer[14] = params.command_data[14];
-        out_buffer[15] = params.command_data[15];
+    // ACQUIRE_ENTITY response shares the command layout (AemAcquireEntityPayload):
+    //   flags(4) + owner_entity_id(8) + descriptor_type(2) + descriptor_index(2)
+    AemAcquireEntityPayload resp{};
+    resp.flags = params.flags;
+    resp.owner_entity_id = params.entity_id;
+    // Echo descriptor type/index from the command, if present.
+    if (params.command_data.size() >= AemAcquireEntityPayload::LENGTH) {
+        AemAcquireEntityPayload cmd{};
+        span_load(cmd, params.command_data);
+        resp.descriptor_type = cmd.descriptor_type;
+        resp.descriptor_index = cmd.descriptor_index;
     }
+    span_store(out_buffer, resp);
 
-    return {.status = params.status, .size = 16};
+    return {.status = params.status, .size = AemAcquireEntityPayload::LENGTH};
 }
 
 auto AemCommandHandler::handle_lock_entity(
     AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
-    // LOCK_ENTITY command format:
-    // Bytes 0-3: Flags (UNLOCK=0x01)
-    // Bytes 4-11: Locked ID
-    // Bytes 12-13: Descriptor type
-    // Bytes 14-15: Descriptor index
-
-    if (command_data.size() < 16) {
+    // LOCK_ENTITY command payload (AemLockEntityPayload):
+    //   flags(4) + locked_entity_id(8) + descriptor_type(2) + descriptor_index(2)
+    if (command_data.size() < AemLockEntityPayload::LENGTH) {
         return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
     }
 
-    // Parse flags using network byte order type
-    quadlet_t flags_net;
-    span_load(flags_net, command_data);
-    uint32_t const flags = flags_net;  // Implicit conversion to host order
+    AemLockEntityPayload cmd{};
+    span_load(cmd, command_data);
+    uint32_t const flags = cmd.flags;  // host order via wire-type conversion
 
-    bool const unlock = (flags & 0x01) != 0;
+    bool const unlock = cmd.is_unlock();
 
     if (unlock) {
         // Unlock
@@ -320,37 +511,32 @@ auto AemCommandHandler::handle_lock_entity(
 auto AemCommandHandler::build_lock_response(AcquireLockResponseParams const& params, std::span<uint8_t> out_buffer)
     -> AemCommandResponse
 {
-    // Flags (network byte order)
-    quadlet_t const flags_net = params.flags;
-    span_store(out_buffer.subspan(0), flags_net);
-
-    // Locker ID (8 bytes)
-    std::copy(params.entity_id.span().begin(), params.entity_id.span().end(), out_buffer.data() + 4);
-
-    // Echo descriptor type and index from command
-    if (params.command_data.size() >= 16) {
-        out_buffer[12] = params.command_data[12];
-        out_buffer[13] = params.command_data[13];
-        out_buffer[14] = params.command_data[14];
-        out_buffer[15] = params.command_data[15];
+    // LOCK_ENTITY response shares the command layout (AemLockEntityPayload):
+    //   flags(4) + locked_entity_id(8) + descriptor_type(2) + descriptor_index(2)
+    AemLockEntityPayload resp{};
+    resp.flags = params.flags;
+    resp.locked_entity_id = params.entity_id;
+    // Echo descriptor type/index from the command, if present.
+    if (params.command_data.size() >= AemLockEntityPayload::LENGTH) {
+        AemLockEntityPayload cmd{};
+        span_load(cmd, params.command_data);
+        resp.descriptor_type = cmd.descriptor_type;
+        resp.descriptor_index = cmd.descriptor_index;
     }
+    span_store(out_buffer, resp);
 
-    return {.status = params.status, .size = 16};
+    return {.status = params.status, .size = AemLockEntityPayload::LENGTH};
 }
 
 auto AemCommandHandler::handle_get_configuration(AemDu const& /*header*/, std::span<uint8_t> out_buffer) const -> AemCommandResponse
 {
-    // GET_CONFIGURATION response:
-    // Bytes 0-1: Reserved
-    // Bytes 2-3: Configuration index
+    // GET_CONFIGURATION response shares the SET_CONFIGURATION layout
+    // (AemSetConfigurationPayload): reserved(2) + configuration_index(2).
+    AemSetConfigurationPayload resp{};
+    resp.configuration_index = current_configuration_;
+    span_store(out_buffer, resp);
 
-    doublet_t const reserved{0};
-    doublet_t const config_idx_net = current_configuration_;
-
-    span_store(out_buffer.subspan(0), reserved);
-    span_store(out_buffer.subspan(2), config_idx_net);
-
-    return {.status = AEM_STATUS_SUCCESS, .size = 4};
+    return {.status = AEM_STATUS_SUCCESS, .size = AemSetConfigurationPayload::LENGTH};
 }
 
 auto AemCommandHandler::send_response(

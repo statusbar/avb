@@ -148,8 +148,17 @@ class NanoAvbAemController
     /// Disconnect a stream
     auto disconnect_stream(Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid) -> bool;
 
+    /// Send CONNECT_TX_COMMAND directly to the talker (self-heal path)
+    auto connect_tx_stream(Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid) -> bool;
+
+    /// Send DISCONNECT_TX_COMMAND directly to the talker (self-heal path)
+    auto disconnect_tx_stream(Eui64 talker, uint16_t talker_uid, Eui64 listener, uint16_t listener_uid) -> bool;
+
     /// Query listener stream connection state (GET_RX_STATE)
     auto get_rx_state(Eui64 listener, uint16_t listener_uid) -> bool;
+
+    /// Query talker stream connection state (GET_TX_STATE)
+    auto get_tx_state(Eui64 talker, uint16_t talker_uid) -> bool;
 
     // --- Packet Dispatch ---
 

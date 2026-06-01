@@ -64,6 +64,30 @@ struct AemCommandResponse
 //
 using SendAemResponseFn = statusbar::sg14::inplace_function<bool(Eui48 const& dest_mac, std::span<uint8_t const> response), 64>;
 
+/// Fill the IEEE 1722.1 counters block for a descriptor (Clause 7.4.42).
+/// Counters are dynamic runtime state (stream reception health, etc.) so they
+/// come from the application, not the static AEM descriptor model. On a descriptor
+/// that has counters, set @p counters_valid (bit i set => counter i present) and
+/// @p counters[i], and return true; return false for a descriptor with no
+/// counters (the handler then replies NO_SUCH_DESCRIPTOR).
+using GetCountersFn = statusbar::sg14::inplace_function<
+    bool(uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& counters_valid, std::array<uint32_t, 32>& counters),
+    64>;
+
+/// Fill the IEEE 1722.1 GET_STREAM_INFO response (Clause 7.4.16) for a stream
+/// descriptor. The handler pre-fills @p out.descriptor_type / descriptor_index;
+/// the application fills the dynamic stream parameters (stream_id, stream_format,
+/// stream_dest_mac, stream_vlan_id, msrp_accumulated_latency) and sets the
+/// matching `*_VALID` / CONNECTED flag bits, then returns true. Return false for
+/// a descriptor that is not one of this entity's streams (the handler then replies
+/// NO_SUCH_DESCRIPTOR). Optional; if unset, GET_STREAM_INFO replies NOT_IMPLEMENTED.
+///
+/// Milan listeners (e.g. the DSP processor) query GET_STREAM_INFO on a talker's
+/// STREAM_OUTPUT after connecting to verify the stream's format/identity, and
+/// tear the connection down if the talker answers NOT_IMPLEMENTED.
+using GetStreamInfoFn =
+    statusbar::sg14::inplace_function<bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out), 64>;
+
 /// Callbacks for AECP AEM command handling
 struct AemCommandHandlerCallbacks
 {
@@ -72,6 +96,14 @@ struct AemCommandHandlerCallbacks
     /// @param response Complete response packet (AemDu header + command-specific data)
     /// @return true if response was sent successfully
     SendAemResponseFn send_response;
+
+    /// Provide counters for GET_COUNTERS. Optional; if unset, GET_COUNTERS replies
+    /// NOT_IMPLEMENTED.
+    GetCountersFn get_counters;
+
+    /// Provide stream parameters for GET_STREAM_INFO. Optional; if unset,
+    /// GET_STREAM_INFO replies NOT_IMPLEMENTED.
+    GetStreamInfoFn get_stream_info;
 };
 
 /// Parameters for building acquire/lock response packets
@@ -129,9 +161,34 @@ class AemCommandHandler
         : handler_{&handler}
     {}
 
+    // Self-referential: `handler_` may point into `adapter_storage_`, so a
+    // default move/copy would leave `handler_` dangling at the source object
+    // (and the adapter still referencing the source's EntityModel). The type
+    // is constructed in place — as a member of the non-movable
+    // NanoAvbComponents — and never relocated.
+    AemCommandHandler(AemCommandHandler const&) = delete;
+    auto operator=(AemCommandHandler const&) -> AemCommandHandler& = delete;
+    AemCommandHandler(AemCommandHandler&&) = delete;
+    auto operator=(AemCommandHandler&&) -> AemCommandHandler& = delete;
+
     /// Set the callbacks for sending responses
     /// @param callbacks The callback interface for sending AEM responses
     void set_callbacks(AemCommandHandlerCallbacks callbacks) { callbacks_ = std::move(callbacks); }
+
+    /// Set only the GET_COUNTERS provider, without disturbing the others
+    /// (set_callbacks replaces the whole struct, which would clear send_response
+    /// wired by the net layer). The application owns the dynamic counters.
+    void set_get_counters(GetCountersFn fn) { callbacks_.get_counters = std::move(fn); }
+
+    /// Emit descriptors at their IEEE 1722.1-2013/2016 wire sizes in
+    /// READ_DESCRIPTOR responses (truncate the 2021-only tail fields). Set
+    /// for controllers that reject 2021-length descriptors. Default off
+    /// (2021 lengths).
+    void set_legacy_2016(bool enable) noexcept { legacy_2016_ = enable; }
+
+    /// Set only the GET_STREAM_INFO provider, without disturbing the others.
+    /// The application owns the dynamic per-stream parameters.
+    void set_get_stream_info(GetStreamInfoFn fn) { callbacks_.get_stream_info = std::move(fn); }
 
     /// Callback to send CONTROLLER_AVAILABLE command to the current owner.
     /// Set this to enable the CONTROLLER_AVAILABLE handshake on acquire contention.
@@ -228,6 +285,14 @@ class AemCommandHandler
     [[nodiscard]] auto handle_read_descriptor(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
+    /// Handle GET_STREAM_FORMAT — returns the STREAM descriptor's current_format.
+    [[nodiscard]] auto handle_get_stream_format(
+        AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// Handle GET_SAMPLING_RATE — returns the AUDIO_UNIT descriptor's current_sampling_rate.
+    [[nodiscard]] auto handle_get_sampling_rate(
+        AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
     /// Handle ENTITY_AVAILABLE command (no body).
     [[nodiscard]] static auto handle_entity_available(AemDu const& /*header*/) -> AemCommandResponse
     {
@@ -269,12 +334,20 @@ class AemCommandHandler
         return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
     }
 
-    /// Handle GET_COUNTERS command (stub).
-    [[nodiscard]] static auto handle_get_counters(AemDu const& /*header*/, std::span<uint8_t const> /*command_data*/)
-        -> AemCommandResponse
-    {
-        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
-    }
+    /// Handle GET_COUNTERS command (IEEE 1722.1 Clause 7.4.42): read the target
+    /// descriptor's counters from the get_counters callback and emit an
+    /// AemCountersPayload response (descriptor_type/index + counters_valid + 32
+    /// counter values). NOT_IMPLEMENTED if no callback; NO_SUCH_DESCRIPTOR if the
+    /// descriptor has no counters.
+    [[nodiscard]] auto handle_get_counters(
+        AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// Handle GET_STREAM_INFO command (IEEE 1722.1 Clause 7.4.16): read the target
+    /// stream's parameters from the get_stream_info callback and emit an
+    /// AemStreamInfoPayload response. NOT_IMPLEMENTED if no callback;
+    /// NO_SUCH_DESCRIPTOR if the descriptor is not one of this entity's streams.
+    [[nodiscard]] auto handle_get_stream_info(
+        AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
     /// Handle REGISTER_UNSOLICITED_NOTIFICATION command (no body).
     [[nodiscard]] auto handle_register_unsolicited(AemDu const& header) -> AemCommandResponse;
@@ -306,6 +379,9 @@ class AemCommandHandler
     // EntityModelAdapter path entirely.
     std::optional<EntityModelAdapter> adapter_storage_;
     AemEntityHandler* handler_{nullptr};
+
+    // Emit 2013/2016-length descriptors in READ_DESCRIPTOR responses.
+    bool legacy_2016_ = false;
 
     // Acquisition state
     bool acquired_ = false;

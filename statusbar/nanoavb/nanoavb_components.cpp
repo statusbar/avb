@@ -19,6 +19,7 @@
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/tsn/tsn_clock_identity.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -149,13 +150,21 @@ void AtdeccNetHandler::print_status() const
         talker_connections += acmp_talker_.connection_count(i);
     }
 
+    // Count listener connections (streams whose ACMP CONNECT_RX completed)
+    size_t listener_connections = 0;
+    for (size_t i = 0; i < acmp_listener_.max_streams(); ++i) {
+        if (acmp_listener_.is_connected(static_cast<uint16_t>(i))) {
+            ++listener_connections;
+        }
+    }
+
     std::print(
         "Ticks: {:6}  PTP Wakes: {:8}  ADP: {}  ACMP T:{} L:{}\n",
         tick_count_,
         wakes,
         adp_advertiser_.state() == AdpAdvertiserState::Advertising ? "Advertising" : "Stopped    ",
         talker_connections,
-        0);  // Listener connections would need tracking
+        listener_connections);
 }
 
 void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload)
@@ -201,8 +210,23 @@ void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac
             (void)acmp_talker_.receive_command(cmd_resp, sm_now);
 
             // Dispatch to listener for controller commands or talker responses
-            (void)acmp_listener_.receive_controller_command(cmd_resp, sm_now);
+            bool const listener_handled = acmp_listener_.receive_controller_command(cmd_resp, sm_now);
             (void)acmp_listener_.receive_talker_response(cmd_resp, sm_now);
+
+            // Diagnostic: trace listener-directed commands (CONNECT_RX=6,
+            // DISCONNECT_RX=8, GET_RX_STATE=10) so a silent listener can be
+            // distinguished from a misaddressed/unhandled one. These are rare
+            // (only on a controller connect/probe), so the log is not hot.
+            if (auto const mt = cmd_resp.message_type(); mt == 6 || mt == 8 || mt == 10) {
+                std::print(
+                    stderr,
+                    "[acmp-rx] mt={} target_listener={} my_listener={} handled={} state={}\n",
+                    mt,
+                    ieee::to_string(cmd_resp.listener_entity_id).view(),
+                    ieee::to_string(acmp_listener_.entity_id()).view(),
+                    listener_handled ? 1 : 0,
+                    static_cast<int>(acmp_listener_.current_state()));
+            }
             break;
         }
 
@@ -220,10 +244,33 @@ void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac
 }
 
 //
+// NanoAvbComponents constructor
+//
+
+// Wire each handler against the *member* `entity_model`. Member init runs in
+// declaration order (entity_model first), so the references the handlers take
+// point at the final, stable member — valid for the object's whole lifetime
+// because NanoAvbComponents is non-movable. ACMP gets the entity id by value.
+NanoAvbComponents::NanoAvbComponents(
+    EntityModel model,
+    AdpAdvertiserConfig const adp_config,
+    size_t const talker_max_streams,
+    size_t const talker_max_listeners,
+    size_t const listener_max_streams)
+    : entity_model{std::move(model)}
+    , aem_handler{entity_model}
+    , adp_advertiser{entity_model.get_entity(), AdpAdvertiserCallbacks{}, adp_config}
+    , acmp_talker{entity_model.get_entity().entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
+    , acmp_listener{entity_model.get_entity().entity_id, AcmpListenerCallbacks{}, listener_max_streams}
+    , mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{}}
+    , msrp_handler{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{}}
+{}
+
+//
 // NanoAvbComponentsBuilder implementation
 //
 
-auto NanoAvbComponentsBuilder::build() -> StatusValue<NanoAvbComponents>
+auto NanoAvbComponentsBuilder::build() -> StatusValue<std::unique_ptr<NanoAvbComponents>>
 {
     // Validate required components
     if (!has_entity_model_) {
@@ -235,35 +282,16 @@ auto NanoAvbComponentsBuilder::build() -> StatusValue<NanoAvbComponents>
         return failure(make_error_code(NanoAvbError::InvalidVlanId));
     }
 
-    // Get entity ID from model for ACMP
-    auto const& entity = entity_model_.get_entity();
-    auto const entity_id = entity.entity_id;
+    // Construct in place on the heap (non-movable type); the constructor wires
+    // all internal cross-references against the owned entity model.
+    auto components = std::make_unique<NanoAvbComponents>(
+        std::move(entity_model_), adp_config_, talker_max_streams_, talker_max_listeners_, listener_max_streams_);
 
-    // Create AEM command handler
-    AemCommandHandler aem_handler{entity_model_};
+    // Post-construction setup that needs builder-supplied values.
+    (void)components->mvrp_handler.register_vlan(default_vlan_id_, sm::Clock::now());
+    components->msrp_handler.set_domain(sr_domain_);
 
-    // Create ADP advertiser with empty callbacks (wired up later)
-    NanoAvbAdpAdvertiser adp_advertiser{entity_model_.get_entity(), AdpAdvertiserCallbacks{}, adp_config_};
-
-    // Create ACMP handlers
-    NanoAvbAcmpTalker acmp_talker{entity_id, AcmpTalkerCallbacks{}, talker_max_streams_, talker_max_listeners_};
-    NanoAvbAcmpListener acmp_listener{entity_id, AcmpListenerCallbacks{}, listener_max_streams_};
-
-    // Create SRP handlers
-    MvrpHandler mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{}};
-    (void)mvrp_handler.register_vlan(default_vlan_id_, sm::Clock::now());
-
-    MsrpHandler<> msrp_handler{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{}};
-    msrp_handler.set_domain(sr_domain_);
-
-    return NanoAvbComponents{
-        .entity_model = std::move(entity_model_),
-        .aem_handler = std::move(aem_handler),
-        .adp_advertiser = std::move(adp_advertiser),
-        .acmp_talker = std::move(acmp_talker),
-        .acmp_listener = std::move(acmp_listener),
-        .mvrp_handler = std::move(mvrp_handler),
-        .msrp_handler = std::move(msrp_handler)};
+    return success(std::move(components));
 }
 
 //
@@ -345,17 +373,21 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
         return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, as_bytes(adpdu)).has_value();
     }});
 
-    // ACMP Talker: send responses to multicast (using 2021 format for backwards compatibility)
+    // ACMP Talker: send responses to multicast. On L2 these must be the 56-byte
+    // (control_data_length=44) short form -- real talkers/listeners (third-party devices)
+    // silently drop the oversized 96-byte extended PDU. acmp_serialize_2016
+    // emits the extended form only when the UDP flag is set.
     components.acmp_talker.set_callbacks(
         AcmpTalkerCallbacks{.tx_response = [&handlers](atdecc::AcmpCommandResponse const& resp) -> bool {
             auto& atdecc = handlers.atdecc_handler();
             if (!atdecc.valid()) {
                 return false;
             }
-            return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, as_bytes(resp)).has_value();
+            std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
+            return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(resp, buf)).has_value();
         }});
 
-    // ACMP Listener: send commands to multicast, responses to multicast (using 2021 format)
+    // ACMP Listener: send commands + responses to multicast, L2 short form (see above).
     components.acmp_listener.set_callbacks(
         AcmpListenerCallbacks{
             .tx_command = [&handlers](atdecc::AcmpCommandResponse const& cmd) -> bool {
@@ -363,14 +395,16 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
                 if (!atdecc.valid()) {
                     return false;
                 }
-                return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, as_bytes(cmd)).has_value();
+                std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
+                return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(cmd, buf)).has_value();
             },
             .tx_response = [&handlers](atdecc::AcmpCommandResponse const& resp) -> bool {
                 auto& atdecc = handlers.atdecc_handler();
                 if (!atdecc.valid()) {
                     return false;
                 }
-                return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, as_bytes(resp)).has_value();
+                std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
+                return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(resp, buf)).has_value();
             }});
 
     // AECP AEM: send responses unicast to controller (unlike ADP/ACMP which use multicast)

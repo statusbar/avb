@@ -96,6 +96,44 @@ TEST(nanoavb_controller, connect_stream_sends_acmp)
     EXPECT_EQ(controller.acmp_inflight_count(), 1U);
 }
 
+// Regression: the controller MUST emit ACMP commands in the pre-2021 56-byte
+// (control_data_length=44) "2016" short form on L2. Per IEEE 1722.1 a receiver
+// must accept the 96-byte 2021 extended form and ignore the extra bytes, but
+// several shipping devices (e.g. the DSP processor) silently DROP the oversized PDU -- so a
+// controller that emits the 2021 form on L2 silently fails to connect them. The
+// bug was tx_command serializing the whole struct via make_const_span (84-byte
+// cdl) instead of acmp_serialize_2016 (the L2 short form, matching the entity
+// talker/listener TX).
+TEST(nanoavb_controller, connect_command_is_2016_short_form)
+{
+    std::vector<std::vector<uint8_t>> sent;
+    AemControllerEntityCallbacks callbacks;
+    callbacks.send_atdecc_multicast = [&](std::span<uint8_t const> packet) {
+        sent.emplace_back(packet.begin(), packet.end());
+        return true;
+    };
+
+    NanoAvbAemController controller{CONTROLLER_ID, callbacks};
+    controller.start();
+
+    Eui64 const talker{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x10};
+    Eui64 const listener{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x20};
+    EXPECT_TRUE(controller.connect_stream(talker, 0, listener, 0));
+
+    EXPECT_EQ(sent.size(), 1U);
+    if (!sent.empty()) {
+        auto const& pkt = sent.front();
+        // 56-byte 2016 short form on the wire -- NOT the 96-byte 2021 extended form.
+        EXPECT_EQ(pkt.size(), AcmpDu::LENGTH);
+        // control_data_length == 44 (2016), not 84 (2021). Byte 2 low 3 bits + byte 3.
+        if (pkt.size() >= 4) {
+            uint16_t const cdl = static_cast<uint16_t>(((pkt[2] & 0x07) << 8) | pkt[3]);
+            EXPECT_EQ(cdl, AcmpDu::DATA_LENGTH);
+            EXPECT_EQ(pkt[1] & 0x0F, ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+        }
+    }
+}
+
 TEST(nanoavb_controller, send_aem_needs_discovered_mac)
 {
     std::vector<std::vector<uint8_t>> unicast_sent;

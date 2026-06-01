@@ -12,6 +12,7 @@
 
 #include "statusbar/ieee/ieee.hpp"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <variant>
@@ -30,15 +31,16 @@ struct StreamRequest
     uint16_t talker_unique_id{0};
     ieee::Eui64 listener_entity_id{};
     uint16_t listener_unique_id{0};
-    uint16_t desc_type{0};      ///< Descriptor type for AEM commands
-    uint16_t desc_index{0};     ///< Descriptor index for AEM commands
-    uint64_t stream_format{0};  ///< Stream format for SET_STREAM_FORMAT
+    uint16_t desc_type{0};           ///< Descriptor type for AEM commands
+    uint16_t desc_index{0};          ///< Descriptor index for AEM commands
+    uint64_t stream_format{0};       ///< Stream format for SET_STREAM_FORMAT
+    uint16_t clock_source_index{0};  ///< Clock source index for SET_CLOCK_SOURCE
 };
 
 /// Kind of controller action — every command a driver can issue.
 enum class ControllerActionKind : uint8_t
 {
-    DiscoverAll,            ///< Send broadcast ENTITY_DISCOVER + refresh RX state queries
+    DiscoverAll,            ///< Send broadcast ENTITY_DISCOVER (+ RX-state probe only if auto-probe enabled)
     ConnectStream,          ///< ACMP CONNECT_TX_COMMAND
     DisconnectStream,       ///< ACMP DISCONNECT_TX_COMMAND
     ReadEntityDescriptors,  ///< Read all descriptors for entity in request.talker_entity_id
@@ -46,6 +48,11 @@ enum class ControllerActionKind : uint8_t
     StartStreaming,         ///< Start streaming on stream (desc_type + desc_index)
     StopStreaming,          ///< Stop streaming on stream (desc_type + desc_index)
     SetStreamFormat,        ///< Set stream format (desc_type + desc_index + stream_format)
+    SetClockSource,         ///< AEM SET_CLOCK_SOURCE (target=talker_entity_id, desc_index=clock_domain, clock_source_index)
+    GetClockSource,         ///< AEM GET_CLOCK_SOURCE (target=talker_entity_id, desc_index=clock_domain)
+    ConnectTxStream,        ///< ACMP CONNECT_TX_COMMAND (direct to talker; self-heal)
+    DisconnectTxStream,     ///< ACMP DISCONNECT_TX_COMMAND (direct to talker; self-heal)
+    GetCounters,            ///< AEM GET_COUNTERS (target=talker_entity_id, desc_type + desc_index)
 };
 
 /// An action the driver wants the controller facade to perform.
@@ -145,7 +152,58 @@ struct StatusChangedEvent
     std::string status;
 };
 
+/// Emitted for every ACMP GET_RX_STATE_RESPONSE received (whether or not the
+/// listener sink is connected), so a diagnostic caller can distinguish "entity
+/// answered" from "timed out" — the exact signal macOS's avbdiagnose reports as
+/// kIOReturnTimeout when our listener fails to reply.
+struct RxStateEvent
+{
+    ieee::Eui64 listener_entity_id{};
+    uint16_t listener_unique_id{0};
+    uint8_t status{0};  // ACMP_STATUS_*
+    bool connected{false};
+    ieee::Eui64 talker_entity_id{};
+    uint16_t talker_unique_id{0};
+};
+
+/// Emitted for every AEM GET_COUNTERS_RESPONSE received, carrying the raw
+/// counters_valid bitmap and 32 counter values so a supervise/diagnostic
+/// caller can sample a specific counter (e.g. STREAM_INPUT FRAMES_RX or
+/// STREAM_OUTPUT FRAMES_TX) across two passes to detect a stalled stream.
+struct CountersReadyEvent
+{
+    ieee::Eui64 entity_id{};
+    uint16_t descriptor_type{0};
+    uint16_t descriptor_index{0};
+    uint32_t counters_valid{0};
+    std::array<uint32_t, 32> counters{};
+};
+
+/// Emitted for EVERY ACMP PDU the controller observes on the wire — commands as
+/// well as responses — so a diagnostic caller can reconstruct a connection
+/// handshake leg by leg. Unlike the higher-level events above, this is the raw
+/// message_type/status and the four endpoint fields exactly as seen on the bus.
+/// A passive controller sees all of: the listener's relayed CONNECT_TX_COMMAND,
+/// the talker's CONNECT_TX_RESPONSE, and the listener's CONNECT_RX_RESPONSE
+/// (all multicast), which is enough to pinpoint which leg of a connect stalled.
+struct AcmpTraceEvent
+{
+    uint8_t message_type{0};  // ACMP_MESSAGE_TYPE_*
+    uint8_t status{0};        // ACMP_STATUS_*
+    ieee::Eui64 talker_entity_id{};
+    uint16_t talker_unique_id{0};
+    ieee::Eui64 listener_entity_id{};
+    uint16_t listener_unique_id{0};
+};
+
 /// Variant covering every event the controller facade can emit.
-using ControllerEvent = std::variant<ConnectionAddedEvent, ConnectionRemovedEvent, EntityDetailReadyEvent, StatusChangedEvent>;
+using ControllerEvent = std::variant<
+    ConnectionAddedEvent,
+    ConnectionRemovedEvent,
+    EntityDetailReadyEvent,
+    StatusChangedEvent,
+    RxStateEvent,
+    CountersReadyEvent,
+    AcmpTraceEvent>;
 
 }  // namespace statusbar::atdecc_tools

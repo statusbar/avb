@@ -170,9 +170,11 @@ TEST(nanoavb_base_builder, full_configuration)
                       .build();
 
     EXPECT_TRUE(result.has_value());
-    EXPECT_EQ(result->acmp_talker.max_streams(), 2);
-    EXPECT_EQ(result->acmp_listener.max_streams(), 2);
-    EXPECT_EQ(result->adp_advertiser.valid_time(), 31);
+    // build() now yields a unique_ptr<NanoAvbComponents> (non-movable type):
+    // deref the StatusValue, then the unique_ptr.
+    EXPECT_EQ((*result)->acmp_talker.max_streams(), 2);
+    EXPECT_EQ((*result)->acmp_listener.max_streams(), 2);
+    EXPECT_EQ((*result)->adp_advertiser.valid_time(), 31);
 }
 
 //

@@ -30,7 +30,7 @@ struct Context
     Callbacks callbacks{};
     bool as_capable{false};
     bool time_locked{false};
-    std::string last_action{};
+    std::string_view last_action{};
 };
 
 struct Def

@@ -3,6 +3,8 @@
 
 #include "statusbar/ptpclient/ptpclient_linuxptp.hpp"
 
+#include "statusbar/status/throw_or_abort.hpp"
+
 #if defined(__linux__)
 
 namespace statusbar::ptpclient {
@@ -10,7 +12,7 @@ namespace statusbar::ptpclient {
 LinuxPtpClient::LinuxPtpClient(std::string_view device_path)
 {
     if (auto status = open(device_path); !status) {
-        throw std::system_error(status.error());
+        statusbar::throw_or_abort(status.error());
     }
 }
 

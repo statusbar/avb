@@ -10,6 +10,7 @@
 #include "statusbar/srp/srp_msrp.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <format>
 #include <iterator>
@@ -188,9 +189,22 @@ auto format_msrp(OutputIt out, std::span<uint8_t const> payload) -> OutputIt
             return std::format_to(out, "  MSRP truncated at AttributeListHeader\n");
         }
 
+        if (pos + AttributeListHeader::LENGTH + 2 > payload.size()) {
+            return std::format_to(out, "  MSRP truncated at AttributeListHeader\n");
+        }
+
         AttributeListHeader attr_list_hdr;
         (void)load_unchecked(payload.subspan(pos), &attr_list_hdr);
         pos += AttributeListHeader::LENGTH;
+
+        // AttributeListLength (IEEE 802.1Q-2014 Clause 10.8.2.3): octet length of
+        // the AttributeList (vectors + trailing EndMark) that follows. It sits
+        // between AttributeLength and the first VectorHeader; skipping it shifts
+        // every subsequent field by two bytes and turns the whole decode to
+        // garbage. Consume it and use it to bound this message's vector walk.
+        uint16_t const attr_list_length = (static_cast<uint16_t>(payload[pos]) << 8) | payload[pos + 1];
+        pos += 2;
+        size_t const attr_list_end = std::min(pos + attr_list_length, payload.size());
 
         auto const attr_type = static_cast<AttributeType>(attr_list_hdr.attribute_type.get());
         uint8_t const attr_length = attr_list_hdr.attribute_length.get();
@@ -198,8 +212,8 @@ auto format_msrp(OutputIt out, std::span<uint8_t const> payload) -> OutputIt
         out = std::format_to(
             out, "  Message: type={} ({}) length={}\n", attribute_type_name(attr_type), static_cast<int>(attr_type), attr_length);
 
-        // Parse VectorAttributes until EndMark
-        while (pos + 2 <= payload.size()) {
+        // Parse VectorAttributes until EndMark (bounded by AttributeListLength)
+        while (pos + 2 <= attr_list_end) {
             uint16_t const vec_end_check = (static_cast<uint16_t>(payload[pos]) << 8) | payload[pos + 1];
             if (vec_end_check == END_MARK) {
                 pos += 2;
@@ -212,6 +226,10 @@ auto format_msrp(OutputIt out, std::span<uint8_t const> payload) -> OutputIt
             }
             out = *result;
         }
+
+        // Realign to the message boundary the sender declared, so an under- or
+        // over-reading vector decode can't desync the outer message walk.
+        pos = attr_list_end;
     }
 
     return out;

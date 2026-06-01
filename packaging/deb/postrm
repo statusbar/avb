@@ -1,0 +1,17 @@
+#!/bin/sh
+# postrm for the statusbar-avb runtime package.
+#
+# Reload systemd after the unit file is removed so a stale statusbar-avb-entity
+# unit does not linger in the manager's view. The package never enables the
+# unit, so there is no enablement symlink to clean up.
+set -e
+
+case "$1" in
+    remove|purge)
+        if [ -d /run/systemd/system ]; then
+            systemctl --quiet daemon-reload 2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

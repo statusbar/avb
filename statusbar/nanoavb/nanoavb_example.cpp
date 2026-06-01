@@ -131,46 +131,38 @@ struct SupervisedNanoAvb
             (void)components;
         };
 
-        supervisor_ctx.callbacks.start_protocols = [this, &handlers](auto& ctx, TimePoint time) {
+        supervisor_ctx.callbacks.start_protocols = [this, &components](auto& ctx, TimePoint time) {
             (void)ctx;
-            std::print("[supervisor] start_protocols: Starting gPTP, MVRP, MSRP, ADP\n");
-            // Start gPTP state machine - trigger AsCapableUp to begin acquiring
+            std::print("[supervisor] start_protocols: Starting gPTP + ADP (SRP is gated on gPTP lock)\n");
+            // gPTP runs independently to acquire lock; ADP advertises immediately
+            // (discovery/enumeration is independent of gPTP/SRP). SRP (MVRP+MSRP)
+            // is started in enter_ready() once gPTP is locked.
             gptp.handle_event(gptp_ctx, statusbar::nanoavb::gptp_sm::Def::Event::AsCapableUp, time);
-            // Start MVRP state machine - trigger Acquire to begin joining
-            mvrp.handle_event(mvrp_ctx, statusbar::nanoavb::mvrp_sm::Def::Event::Acquire, time);
-            // gPTP handler already receives announce messages via reactor
-            (void)handlers;
-        };
-
-        supervisor_ctx.callbacks.enter_wait_vlan = [this](auto& ctx, TimePoint time) {
-            (void)ctx;
-            (void)time;
-            std::print("[supervisor] enter_wait_vlan: Waiting for VLAN base registration\n");
-            // MVRP should be registering VLANs at this point
-            // When MVRP reports registered, we'll get VlanBaseReady event
-        };
-
-        supervisor_ctx.callbacks.enter_ready = [this, &components](auto& ctx, TimePoint time) {
-            (void)ctx;
-            std::print("[supervisor] enter_ready: System ready for streams\n");
-            // Start ADP advertising if not already started
             auto result = components.adp_advertiser.start(time);
             if (!result) {
                 std::print(stderr, "Warning: ADP start failed: {}\n", result.error().message());
             }
-            // Allow stream engines to proceed
+        };
+
+        supervisor_ctx.callbacks.enter_ready = [this](auto& ctx, TimePoint time) {
+            (void)ctx;
+            std::print("[supervisor] enter_ready: gPTP locked - starting SRP, enabling streams\n");
+            // gPTP locked: bring up SRP (MVRP best-effort) and enable streaming.
+            mvrp.handle_event(mvrp_ctx, statusbar::nanoavb::mvrp_sm::Def::Event::Acquire, time);
             talker_engine_ctx.send_allowed = true;
             listener_engine_ctx.play_allowed = true;
         };
 
         supervisor_ctx.callbacks.degrade_stop_streams = [this](auto& ctx, TimePoint time) {
             (void)ctx;
-            std::print("[supervisor] degrade_stop_streams: Stopping streams due to degradation\n");
-            // Stop stream engines
+            std::print("[supervisor] degrade_stop_streams: gPTP lost - stopping SRP + streams\n");
             talker_engine.handle_event(talker_engine_ctx, statusbar::nanoavb::talker_engine_sm::Def::Event::GateStop, time);
             listener_engine.handle_event(listener_engine_ctx, statusbar::nanoavb::listener_engine_sm::Def::Event::GateStop, time);
             talker_engine_ctx.send_allowed = false;
             listener_engine_ctx.play_allowed = false;
+            mvrp.reset();
+            msrp_talker.reset();
+            msrp_listener.reset();
         };
 
         supervisor_ctx.callbacks.stop_all = [this, &components](auto& ctx, TimePoint time) {
@@ -200,18 +192,6 @@ struct SupervisedNanoAvb
                 std::print("[supervisor] Will attempt recovery ({}/{})\n", recovery_attempts, MAX_RECOVERY_ATTEMPTS);
             } else {
                 std::print(stderr, "[supervisor] Max recovery attempts reached, manual intervention required\n");
-            }
-        };
-
-        supervisor_ctx.callbacks.timeout_vlan = [this](auto& ctx, TimePoint time) {
-            (void)ctx;
-            std::print(stderr, "[supervisor] timeout_vlan: VLAN registration timeout\n");
-            last_failure_time = time;
-            ++recovery_attempts;
-            if (recovery_attempts < MAX_RECOVERY_ATTEMPTS) {
-                std::print("[supervisor] Will attempt recovery ({}/{})\n", recovery_attempts, MAX_RECOVERY_ATTEMPTS);
-            } else {
-                std::print(stderr, "[supervisor] Max recovery attempts reached, continuing in degraded mode\n");
             }
         };
 
@@ -259,12 +239,10 @@ struct SupervisedNanoAvb
             std::print("[mvrp] send_join: Registering VLANs\n");
         };
 
-        mvrp_ctx.callbacks.mark_joined = [this](auto& ctx, TimePoint time) {
+        mvrp_ctx.callbacks.mark_joined = [](auto& ctx, TimePoint time) {
             (void)ctx;
-            std::print("[mvrp] mark_joined: VLANs registered\n");
-            // Update supervisor context and notify
-            supervisor_ctx.vlan_base_ready = true;
-            supervisor.handle_event(supervisor_ctx, statusbar::nanoavb::supervisor_sm::Def::Event::VlanBaseReady, time);
+            (void)time;
+            std::print("[mvrp] mark_joined: VLANs registered (best-effort; streaming is gated on gPTP)\n");
         };
 
         mvrp_ctx.callbacks.mark_error = [this](auto& ctx, TimePoint time) {
@@ -509,15 +487,15 @@ struct SupervisedNanoAvb
     }
 
     /// Handle timeout event from watchdog timer
-    /// Call this periodically when in a waiting state (Init or WaitVlanBase)
+    /// Call this periodically while waiting for gPTP lock (Init).
     void on_timeout(TimePoint time)
     {
         using statusbar::nanoavb::supervisor_sm::Def;
         auto const state = supervisor.current_state();
 
-        // Only send timeout event if we're in a waiting state
-        if (state == Def::State::Init || state == Def::State::WaitVlanBase) {
-            std::print("[watchdog] Timeout in state {}\n", state == Def::State::Init ? "Init" : "WaitVlanBase");
+        // Only Init has a watchdog (gPTP-lock timeout); there is no VLAN gate.
+        if (state == Def::State::Init) {
+            std::print("[watchdog] Timeout in state Init (gPTP lock)\n");
             supervisor.handle_event(supervisor_ctx, Def::Event::Timeout, time);
         }
     }
@@ -571,13 +549,12 @@ struct SupervisedNanoAvb
         auto const supervisor_state = supervisor.current_state();
         std::print(
             "State: supervisor={} gptp={} mvrp={} recovery={}/{}\n",
-            Def::State::Start == supervisor_state              ? "Start"
-                : Def::State::Down == supervisor_state         ? "Down"
-                : Def::State::Init == supervisor_state         ? "Init"
-                : Def::State::WaitVlanBase == supervisor_state ? "WaitVlanBase"
-                : Def::State::Ready == supervisor_state        ? "Ready"
-                : Def::State::Degraded == supervisor_state     ? "Degraded"
-                                                               : "Unknown",
+            Def::State::Start == supervisor_state          ? "Start"
+                : Def::State::Down == supervisor_state     ? "Down"
+                : Def::State::Init == supervisor_state     ? "Init"
+                : Def::State::Ready == supervisor_state    ? "Ready"
+                : Def::State::Degraded == supervisor_state ? "Degraded"
+                                                           : "Unknown",
             gptp_ctx.time_locked ? "Locked" : "Unlocked",
             mvrp_ctx.joined ? "Joined" : "NotJoined",
             recovery_attempts,
@@ -676,63 +653,40 @@ statusbar::nanoavb::EntityModel create_entity_model()
 // NanoAvbComponents Factory
 //
 
-statusbar::nanoavb::NanoAvbComponents create_nanoavb_components()
+// Returns a unique_ptr because NanoAvbComponents is non-movable (it holds
+// internal cross-references); the constructor wires AEM/ADP/ACMP against its
+// own entity_model member. Site-specific stream/VLAN/MSRP setup is applied to
+// the constructed object below.
+std::unique_ptr<statusbar::nanoavb::NanoAvbComponents> create_nanoavb_components()
 {
     using namespace statusbar::nanoavb;
     using statusbar::ieee::Eui48;
     using statusbar::ieee::Eui64;
 
-    auto entity_model = create_entity_model();
-    auto const& entity = entity_model.get_entity();
-
-    // Create AEM command handler
-    AemCommandHandler aem_handler{entity_model};
-
-    // Create ADP advertiser with empty callbacks (for later socket integration)
-    AdpAdvertiserCallbacks adp_callbacks{};
     AdpAdvertiserConfig adp_config{};
     adp_config.valid_time = 31;                                        // 62 seconds
     adp_config.reannounce_interval = std::chrono::milliseconds{5000};  // 5 seconds
-    NanoAvbAdpAdvertiser adp_advertiser{entity_model.get_entity(), adp_callbacks, adp_config};
 
-    // Create ACMP talker with empty callbacks
-    AcmpTalkerCallbacks talker_callbacks{};
-    NanoAvbAcmpTalker acmp_talker{entity.entity_id, talker_callbacks, 2, 4};
+    // 2 talker streams (4 max listeners each), 2 listener streams.
+    auto components = std::make_unique<NanoAvbComponents>(create_entity_model(), adp_config, 2, 4, 2);
 
     // Configure talker streams
     Eui64 const stream0_id{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x00, 0x00};
     Eui64 const stream1_id{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x00, 0x01};
     Eui48 const stream0_dest{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x00};
     Eui48 const stream1_dest{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x01};
-    (void)acmp_talker.configure_stream(0, stream0_id, stream0_dest);
-    (void)acmp_talker.configure_stream(1, stream1_id, stream1_dest);
+    (void)components->acmp_talker.configure_stream(0, stream0_id, stream0_dest);
+    (void)components->acmp_talker.configure_stream(1, stream1_id, stream1_dest);
 
-    // Create ACMP listener with empty callbacks
-    AcmpListenerCallbacks listener_callbacks{};
-    NanoAvbAcmpListener acmp_listener{entity.entity_id, listener_callbacks, 2};
-
-    // Create MVRP handler with empty callbacks
-    MvrpCallbacks mvrp_callbacks{};
-    MvrpHandler mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, mvrp_callbacks};
-    (void)mvrp_handler.register_vlan(2, statusbar::sm::Clock::now());
-
-    // Create MSRP handler with empty callbacks
-    MsrpCallbacks msrp_callbacks{};
-    MsrpHandler<> msrp_handler{statusbar::srp::msrp::MsrpConfig{}, msrp_callbacks};
-    msrp_handler.set_domain(
+    // Register VLAN with MVRP and set the MSRP SR-class domain.
+    (void)components->mvrp_handler.register_vlan(2, statusbar::sm::Clock::now());
+    components->msrp_handler.set_domain(
         DomainInfo{
             .sr_class_id = 6,        // SR Class A
             .sr_class_priority = 3,  // Priority 3
             .sr_class_vid = 2});     // VLAN 2
 
-    return NanoAvbComponents{
-        .entity_model = std::move(entity_model),
-        .aem_handler = std::move(aem_handler),
-        .adp_advertiser = std::move(adp_advertiser),
-        .acmp_talker = std::move(acmp_talker),
-        .acmp_listener = std::move(acmp_listener),
-        .mvrp_handler = std::move(mvrp_handler),
-        .msrp_handler = std::move(msrp_handler)};
+    return components;
 }
 
 //
@@ -748,8 +702,8 @@ void print_entity_info(
 
     std::print("NanoAVB Example (with State Machine Supervisor)\n");
     std::print("================================================\n");
-    std::print("Entity ID:        {}\n", to_string(entity.entity_id));
-    std::print("Entity Model ID:  {}\n", to_string(entity.entity_model_id));
+    std::print("Entity ID:        {}\n", to_string(entity.entity_id).view());
+    std::print("Entity Model ID:  {}\n", to_string(entity.entity_model_id).view());
     std::print("Talker Streams:   {}\n", entity.talker_stream_sources.get());
     std::print("Listener Streams: {}\n", entity.listener_stream_sinks.get());
     std::print("Interface:        {}\n", interface_name);
@@ -832,10 +786,9 @@ MainLoopResult run_main_loop(
     auto startup_time = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     supervised.on_link_up(startup_time);
 
-    // Watchdog timeout configuration
-    // In a real system, timeouts would be tuned to the network environment
+    // Watchdog timeout configuration (gPTP lock only; there is no VLAN gate).
+    // In a real system, timeouts would be tuned to the network environment.
     constexpr auto GPTP_LOCK_TIMEOUT = std::chrono::seconds{10};
-    constexpr auto VLAN_REGISTER_TIMEOUT = std::chrono::seconds{5};
     auto last_state_change_time = std::chrono::steady_clock::now();
     auto last_supervisor_state = supervised.supervisor.current_state();
 
@@ -862,9 +815,6 @@ MainLoopResult run_main_loop(
 
         using statusbar::nanoavb::supervisor_sm::Def;
         if (current_state == Def::State::Init && time_in_state > GPTP_LOCK_TIMEOUT) {
-            supervised.on_timeout(sm_now);
-            last_state_change_time = now;
-        } else if (current_state == Def::State::WaitVlanBase && time_in_state > VLAN_REGISTER_TIMEOUT) {
             supervised.on_timeout(sm_now);
             last_state_change_time = now;
         }
@@ -938,8 +888,11 @@ auto main(int argc, char** argv) -> int
         return statusbar::config::handled_builtin_command(cli_result) ? 0 : 1;
     }
 
-    // Create all NanoAVB components
-    auto components = create_nanoavb_components();
+    // Create all NanoAVB components. NanoAvbComponents is non-movable, so it
+    // lives on the heap (owned here); `components` is a reference alias so the
+    // rest of main reads naturally.
+    auto components_owner = create_nanoavb_components();
+    auto& components = *components_owner;
     auto const& entity = components.entity_model.get_entity();
 
     // Create network handlers

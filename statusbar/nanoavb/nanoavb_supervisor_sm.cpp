@@ -26,14 +26,6 @@ void start_protocols(Context& ctx, TimePoint time)
     }
 }
 
-void enter_wait_vlan(Context& ctx, TimePoint time)
-{
-    ctx.last_action = "enter_wait_vlan";
-    if (ctx.callbacks.enter_wait_vlan) {
-        ctx.callbacks.enter_wait_vlan(ctx, time);
-    }
-}
-
 void enter_ready(Context& ctx, TimePoint time)
 {
     ctx.last_action = "enter_ready";
@@ -66,17 +58,6 @@ void timeout_gptp(Context& ctx, TimePoint time)
     }
     if (ctx.callbacks.stop_all) {
         ctx.callbacks.stop_all(ctx, time);
-    }
-}
-
-void timeout_vlan(Context& ctx, TimePoint time)
-{
-    ctx.last_action = "timeout_vlan";
-    if (ctx.callbacks.timeout_vlan) {
-        ctx.callbacks.timeout_vlan(ctx, time);
-    }
-    if (ctx.callbacks.degrade_stop_streams) {
-        ctx.callbacks.degrade_stop_streams(ctx, time);
     }
 }
 
