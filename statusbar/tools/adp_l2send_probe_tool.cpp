@@ -37,6 +37,7 @@
 // Needs CAP_NET_RAW (run as root or `setcap cap_net_raw,cap_net_admin+ep`).
 
 #include "statusbar/config/config.hpp"
+#include "statusbar/ieee/ieee_ethernet.hpp"
 #include "statusbar/status/throw_or_abort.hpp"
 
 #include <unistd.h>
@@ -93,15 +94,14 @@ struct Config
     bool from_set = false;
 };
 
+// Parse a MAC into the raw 6-byte array via the native ieee parser.
 auto parse_mac(std::string_view s, std::array<uint8_t, 6>& out) -> bool
 {
-    unsigned v[6] = {};
-    if (std::sscanf(s.data(), "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) {
+    auto const e = statusbar::ieee::eui48_from_string(s);
+    if (!e) {
         return false;
     }
-    for (int i = 0; i < 6; ++i) {
-        out[static_cast<size_t>(i)] = static_cast<uint8_t>(v[i]);
-    }
+    std::memcpy(out.data(), e->span().data(), out.size());
     return true;
 }
 

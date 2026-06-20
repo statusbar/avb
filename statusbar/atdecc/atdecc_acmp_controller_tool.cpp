@@ -331,35 +331,6 @@ class AcmpControllerHandler : public Pollable
     uint16_t listener_uid_;
 };
 
-// Parse EUI-64 from string (accepts : or - separators or no separator)
-// Format: XX:XX:XX:XX:XX:XX:XX:XX or XXXXXXXXXXXXXXXX
-auto parse_eui64(std::string_view str, Eui64& out) -> bool
-{
-    // Remove separators
-    std::string cleaned;
-    for (char c : str) {
-        if (c != ':' && c != '-') {
-            cleaned += c;
-        }
-    }
-
-    if (cleaned.size() != 16) {
-        return false;
-    }
-
-    for (size_t i = 0; i < 8; ++i) {
-        char const* start = cleaned.data() + (i * 2);
-        char* end = nullptr;
-        unsigned long val = std::strtoul(std::string(start, 2).c_str(), &end, 16);
-        if (val > 255) {
-            return false;
-        }
-        out.span()[i] = static_cast<uint8_t>(val);
-    }
-
-    return true;
-}
-
 auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 {
     statusbar::args::ArgumentSpecs specs;
@@ -391,12 +362,8 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
             }
         });
 
-    specs.add<std::string_view>("talker-entity-id", "Talker Entity ID (EUI-64)", "", [&](auto v) {
-        if (!v.empty() && !parse_eui64(v, config.talker_entity_id)) {
-            std::print(stderr, "Error: Invalid talker entity ID format\n");
-            statusbar::throw_or_abort(std::errc::invalid_argument);
-        }
-    });
+    specs.add<Eui64>(
+        "talker-entity-id", "Talker Entity ID (EUI-64)", config.talker_entity_id, [&](auto v) { config.talker_entity_id = v; });
 
     specs.add<int64_t>("talker-uid", "Talker Unique ID (0-65535)", 0, [&](auto v) {
         if (v < 0 || v > 65535) {
@@ -406,11 +373,8 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
         config.talker_uid = static_cast<uint16_t>(v);
     });
 
-    specs.add<std::string_view>("listener-entity-id", "Listener Entity ID (EUI-64)", "", [&](auto v) {
-        if (!v.empty() && !parse_eui64(v, config.listener_entity_id)) {
-            std::print(stderr, "Error: Invalid listener entity ID format\n");
-            statusbar::throw_or_abort(std::errc::invalid_argument);
-        }
+    specs.add<Eui64>("listener-entity-id", "Listener Entity ID (EUI-64)", config.listener_entity_id, [&](auto v) {
+        config.listener_entity_id = v;
     });
 
     specs.add<int64_t>("listener-uid", "Listener Unique ID (0-65535)", 0, [&](auto v) {

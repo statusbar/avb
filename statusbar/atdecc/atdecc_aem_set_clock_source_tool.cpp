@@ -230,29 +230,6 @@ class SetClockSourceHandler : public net::Pollable
     bool done_{false};
 };
 
-auto parse_eui64(std::string_view str, Eui64& out) -> bool
-{
-    std::string cleaned;
-    for (char c : str) {
-        if (c != ':' && c != '-') {
-            cleaned += c;
-        }
-    }
-    if (cleaned.size() != 16) {
-        return false;
-    }
-    for (size_t i = 0; i < 8; ++i) {
-        char const* start = cleaned.data() + (i * 2);
-        char* end = nullptr;
-        unsigned long const val = std::strtoul(std::string(start, 2).c_str(), &end, 16);
-        if (val > 255) {
-            return false;
-        }
-        out.span()[i] = static_cast<uint8_t>(val);
-    }
-    return true;
-}
-
 auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 {
     statusbar::args::ArgumentSpecs specs;
@@ -261,12 +238,8 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
     specs.add_choice("action", "SET (default) or GET the clock source", {"SET", "GET"}, "SET", [&](auto v) {
         config.do_set = !(v == "GET" || v == "get");
     });
-    specs.add<std::string_view>("target-entity-id", "Target Entity ID (EUI-64)", "", [&](auto v) {
-        if (!v.empty() && !parse_eui64(v, config.target_entity_id)) {
-            std::print(stderr, "Error: Invalid target entity ID format\n");
-            statusbar::throw_or_abort(std::errc::invalid_argument);
-        }
-    });
+    specs.add<Eui64>(
+        "target-entity-id", "Target Entity ID (EUI-64)", config.target_entity_id, [&](auto v) { config.target_entity_id = v; });
     specs.add<int64_t>("clock-domain-index", "CLOCK_DOMAIN descriptor index (default 0)", 0, [&](auto v) {
         config.clock_domain_index = static_cast<uint16_t>(v);
     });
