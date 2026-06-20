@@ -208,45 +208,32 @@ auto run_pcap_loop(RetransmitConfig const& cfg, uint8_t expected_subtype, size_t
     auto& writer = *writer_result;
 
     GptpClockState gptp;
-
-    uint64_t capture_us = 0;
-    Eui48 da{}, sa{};
-    uint16_t ethertype = 0;
-    Packet payload;
-
     PcapLoopStats stats;
 
-    for (;;) {
-        auto step = reader.read_packet(&capture_us, da, sa, &ethertype, payload);
-        if (!step) {
-            std::print(stderr, "error: pcap read: {}\n", step.error().message());
-            break;
-        }
-        if (!*step) {
-            break;
-        }
-        ++stats.total;
+    auto const walk = pcap::for_each_packet(
+        reader, [&](uint64_t capture_us, Eui48 const& /*da*/, Eui48 const& /*sa*/, uint16_t ethertype, Packet const& payload) {
+            ++stats.total;
 
-        if (ethertype == ETHERTYPE_GPTP) {
-            gptp.process(capture_us, std::span<uint8_t const>{payload});
-            continue;
-        }
+            if (ethertype == ETHERTYPE_GPTP) {
+                gptp.process(capture_us, std::span<uint8_t const>{payload});
+                return;
+            }
+            if (ethertype != ETHERTYPE_AVTP || payload.size() < min_pdu_len) {
+                return;
+            }
+            if (payload[0] != expected_subtype) {
+                return;
+            }
+            if (!avtp_match_stream_id(std::span<uint8_t const>{payload}, cfg.stream_id)) {
+                return;
+            }
 
-        if (ethertype != ETHERTYPE_AVTP || payload.size() < min_pdu_len) {
-            continue;
-        }
-
-        if (payload[0] != expected_subtype) {
-            continue;
-        }
-
-        if (!avtp_match_stream_id(std::span<uint8_t const>{payload}, cfg.stream_id)) {
-            continue;
-        }
-
-        ++stats.matched;
-        uint64_t const gptp_now = gptp.to_gptp_ns(capture_us);
-        on_avtp(std::span<uint8_t const>{payload}, gptp_now, capture_us, writer);
+            ++stats.matched;
+            uint64_t const gptp_now = gptp.to_gptp_ns(capture_us);
+            on_avtp(std::span<uint8_t const>{payload}, gptp_now, capture_us, writer);
+        });
+    if (!walk) {
+        std::print(stderr, "error: pcap read: {}\n", walk.error().message());
     }
 
     stats.gptp_syncs = gptp.sync_count;

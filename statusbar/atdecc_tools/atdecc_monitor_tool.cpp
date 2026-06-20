@@ -565,33 +565,24 @@ auto run_pcap_file(MonitorCore& core, std::string const& path) -> bool
         std::println(stderr, "Error: open pcap '{}': {}", path, reader_result.error().message());
         return false;
     }
-    auto& reader = *reader_result;
-    pcap::Packet payload;
-    Eui48 da{};
-    Eui48 sa{};
-    uint16_t ethertype = 0;
-    uint64_t timestamp_us = 0;
-
     g_now_fn = pcap_now_ns;
     size_t packet_count = 0;
     size_t avtp_count = 0;
-    for (;;) {
-        auto step = reader.read_packet(&timestamp_us, da, sa, &ethertype, payload);
-        if (!step) {
-            std::println(stderr, "Error: pcap read failed at packet {}: {}", packet_count, step.error().message());
-            return false;
-        }
-        if (!*step) {
-            break;
-        }
-        ++packet_count;
-        if (ethertype != avtp::AVTP_ETHERTYPE) {
-            continue;
-        }
-        ++avtp_count;
-        g_pcap_now_ns = static_cast<int64_t>(timestamp_us) * 1000;
-        core.dispatch_frame(g_pcap_now_ns, sa, std::span<uint8_t const>{payload.data(), payload.size()});
-        core.tick(g_pcap_now_ns);
+    auto const walk = pcap::for_each_packet(
+        *reader_result,
+        [&](uint64_t timestamp_us, Eui48 const& /*da*/, Eui48 const& sa, uint16_t ethertype, pcap::Packet const& payload) {
+            ++packet_count;
+            if (ethertype != avtp::AVTP_ETHERTYPE) {
+                return;
+            }
+            ++avtp_count;
+            g_pcap_now_ns = static_cast<int64_t>(timestamp_us) * 1000;
+            core.dispatch_frame(g_pcap_now_ns, sa, std::span<uint8_t const>{payload.data(), payload.size()});
+            core.tick(g_pcap_now_ns);
+        });
+    if (!walk) {
+        std::println(stderr, "Error: pcap read failed at packet {}: {}", packet_count, walk.error().message());
+        return false;
     }
     std::println(stderr, "\nProcessed {} packets ({} AVTP/ATDECC) from {}", packet_count, avtp_count, path);
     return true;
