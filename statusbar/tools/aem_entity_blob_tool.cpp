@@ -632,21 +632,14 @@ auto build_arg_specs(Config& c) -> args::ArgumentSpecs
     return specs;
 }
 
-void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
-{
-    std::print(stderr, "Usage: {} [options]\n\nOptions:\n", program_name);
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
-}
-
 }  // namespace
 
 int main(int argc, char** argv)
 {
     Config cfg;
     auto specs = build_arg_specs(cfg);
-    auto const cli_result = config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-aem-entity-blob");
+    // No custom usage needed — the generic renderer covers it.
+    auto const cli_result = config::parse_cli_args(argc, argv, specs, config::default_print_usage, "statusbar-aem-entity-blob");
     if (!cli_result) {
         return config::handled_builtin_command(cli_result) ? 0 : 1;
     }
