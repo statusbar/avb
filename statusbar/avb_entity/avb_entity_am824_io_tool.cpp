@@ -20,6 +20,7 @@
 // - MVRP/MSRP stream reservation
 
 #include "statusbar/avb_entity/avb_entity_am824_io.hpp"
+#include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/gptp/gptp_format.hpp"
@@ -79,7 +80,9 @@ struct Config
 
     // AVB Entity configuration
     avb_entity::AvbEntityAm824IOConfig entity{
-        .entity_id = ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x02},
+        // entity_id unset → derived per-node from the NIC MAC at startup (so two
+        // nodes don't collide); overridable with --entity.id.
+        .entity_id = ieee::Eui64{},
         .entity_model_id = ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x00},
         // interface_name has no default — --interface is required.
         .talker_dest_mac = {0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x00},
@@ -427,6 +430,15 @@ auto main(int argc, char** argv) -> int
         print_usage(argv[0], specs);
         return EXIT_FAILURE;
     }
+
+    // Per-node-unique entity_id (NIC MAC → modified EUI-64) + hostname name,
+    // unless overridden by --entity.id / --entity.name.
+    avb_entity::apply_node_identity_defaults(
+        config.entity.interface_name,
+        config.entity.entity_id,
+        config.entity.entity_name,
+        ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x02},
+        "AVB AM824 IO Tool");
 
     // Load the descriptor storage blob
     auto blob = load_file(config.descriptor_storage_path);

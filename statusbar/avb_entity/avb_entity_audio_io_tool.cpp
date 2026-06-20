@@ -13,6 +13,7 @@
 //    `aem-entity-blob --dual --out entity_audio.bin`)
 
 #include "statusbar/avb_entity/avb_entity_audio_io.hpp"
+#include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/gptp/gptp_format.hpp"
@@ -661,20 +662,6 @@ auto main(int argc, char** argv) -> int
     // so two nodes running the same blob never collide on the wire (ACMP/AECP
     // address entities by entity_id). entity_name: the hostname, so a controller
     // can connect by node name (e.g. `--talker jdk01a:0`).
-    if (!config.entity.entity_id.is_set()) {
-        if (auto const mac = net::read_interface_mac(config.entity.interface_name)) {
-            config.entity.entity_id = mac->to_modified_eui64();
-        } else {
-            std::print(stderr, "Warning: could not read MAC of {}; using fallback entity ID\n", config.entity.interface_name);
-            config.entity.entity_id = ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x02};
-        }
-    }
-    if (config.entity.entity_name.empty()) {
-        std::array<char, 256> host{};
-        config.entity.entity_name =
-            (::gethostname(host.data(), host.size() - 1) == 0) ? std::string{host.data()} : std::string{"AVB Audio IO"};
-    }
-
     if (config.entity.interface_name.empty()) {
         std::print(stderr, "Error: --interface=<iface> is required\n");
         print_usage(argv[0], specs);
@@ -686,6 +673,17 @@ auto main(int argc, char** argv) -> int
         print_usage(argv[0], specs);
         return EXIT_FAILURE;
     }
+
+    // entity_id: a per-node-unique modified EUI-64 from the NIC MAC (so two
+    // nodes don't collide on the wire); entity_name: the hostname (so a
+    // controller can connect by node name). Both overridable by --entity.id /
+    // --entity.name.
+    avb_entity::apply_node_identity_defaults(
+        config.entity.interface_name,
+        config.entity.entity_id,
+        config.entity.entity_name,
+        ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x02},
+        "AVB Audio IO");
 
     auto blob = load_file(config.descriptor_storage_path);
     if (blob.empty()) {
