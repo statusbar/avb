@@ -23,6 +23,7 @@
 #include "statusbar/avtp_tools/avtp_audio_stream_decoder.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/pcap/pcap.hpp"
+#include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
 #include <array>
@@ -413,14 +414,10 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
-#if __cpp_exceptions
-    try {
-#endif
-        return run(cfg);
-#if __cpp_exceptions
-    } catch (std::exception const& e) {
-        std::print(stderr, "error: {}\n", e.what());
+    auto const result = statusbar::catch_or_status([&]() -> statusbar::StatusValue<int> { return run(cfg); }, std::errc::io_error);
+    if (!result) {
+        std::print(stderr, "error: {}\n", result.error().message());
         return EXIT_FAILURE;
     }
-#endif
+    return *result;
 }

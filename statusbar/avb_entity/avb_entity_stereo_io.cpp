@@ -36,6 +36,7 @@
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/realtime/realtime.hpp"
 #include "statusbar/sm/sm.hpp"
+#include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
@@ -105,16 +106,16 @@ AvbEntityStereoIO::AvbEntityStereoIO(AvbEntityStereoIOConfig config)
 
 AvbEntityStereoIO::~AvbEntityStereoIO()
 {
-#if __cpp_exceptions
-    try {
-#endif
-        if (running_) {
-            (void)stop();
-        }
-#if __cpp_exceptions
-    } catch (...) {  // NOLINT(bugprone-empty-catch) - destructors must not throw
-    }
-#endif
+    // Destructors must not throw; catch_or_status contains any exception from
+    // stop() (and compiles to a plain call under -fno-exceptions).
+    (void)statusbar::catch_or_status(
+        [&]() -> statusbar::Status {
+            if (running_) {
+                (void)stop();
+            }
+            return {};
+        },
+        std::errc::io_error);
 }
 
 //

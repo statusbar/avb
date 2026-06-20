@@ -25,6 +25,7 @@
 #include "statusbar/pcap/pcapng_reader.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/stats/stats_format.hpp"
+#include "statusbar/status/catch_or_status.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -932,16 +933,16 @@ auto run_offline(MonitorConfig const& config) -> int
     MonitorCore core{controller_id, make_print_callbacks(config.show_descriptors), config.show_descriptors};
     // No set_senders — send_mcast_ / send_unicast_ stay null, outgoing frames
     // silently drop.
-#if __cpp_exceptions
-    try {
-#endif
-        (void)run_pcap_file(core, config.pcap_file);
-#if __cpp_exceptions
-    } catch (std::exception const& e) {
-        std::println(stderr, "Error reading pcap '{}': {}", config.pcap_file, e.what());
+    auto const result = statusbar::catch_or_status(
+        [&]() -> statusbar::Status {
+            (void)run_pcap_file(core, config.pcap_file);
+            return {};
+        },
+        std::errc::io_error);
+    if (!result) {
+        std::println(stderr, "Error reading pcap '{}': {}", config.pcap_file, result.error().message());
         return 1;
     }
-#endif
     print_active_streams(core.active_streams(), g_pcap_now_ns);
     return 0;
 }

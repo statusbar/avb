@@ -438,16 +438,16 @@ AvbEntityAudioIO::AvbEntityAudioIO(
 
 AvbEntityAudioIO::~AvbEntityAudioIO()
 {
-#if __cpp_exceptions
-    try {
-#endif
-        if (running_) {
-            (void)stop();
-        }
-#if __cpp_exceptions
-    } catch (...) {  // NOLINT(bugprone-empty-catch) - destructors must not throw
-    }
-#endif
+    // Destructors must not throw; catch_or_status contains any exception from
+    // stop() (and compiles to a plain call under -fno-exceptions).
+    (void)statusbar::catch_or_status(
+        [&]() -> statusbar::Status {
+            if (running_) {
+                (void)stop();
+            }
+            return {};
+        },
+        std::errc::io_error);
 }
 
 //
@@ -1131,8 +1131,7 @@ void AvbEntityAudioIO::build_udptun_egress_state()
     if (!config_.udptun_egress_colbin_path.empty()) {
         statusbar::colbin::WriterConfig const colbin_cfg{
             .max_capacity_bytes = config_.udptun_egress_colbin_max_bytes, .preallocate = true};
-        auto w = statusbar::colbin::Writer::create(
-            config_.udptun_egress_colbin_path, udptun::udptun_colbin_schema(), colbin_cfg);
+        auto w = statusbar::colbin::Writer::create(config_.udptun_egress_colbin_path, udptun::udptun_colbin_schema(), colbin_cfg);
         if (w) {
             udptun_egress_colbin_.emplace(std::move(*w));
         } else {

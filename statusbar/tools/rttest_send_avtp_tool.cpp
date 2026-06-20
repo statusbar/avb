@@ -10,6 +10,7 @@
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/realtime/realtime.hpp"
 #include "statusbar/rttest/rttest.hpp"
+#include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/status/throw_or_abort.hpp"
 #include "statusbar/tsn/tsn.hpp"
@@ -240,7 +241,7 @@ auto parse_config(int argc, char** argv) -> StatusValue<Config>
     auto specs = build_arg_specs(config);
 
     // Parse CLI arguments, handle --completion, --help, --config-load, --config-save, apply bindings
-    auto cli_result = config::parse_cli_args(argc, argv, specs);
+    auto cli_result = config::parse_cli_args(argc, argv, specs, config::default_print_usage, "statusbar-rttest-send-avtp-tool");
     if (!cli_result) {
         return failure(cli_result.error());
     }
@@ -480,83 +481,83 @@ auto run_with_port(Port& port, net::TapBridge* tap, Config& config) -> int
 
 auto main(int argc, char** argv) -> int
 {
-#if __cpp_exceptions
-    try {
-#endif
-        // Ensure stdout is line-buffered so output appears promptly in terminals
-        setvbuf(stdout, nullptr, _IOLBF, 0);
+    auto const result = statusbar::catch_or_status(
+        [&]() -> statusbar::StatusValue<int> {
+            // Ensure stdout is line-buffered so output appears promptly in terminals
+            setvbuf(stdout, nullptr, _IOLBF, 0);
 
-        Config config = config::parse_config_or_exit(parse_config, argc, argv);
+            Config config = config::parse_config_or_exit(parse_config, argc, argv);
 
-        realtime::setup_shutdown_signal_handlers();
+            realtime::setup_shutdown_signal_handlers();
 
-        if (config.verbose) {
-            std::print("Backend: {}, interface: {}\n", config.backend, config.interface);
-        }
-
-        net::TapBridge tap;
-
-        if (config.backend == "bpf") {
-            net::BpfPortContext port;
-            net::BpfPortConfig const port_config{
-                .interface_name = config.interface,
-                .ethertype = avtp::AVTP_ETHERTYPE,
-            };
-            if (auto s = port.open(port_config); !s) {
-                statusbar::throw_or_abort(s.error(), "Failed to open BPF port");
+            if (config.verbose) {
+                std::print("Backend: {}, interface: {}\n", config.backend, config.interface);
             }
-            return run_with_port(port, &tap, config);
-        }
 
-#ifdef __linux__
-        if (config.backend == "mmap") {
-            net::MmapContext port;
-            net::MmapContextOpen const open{
-                port,
-                {
+            net::TapBridge tap;
+
+            if (config.backend == "bpf") {
+                net::BpfPortContext port;
+                net::BpfPortConfig const port_config{
                     .interface_name = config.interface,
                     .ethertype = avtp::AVTP_ETHERTYPE,
-                    .priority = avb_class_a_priority,
-                    .rx_queue_size = mmap_queue_size,
-                    .tx_queue_size = mmap_queue_size,
-                }};
-            return run_with_port(port, &tap, config);
-        }
-
-        if (config.backend == "xdp") {
-            // Create TAP bridge if requested
-            if (!config.tap_device.empty()) {
-                if (auto s = tap.open(net::TapBridgeConfig{.device_name = config.tap_device}); !s) {
-                    statusbar::throw_or_abort(s.error(), "Failed to open TAP device '" + config.tap_device + "'");
+                };
+                if (auto s = port.open(port_config); !s) {
+                    statusbar::throw_or_abort(s.error(), "Failed to open BPF port");
                 }
-                if (config.verbose) {
-                    std::print("TAP device: {} (ifindex={})\n", config.tap_device, tap.ifindex());
-                }
+                return run_with_port(port, &tap, config);
             }
 
-            // XDP filter: redirect AVTP ethertype to XSK, pass everything else
-            auto const rules =
-                net::ClassifierRuleBuilder<32>{}.ethertype(avtp::AVTP_ETHERTYPE).vlan_any().result(net::flag::process).build();
-            net::XdpContext port;
-            net::XdpContextOpen const open{
-                port,
-                {
-                    .interface_name = config.interface,
-                    .filter_rules = rules,
-                    .default_action = tap.valid() ? net::XdpAction::redirect_tap : net::XdpAction::pass_kernel,
-                    .queue_id = config.xdp_queue_id,
-                    .tap_ifindex = tap.ifindex(),
-                }};
-            return run_with_port(port, &tap, config);
-        }
+#ifdef __linux__
+            if (config.backend == "mmap") {
+                net::MmapContext port;
+                net::MmapContextOpen const open{
+                    port,
+                    {
+                        .interface_name = config.interface,
+                        .ethertype = avtp::AVTP_ETHERTYPE,
+                        .priority = avb_class_a_priority,
+                        .rx_queue_size = mmap_queue_size,
+                        .tx_queue_size = mmap_queue_size,
+                    }};
+                return run_with_port(port, &tap, config);
+            }
+
+            if (config.backend == "xdp") {
+                // Create TAP bridge if requested
+                if (!config.tap_device.empty()) {
+                    if (auto s = tap.open(net::TapBridgeConfig{.device_name = config.tap_device}); !s) {
+                        statusbar::throw_or_abort(s.error(), "Failed to open TAP device '" + config.tap_device + "'");
+                    }
+                    if (config.verbose) {
+                        std::print("TAP device: {} (ifindex={})\n", config.tap_device, tap.ifindex());
+                    }
+                }
+
+                // XDP filter: redirect AVTP ethertype to XSK, pass everything else
+                auto const rules =
+                    net::ClassifierRuleBuilder<32>{}.ethertype(avtp::AVTP_ETHERTYPE).vlan_any().result(net::flag::process).build();
+                net::XdpContext port;
+                net::XdpContextOpen const open{
+                    port,
+                    {
+                        .interface_name = config.interface,
+                        .filter_rules = rules,
+                        .default_action = tap.valid() ? net::XdpAction::redirect_tap : net::XdpAction::pass_kernel,
+                        .queue_id = config.xdp_queue_id,
+                        .tap_ifindex = tap.ifindex(),
+                    }};
+                return run_with_port(port, &tap, config);
+            }
 #endif
 
-        std::print(stderr, "Error: Unknown backend '{}'\n", config.backend);
-        return EXIT_FAILURE;
-#if __cpp_exceptions
-    } catch (std::exception const& e) {
-        std::print(stderr, "Fatal error: {}\n", e.what());
+            std::print(stderr, "Error: Unknown backend '{}'\n", config.backend);
+            return EXIT_FAILURE;
+        },
+        std::errc::io_error);
+    if (!result) {
+        std::print(stderr, "Fatal error: {}\n", result.error().message());
         return EXIT_FAILURE;
     }
-#endif
+    return *result;
 }

@@ -21,6 +21,7 @@
 #    include "statusbar/owlm/owlm_tool_config.hpp"
 #    include "statusbar/owlm/owlm_tx_identity.hpp"
 #    include "statusbar/realtime/realtime_base.hpp"
+#    include "statusbar/status/catch_or_status.hpp"
 #    include "statusbar/stun/stun.hpp"
 #    include "statusbar/udptun/udptun.hpp"
 
@@ -204,95 +205,95 @@ int run_normal(Config const& cli_const)
         .temporal_shift_ms = cli.temporal_shift_ms,
     };
 
-#    if __cpp_exceptions
-    try {
-#    endif
-        udptun::Session<owlm::OwlmCodec> session{std::move(scfg), owlm::OwlmCodec{}, [&id_params](ieee::Eui48 const& mac) {
-                                                     return owlm::build_tx_identity(mac, id_params);
-                                                 }};
-        udptun::print_eui64_banner("OWLM", session.tx_state(), cli.temporal_shift_ms);
+    auto const result = statusbar::catch_or_status(
+        [&]() -> statusbar::Status {
+            udptun::Session<owlm::OwlmCodec> session{std::move(scfg), owlm::OwlmCodec{}, [&id_params](ieee::Eui48 const& mac) {
+                                                         return owlm::build_tx_identity(mac, id_params);
+                                                     }};
+            udptun::print_eui64_banner("OWLM", session.tx_state(), cli.temporal_shift_ms);
 
-        auto& stop = statusbar::itc::install_stop_signal();
+            auto& stop = statusbar::itc::install_stop_signal();
 
-        // Optional --duration-s watchdog: a side thread that raises the
-        // same stop flag SIGINT raises once the wall-clock deadline is
-        // reached. Uses stop.wait_for_stop() so the watchdog wakes
-        // immediately when stop is requested from any other path.
-        // No-op when duration_s <= 0.
-        std::thread duration_watchdog;
-        if (cli.duration_s > 0.0) {
-            auto const dur_ns = static_cast<int64_t>(cli.duration_s * 1e9);
-            duration_watchdog = std::thread{[&stop, dur_ns]() {
-                auto const deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds{dur_ns};
-                while (!stop.stop_requested()) {
-                    if (std::chrono::steady_clock::now() >= deadline) {
-                        std::println(stderr, "[owlm] --duration-s deadline reached; initiating graceful shutdown");
-                        stop.request_stop();
-                        return;
+            // Optional --duration-s watchdog: a side thread that raises the
+            // same stop flag SIGINT raises once the wall-clock deadline is
+            // reached. Uses stop.wait_for_stop() so the watchdog wakes
+            // immediately when stop is requested from any other path.
+            // No-op when duration_s <= 0.
+            std::thread duration_watchdog;
+            if (cli.duration_s > 0.0) {
+                auto const dur_ns = static_cast<int64_t>(cli.duration_s * 1e9);
+                duration_watchdog = std::thread{[&stop, dur_ns]() {
+                    auto const deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds{dur_ns};
+                    while (!stop.stop_requested()) {
+                        if (std::chrono::steady_clock::now() >= deadline) {
+                            std::println(stderr, "[owlm] --duration-s deadline reached; initiating graceful shutdown");
+                            stop.request_stop();
+                            return;
+                        }
+                        (void)stop.wait_for_stop(std::chrono::milliseconds(100));
                     }
-                    (void)stop.wait_for_stop(std::chrono::milliseconds(100));
+                }};
+            }
+
+            session.run(stop);
+
+            // session.run() has returned. The watchdog will have exited
+            // either because it called request_stop() itself (deadline
+            // reached) or because stop was requested from another path
+            // (signal handler, session.run's own exit) and the watchdog's
+            // next wait_for_stop returned true.
+            if (duration_watchdog.joinable()) {
+                duration_watchdog.join();
+            }
+
+            session.drain_after_stop(session.natural_drain_ns());
+            session.print_final_summary(std::cout, "OWLM");
+
+            // Report overrun counter from the active bridge's
+            // AtomicTripleBuffer. Non-zero is benign — it just means the
+            // sampler (~500 Hz) published a new sample before the wan_timer
+            // consumer (~8 kHz) got around to reading the previous one,
+            // which is normal at these rates. There's no "did the race
+            // fire" counter to track because the triple buffer makes that
+            // race structurally impossible.
+            if (auto const buf = session.bridge_buffer_stats(); buf.available) {
+                std::println(std::cout, "[owlm] bridge buffer: overruns={}", buf.overruns);
+            }
+
+            // Dump the realtime-timer histograms if requested. Snapshot is
+            // populated only on the realtime-timer code path (gPTP / ptp4l +
+            // wan_timer.period_ns > 0); polling path leaves it empty.
+            if (auto const& ws = session.latest_wake_stats(); ws.has_value()) {
+                if (!cli.wan_timer_wake_stats_csv_path.empty()) {
+                    (void)write_histogram_csv(cli.wan_timer_wake_stats_csv_path, ws->error_histogram);
                 }
-            }};
-        }
-
-        session.run(stop);
-
-        // session.run() has returned. The watchdog will have exited
-        // either because it called request_stop() itself (deadline
-        // reached) or because stop was requested from another path
-        // (signal handler, session.run's own exit) and the watchdog's
-        // next wait_for_stop returned true.
-        if (duration_watchdog.joinable()) {
-            duration_watchdog.join();
-        }
-
-        session.drain_after_stop(session.natural_drain_ns());
-        session.print_final_summary(std::cout, "OWLM");
-
-        // Report overrun counter from the active bridge's
-        // AtomicTripleBuffer. Non-zero is benign — it just means the
-        // sampler (~500 Hz) published a new sample before the wan_timer
-        // consumer (~8 kHz) got around to reading the previous one,
-        // which is normal at these rates. There's no "did the race
-        // fire" counter to track because the triple buffer makes that
-        // race structurally impossible.
-        if (auto const buf = session.bridge_buffer_stats(); buf.available) {
-            std::println(std::cout, "[owlm] bridge buffer: overruns={}", buf.overruns);
-        }
-
-        // Dump the realtime-timer histograms if requested. Snapshot is
-        // populated only on the realtime-timer code path (gPTP / ptp4l +
-        // wan_timer.period_ns > 0); polling path leaves it empty.
-        if (auto const& ws = session.latest_wake_stats(); ws.has_value()) {
-            if (!cli.wan_timer_wake_stats_csv_path.empty()) {
-                (void)write_histogram_csv(cli.wan_timer_wake_stats_csv_path, ws->error_histogram);
+                if (!cli.wan_timer_duration_stats_csv_path.empty()) {
+                    (void)write_histogram_csv(cli.wan_timer_duration_stats_csv_path, ws->duration_histogram);
+                }
+            } else if (!cli.wan_timer_wake_stats_csv_path.empty() || !cli.wan_timer_duration_stats_csv_path.empty()) {
+                std::println(
+                    stderr,
+                    "warning: no wake-stats snapshot available — the realtime timer didn't run (gPTP not "
+                    "ready or --wan_timer.period_ns=0). Skipping histogram CSV output.");
             }
-            if (!cli.wan_timer_duration_stats_csv_path.empty()) {
-                (void)write_histogram_csv(cli.wan_timer_duration_stats_csv_path, ws->duration_histogram);
-            }
-        } else if (!cli.wan_timer_wake_stats_csv_path.empty() || !cli.wan_timer_duration_stats_csv_path.empty()) {
-            std::println(
-                stderr,
-                "warning: no wake-stats snapshot available — the realtime timer didn't run (gPTP not "
-                "ready or --wan_timer.period_ns=0). Skipping histogram CSV output.");
-        }
 
-        if (auto const st = session.flush_csv(); !st) {
-            std::println(stderr, "warning: CSV flush failed: {}", st.error().message());
-        }
-        if (auto const dropped = session.csv_records_dropped(); dropped > 0) {
-            std::println(
-                stderr,
-                "warning: csv_records_dropped={} — the CSV writer thread fell behind disk; "
-                "reduce --tx-interval-us or move --csv-output to faster storage",
-                dropped);
-        }
-#    if __cpp_exceptions
-    } catch (std::system_error const& e) {
-        std::println(stderr, "error: {}", e.what());
+            if (auto const st = session.flush_csv(); !st) {
+                std::println(stderr, "warning: CSV flush failed: {}", st.error().message());
+            }
+            if (auto const dropped = session.csv_records_dropped(); dropped > 0) {
+                std::println(
+                    stderr,
+                    "warning: csv_records_dropped={} — the CSV writer thread fell behind disk; "
+                    "reduce --tx-interval-us or move --csv-output to faster storage",
+                    dropped);
+            }
+            return statusbar::Status{};
+        },
+        std::errc::io_error);
+    if (!result) {
+        std::println(stderr, "error: {}", result.error().message());
         return 1;
     }
-#    endif
     return 0;
 }
 

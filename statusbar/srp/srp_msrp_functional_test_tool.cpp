@@ -33,6 +33,7 @@
 #include "statusbar/srp/srp_msrp_participant.hpp"
 #include "statusbar/srp/srp_mvrp.hpp"
 #include "statusbar/srp/srp_mvrp_participant.hpp"
+#include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/toml/toml.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
@@ -485,7 +486,7 @@ int main(int argc, char** argv)
     ToolConfig cfg;
     auto specs = build_arg_specs(cfg);
 
-    auto const status = config::parse_cli_args(argc, argv, specs);
+    auto const status = config::parse_cli_args(argc, argv, specs, config::default_print_usage, "statusbar-msrp-functional-test");
     if (!status) {
         if (config::handled_builtin_command(status)) {
             return EXIT_SUCCESS;
@@ -503,14 +504,10 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
-#if __cpp_exceptions
-    try {
-#endif
-        return run(cfg);
-#if __cpp_exceptions
-    } catch (std::exception const& e) {
-        std::print(stderr, "error: {}\n", e.what());
+    auto const result = statusbar::catch_or_status([&]() -> statusbar::StatusValue<int> { return run(cfg); }, std::errc::io_error);
+    if (!result) {
+        std::print(stderr, "error: {}\n", result.error().message());
         return EXIT_FAILURE;
     }
-#endif
+    return *result;
 }

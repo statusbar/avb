@@ -25,6 +25,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ieee/ieee_ethernet_format.hpp"
 #include "statusbar/pcap/pcap.hpp"
+#include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/tsn/tsn_stream_id_format.hpp"
 
 #include <array>
@@ -590,24 +591,24 @@ auto main(int argc, char* argv[]) -> int
             "  Output: src={} dst={} new_stream_id={} offset={}ns", src_str, dst_str, new_sid_str, cfg.presentation_offset);
     }
 
-#if __cpp_exceptions
-    try {
-#endif
-        if (cfg.format == "am824") {
-            return retransmit_am824(cfg);
-        }
-        if (cfg.format == "aaf") {
-            return retransmit_aaf(cfg);
-        }
-        if (cfg.format == "crf") {
-            return retransmit_crf(cfg);
-        }
-        std::println(stderr, "Error: unknown format '{}' (use am824, aaf, or crf)", cfg.format);
-        return EXIT_FAILURE;
-#if __cpp_exceptions
-    } catch (std::exception const& e) {
-        std::println(stderr, "Error: {}", e.what());
+    auto const run_result = statusbar::catch_or_status(
+        [&]() -> statusbar::StatusValue<int> {
+            if (cfg.format == "am824") {
+                return retransmit_am824(cfg);
+            }
+            if (cfg.format == "aaf") {
+                return retransmit_aaf(cfg);
+            }
+            if (cfg.format == "crf") {
+                return retransmit_crf(cfg);
+            }
+            std::println(stderr, "Error: unknown format '{}' (use am824, aaf, or crf)", cfg.format);
+            return EXIT_FAILURE;
+        },
+        std::errc::io_error);
+    if (!run_result) {
+        std::println(stderr, "Error: {}", run_result.error().message());
         return EXIT_FAILURE;
     }
-#endif
+    return *run_result;
 }
