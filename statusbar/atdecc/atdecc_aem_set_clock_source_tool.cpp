@@ -251,14 +251,12 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 
 void print_usage(char const* prog, statusbar::args::ArgumentSpecs const& specs)
 {
-    std::print(stderr, "Usage: {} [options]\n\nOptions:\n", prog);
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
-    std::print(stderr, "\nExamples:\n");
-    std::print(stderr, "  {} --interface=eth0 --target-entity-id=00:1c:ab:ff:fe:00:76:04 \\\n", prog);
-    std::print(stderr, "    --clock-domain-index=0 --clock-source-index=5\n");
-    std::print(stderr, "  {} --interface=eth0 --action=GET --target-entity-id=00:1c:ab:ff:fe:00:76:04\n", prog);
+    static constexpr std::array<std::string_view, 2> examples{
+        "--interface=eth0 --target-entity-id=00:1c:ab:ff:fe:00:76:04 \\\n"
+        "    --clock-domain-index=0 --clock-source-index=5",
+        "--interface=eth0 --action=GET --target-entity-id=00:1c:ab:ff:fe:00:76:04",
+    };
+    statusbar::config::default_print_usage(prog, specs, "", examples);
 }
 
 }  // namespace

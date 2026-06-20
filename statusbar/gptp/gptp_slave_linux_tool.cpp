@@ -21,12 +21,14 @@
 
 #    include <poll.h>
 
+#    include <array>
 #    include <chrono>
 #    include <csignal>
 #    include <cstdio>
 #    include <cstdlib>
 #    include <iterator>
 #    include <print>
+#    include <span>
 #    include <string>
 
 using namespace statusbar;
@@ -107,23 +109,21 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 
 void print_usage(char const* program_name, statusbar::args::ArgumentSpecs const& specs)
 {
-    std::println("Usage: {} [options]", program_name);
-    std::println("\ngPTP slave-only follower daemon for Linux.");
-    std::println("Requires CAP_NET_RAW + CAP_NET_ADMIN, or root.\n");
-    std::println("Options:");
+    static constexpr std::array<std::string_view, 4> examples{
+        "--interface=eth0 --profile=standard --verbose",
+        "--interface=eth0 --profile=automotive --manual-peer-delay=500000 --software --verbose",
+        "--interface=eth0 --software --servo-ki=0.0001 --bridge-clock=monotonic --verbose",
+        "--config=gptp.toml --verbose",
+    };
+    config::default_print_usage(
+        program_name,
+        specs,
+        "gPTP slave-only follower daemon for Linux.\nRequires CAP_NET_RAW + CAP_NET_ADMIN, or root.",
+        examples);
 
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print("{}", help);
-
-    std::println("\nExamples:");
-    std::println("  {} --interface=eth0 --profile=standard --verbose", program_name);
-    std::println("  {} --interface=eth0 --profile=automotive --manual-peer-delay=500000 --software --verbose", program_name);
-    std::println("  {} --interface=eth0 --software --servo-ki=0.0001 --bridge-clock=monotonic --verbose", program_name);
-    std::println("  {} --config=gptp.toml --verbose", program_name);
-    std::println("\nConfiguration File:");
-    std::println("  Settings can be stored in a TOML file and loaded with --config=FILE.");
-    std::println("  CLI arguments override config file values. Save current config with --config-save=FILE.");
+    std::println(stderr, "\nConfiguration File:");
+    std::println(stderr, "  Settings can be stored in a TOML file and loaded with --config=FILE.");
+    std::println(stderr, "  CLI arguments override config file values. Save current config with --config-save=FILE.");
 }
 
 /// Resolve derived fields from the parsed string values.

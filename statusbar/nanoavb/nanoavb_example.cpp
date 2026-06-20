@@ -28,6 +28,7 @@
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -37,6 +38,7 @@
 #include <iterator>
 #include <memory>
 #include <print>
+#include <span>
 #include <string>
 #include <system_error>
 
@@ -579,18 +581,18 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 
 void print_usage(char const* program_name, statusbar::args::ArgumentSpecs const& specs)
 {
-    std::print(stderr, "Usage: {} [options]\n", program_name);
-    std::print(stderr, "\nOptions:\n");
-
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
-
-    std::print(stderr, "\nExamples:\n");
 #if defined(__linux__)
-    std::print(stderr, "  {} --ptp.driver=linuxptp --ptp.device=/dev/ptp0\n", program_name);
+    static constexpr std::array<std::string_view, 2> examples{
+        "--ptp.driver=linuxptp --ptp.device=/dev/ptp0",
+        "--ptp.driver=system",
+    };
+#else
+    static constexpr std::array<std::string_view, 1> examples{
+        "--ptp.driver=system",
+    };
 #endif
-    std::print(stderr, "  {} --ptp.driver=system\n", program_name);
+    statusbar::config::default_print_usage(program_name, specs, "", examples);
+
     std::print(stderr, "\nPress Ctrl-C to stop.\n");
 }
 

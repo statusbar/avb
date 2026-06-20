@@ -25,6 +25,7 @@
 #    include "statusbar/stun/stun.hpp"
 #    include "statusbar/udptun/udptun.hpp"
 
+#    include <array>
 #    include <atomic>
 #    include <chrono>
 #    include <cstdint>
@@ -45,15 +46,12 @@ namespace {
 
 void print_usage(char const* program_name, statusbar::args::ArgumentSpecs const& specs)
 {
-    std::println("Usage: {} [options]", program_name);
-    std::println("\nOne-way latency measurement tool. Requires CAP_NET_RAW + CAP_NET_ADMIN.\n");
-    std::println("Options:");
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print("{}", help);
-    std::println("\nExamples:");
-    std::println("  {} --gptp-interface=eth0 --owlm-interface=eth1 --peer=10.0.0.5 --tx-interval-us=1000", program_name);
-    std::println("  {} --gptp-interface=eth0 --peer=239.1.2.3 --mcast-ttl=2 --dscp=46", program_name);
+    static constexpr std::array<std::string_view, 2> examples{
+        "--gptp-interface=eth0 --owlm-interface=eth1 --peer=10.0.0.5 --tx-interval-us=1000",
+        "--gptp-interface=eth0 --peer=239.1.2.3 --mcast-ttl=2 --dscp=46",
+    };
+    config::default_print_usage(
+        program_name, specs, "One-way latency measurement tool. Requires CAP_NET_RAW + CAP_NET_ADMIN.", examples);
 }
 
 int run_reflect(Config const& cli)

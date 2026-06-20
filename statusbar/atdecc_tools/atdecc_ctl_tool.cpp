@@ -32,6 +32,7 @@
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/toml/toml.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <format>
@@ -39,6 +40,7 @@
 #include <memory>
 #include <optional>
 #include <print>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -127,18 +129,15 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
 
 void print_usage(char const* prog, args::ArgumentSpecs const& specs)
 {
-    std::println(stderr, "Usage: {} --interface=<name> --command=<cmd> [options]", prog);
-    std::println(stderr, "\nScriptable ATDECC controller (connect / clock-source / discovery / batch).\n");
-    std::println(stderr, "Options:");
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
-    std::println(stderr, "\nExamples:");
-    std::println(stderr, "  {} --interface=eth0 --command=list", prog);
-    std::println(stderr, "  {} --interface=eth0 --command=connect --talker=jdk01a:0 --listener=jdk01d:0", prog);
-    std::println(stderr, "  {} --interface=eth0 --command=set-clock-source --entity=the audio interface --clock-source=1", prog);
-    std::println(stderr, "  {} --interface=eth0 --command=batch --file=ops.toml", prog);
-    std::println(stderr, "  {} --interface=eth0 --command=supervise --file=ops.toml", prog);
+    static constexpr std::array<std::string_view, 5> examples{
+        "--interface=eth0 --command=list",
+        "--interface=eth0 --command=connect --talker=jdk01a:0 --listener=jdk01d:0",
+        "--interface=eth0 --command=set-clock-source --entity=the audio interface --clock-source=1",
+        "--interface=eth0 --command=batch --file=ops.toml",
+        "--interface=eth0 --command=supervise --file=ops.toml",
+    };
+    config::default_print_usage(
+        prog, specs, "Scriptable ATDECC controller (connect / clock-source / discovery / batch).", examples);
 }
 
 // Run the reactor for up to `budget_ms`, invoking `on_event` for every drained
@@ -189,7 +188,9 @@ void print_trace_verdict(Op const& op, bool is_connect, atdecc_tools::HandshakeL
     std::println("    [1] controller -> listener   {:<22} sent", rx_name);
     std::println("    [2] listener   -> talker     {:<22} {}", relay_name, legs.relay_seen ? "relayed" : "NOT SEEN");
     std::println(
-        "    [3] talker     -> listener   {:<22} {}", tresp_name, legs.talker_status ? acmp_status_name(*legs.talker_status) : "NO REPLY");
+        "    [3] talker     -> listener   {:<22} {}",
+        tresp_name,
+        legs.talker_status ? acmp_status_name(*legs.talker_status) : "NO REPLY");
     std::println(
         "    [4] listener   -> controller {:<22} {}",
         lresp_name,
@@ -216,13 +217,12 @@ void print_trace_verdict(Op const& op, bool is_connect, atdecc_tools::HandshakeL
             verdict = std::format("talker '{}' REJECTED the stream: {}", op.talker.name, acmp_status_name(*legs.talker_status));
             break;
         case atdecc_tools::HandshakeFault::ListenerNoReply:
-            verdict =
-                "talker answered SUCCESS but the listener's response to the controller was not seen "
-                "(likely just missed on the bus -- the connection is probably up)";
+            verdict = "talker answered SUCCESS but the listener's response to the controller was not seen "
+                      "(likely just missed on the bus -- the connection is probably up)";
             break;
         case atdecc_tools::HandshakeFault::ListenerRejected:
-            verdict =
-                std::format("listener '{}' returned {} to the controller", op.listener.name, acmp_status_name(*legs.listener_status));
+            verdict = std::format(
+                "listener '{}' returned {} to the controller", op.listener.name, acmp_status_name(*legs.listener_status));
             break;
         case atdecc_tools::HandshakeFault::None:
             verdict = "all four legs completed with SUCCESS";

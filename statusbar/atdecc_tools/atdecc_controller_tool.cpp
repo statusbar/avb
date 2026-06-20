@@ -60,12 +60,7 @@ auto build_arg_specs(CommonConfig& config) -> args::ArgumentSpecs
 
 void print_usage(char const* prog, args::ArgumentSpecs const& specs)
 {
-    std::println(stderr, "Usage: {} --interface=<name> [options]", prog);
-    std::println(stderr, "\nInteractive ATDECC controller with TUI.\n");
-    std::println(stderr, "Options:");
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
+    config::default_print_usage(prog, specs, "Interactive ATDECC controller with TUI.");
 }
 
 }  // namespace

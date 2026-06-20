@@ -866,14 +866,12 @@ auto build_arg_specs(MonitorConfig& config) -> args::ArgumentSpecs
 
 void print_usage(char const* prog, args::ArgumentSpecs const& specs)
 {
-    std::println(stderr, "Usage: {} --interface=<name> [options]", prog);
-    std::println(stderr, "       {} --pcap=<file>      [options]", prog);
-    std::println(stderr, "\nMonitor ATDECC entities (ADP), descriptors (AEM), and stream connections (ACMP).");
-    std::println(stderr, "Frames are read from a live network interface or a pcap/pcapng file.\n");
-    std::println(stderr, "Options:");
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
+    config::default_print_usage(
+        prog,
+        specs,
+        "Monitor ATDECC entities (ADP), descriptors (AEM), and stream connections (ACMP).\n"
+        "Frames are read from a live network interface (--interface=<name>) or a "
+        "pcap/pcapng file (--pcap=<file>).");
 }
 
 auto run_live(MonitorConfig const& config) -> int

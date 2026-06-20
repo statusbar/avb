@@ -99,12 +99,7 @@ auto build_arg_specs(Config& c) -> statusbar::args::ArgumentSpecs
 
 void print_usage(char const* prog, statusbar::args::ArgumentSpecs const& specs)
 {
-    std::println("Usage: {} [options]", prog);
-    std::println("\nSTUN rendezvous client. --server, --key, and --eui64 are required.\n");
-    std::println("Options:");
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print("{}", help);
+    statusbar::config::default_print_usage(prog, specs, "STUN rendezvous client. --server, --key, and --eui64 are required.");
 }
 
 }  // namespace

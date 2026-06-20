@@ -6,6 +6,7 @@
 #include "statusbar/pcap/pcap.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include <print>
 #include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -94,16 +96,12 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 
 void print_usage(char const* program_name, statusbar::args::ArgumentSpecs const& specs)
 {
-    std::print(stderr, "Usage: {} --file=<pcap_or_pcapng_file>\n", program_name);
-    std::print(stderr, "\nOptions:\n");
-
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
-
-    std::print(stderr, "\nExamples:\n");
-    std::print(stderr, "  {} --file=capture.pcap\n", program_name);
-    std::print(stderr, "  {} --file=capture.pcapng\n", program_name);
+    static constexpr std::array<std::string_view, 2> examples{
+        "--file=capture.pcap",
+        "--file=capture.pcapng",
+    };
+    statusbar::config::default_print_usage(
+        program_name, specs, "Reads a PCAP or PCAPng file given by --file (required).", examples);
 }
 
 }  // namespace

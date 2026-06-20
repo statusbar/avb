@@ -358,13 +358,11 @@ static void print_report(
 
 static void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
 {
-    std::println(stderr, "AECP Address Access & Memory Object Upload Analyzer");
-    std::println(stderr, "Analyzes AA conversations and firmware upload sessions in pcap captures.\n");
-    std::println(stderr, "Usage: {} [options]\n", program_name);
-    std::println(stderr, "Options:");
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
+    config::default_print_usage(
+        program_name,
+        specs,
+        "AECP Address Access & Memory Object Upload Analyzer. "
+        "Analyzes AA conversations and firmware upload sessions in pcap captures.");
 }
 
 auto main(int argc, char* argv[]) -> int

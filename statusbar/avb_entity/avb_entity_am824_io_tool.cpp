@@ -33,6 +33,7 @@
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -43,6 +44,7 @@
 #include <iterator>
 #include <memory>
 #include <print>
+#include <span>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -167,21 +169,25 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
 
 void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
 {
-    std::print(stderr, "Usage: {} [options]\n", program_name);
-    std::print(stderr, "\nAVB Entity AM824 I/O Tool\n");
-    std::print(stderr, "Runs an AVB entity with N-channel AM824 audio passthrough and DSP processing.\n");
-    std::print(stderr, "\nOptions:\n");
-
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
-
-    std::print(stderr, "\nExamples:\n");
 #if defined(__linux__)
-    std::print(stderr, "  {} --ptp.driver=linuxptp --ptp.device=/dev/ptp0 --descriptor-storage=entity.bin\n", program_name);
+    static constexpr std::array<std::string_view, 3> examples{
+        "--ptp.driver=linuxptp --ptp.device=/dev/ptp0 --descriptor-storage=entity.bin",
+        "--interface=eth0 --filter.gain_db=-6 --descriptor-storage=entity.bin",
+        "--ptp.driver=system --descriptor-storage=entity.bin",
+    };
+#else
+    static constexpr std::array<std::string_view, 2> examples{
+        "--interface=eth0 --filter.gain_db=-6 --descriptor-storage=entity.bin",
+        "--ptp.driver=system --descriptor-storage=entity.bin",
+    };
 #endif
-    std::print(stderr, "  {} --interface=eth0 --filter.gain_db=-6 --descriptor-storage=entity.bin\n", program_name);
-    std::print(stderr, "  {} --ptp.driver=system --descriptor-storage=entity.bin\n", program_name);
+    config::default_print_usage(
+        program_name,
+        specs,
+        "AVB Entity AM824 I/O Tool\n"
+        "Runs an AVB entity with N-channel AM824 audio passthrough and DSP processing.",
+        examples);
+
     std::print(stderr, "\nPress Ctrl-C to stop.\n");
 }
 

@@ -298,12 +298,10 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 
 void print_usage(char const* prog, statusbar::args::ArgumentSpecs const& specs)
 {
-    std::print(stderr, "Usage: {} [options]\n\nOptions:\n", prog);
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
-    std::print(stderr, "\nExample:\n");
-    std::print(stderr, "  {} --interface=eth0 --target-entity-id=00:1c:ab:ff:fe:00:76:04 --descriptor-index=0\n", prog);
+    static constexpr std::array<std::string_view, 1> examples{
+        "--interface=eth0 --target-entity-id=00:1c:ab:ff:fe:00:76:04 --descriptor-index=0",
+    };
+    statusbar::config::default_print_usage(prog, specs, "", examples);
 }
 
 }  // namespace

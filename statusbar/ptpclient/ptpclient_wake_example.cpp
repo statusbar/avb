@@ -13,6 +13,7 @@
 #include "statusbar/realtime/realtime.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -22,6 +23,7 @@
 #include <iterator>
 #include <print>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 
@@ -48,17 +50,12 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 
 void print_usage(char const* program_name, statusbar::args::ArgumentSpecs const& specs)
 {
-    std::print(stderr, "Usage: {} [options]\n", program_name);
-    std::print(stderr, "\nOptions:\n");
-
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
-
-    std::print(stderr, "\nExamples:\n");
-    std::print(stderr, "  {} --ptp.driver=linuxptp --ptp.device=/dev/ptp0 --ptp.period=1000000\n", program_name);
-    std::print(stderr, "  {} --ptp.period=1000000 --ptp.compensation=-3000   # Wake 3us earlier\n", program_name);
-    std::print(stderr, "  {} --ptp.period=1000000 --ptp.no-rt                # Without RT priority\n", program_name);
+    static constexpr std::array<std::string_view, 3> examples{
+        "--ptp.driver=linuxptp --ptp.device=/dev/ptp0 --ptp.period=1000000",
+        "--ptp.period=1000000 --ptp.compensation=-3000   # Wake 3us earlier",
+        "--ptp.period=1000000 --ptp.no-rt                # Without RT priority",
+    };
+    statusbar::config::default_print_usage(program_name, specs, "", examples);
     std::print(stderr, "\nConfiguration file example:\n");
     std::print(stderr, "  [ptp]\n");
     std::print(stderr, "  driver = \"linuxptp\"\n");

@@ -40,6 +40,7 @@
 #include <iterator>
 #include <memory>
 #include <print>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -403,18 +404,17 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
 
 void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
 {
-    std::print(stderr, "Usage: {} [options]\n", program_name);
-    std::print(stderr, "\nAVB Entity Audio I/O Tool (dual-format AM824 + AAF)\n");
-    std::print(stderr, "Runs an AVB entity with one AM824 stream pair and one AAF stream pair.\n");
-    std::print(stderr, "\nOptions:\n");
+    static constexpr std::array<std::string_view, 2> examples{
+        "--interface=eth0 --descriptor-storage=entity_audio.bin",
+        "--ptp.driver=system --descriptor-storage=entity_audio.bin",
+    };
+    config::default_print_usage(
+        program_name,
+        specs,
+        "AVB Entity Audio I/O Tool (dual-format AM824 + AAF)\n"
+        "Runs an AVB entity with one AM824 stream pair and one AAF stream pair.",
+        examples);
 
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
-
-    std::print(stderr, "\nExamples:\n");
-    std::print(stderr, "  {} --interface=eth0 --descriptor-storage=entity_audio.bin\n", program_name);
-    std::print(stderr, "  {} --ptp.driver=system --descriptor-storage=entity_audio.bin\n", program_name);
     std::print(stderr, "\nGenerate the blob with: aem-entity-blob --dual --out entity_audio.bin\n");
     std::print(stderr, "\nPress Ctrl-C to stop.\n");
 }

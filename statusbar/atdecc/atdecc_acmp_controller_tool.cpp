@@ -390,17 +390,13 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 
 void print_usage(char const* prog, statusbar::args::ArgumentSpecs const& specs)
 {
-    std::print(stderr, "Usage: {} [options]\n", prog);
-    std::print(stderr, "\nOptions:\n");
+    static constexpr std::array<std::string_view, 1> examples{
+        "--interface=eth0 --action=CONNECT \\\n"
+        "    --talker-entity-id=00:11:22:33:44:55:66:77 --talker-uid=0 \\\n"
+        "    --listener-entity-id=aa:bb:cc:dd:ee:ff:00:11 --listener-uid=1",
+    };
+    statusbar::config::default_print_usage(prog, specs, "", examples);
 
-    std::string help;
-    specs.format_help_to(std::back_inserter(help));
-    std::print(stderr, "{}", help);
-
-    std::print(stderr, "\nExamples:\n");
-    std::print(stderr, "  {} --interface=eth0 --action=CONNECT \\\n", prog);
-    std::print(stderr, "    --talker-entity-id=00:11:22:33:44:55:66:77 --talker-uid=0 \\\n");
-    std::print(stderr, "    --listener-entity-id=aa:bb:cc:dd:ee:ff:00:11 --listener-uid=1\n");
     std::print(stderr, "\nConfiguration file example:\n");
     std::print(stderr, "  interface = \"eth0\"\n");
     std::print(stderr, "  action = \"CONNECT\"\n");
