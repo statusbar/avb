@@ -77,34 +77,33 @@ Depends on `statusbar-core`, `statusbar-crypto`, and `statusbar-audio`. See the 
 
 ### Key command-line tools
 
-- `statusbar-atdecc-controller` — ATDECC controller (discover entities, issue
-  AEM commands, set up streams).
-- `statusbar-atdecc-monitor` — passive ATDECC traffic monitor.
-- `statusbar-acmp-controller` — standalone ACMP (connection management) tool.
-- `statusbar-descriptor-storage` — read/dump AEM descriptor storage blobs
-  (cross-validation with Python AEMXML tooling).
-- `statusbar-aecp-aa-analyzer` — AECP Address Access traffic analyzer.
-- `statusbar-gptp-slave` (Linux) — gPTP slave clock implementation.
-- `statusbar-gptp-ntpshm` (Linux) — gPTP-to-NTP-SHM bridge for `chrony` / `ntpd`.
-- `statusbar-msrp-functional-test` — MSRP stream-reservation tester.
-- `statusbar-avtp-retransmit` — AVTP stream replayer.
-- `statusbar-avtp-to-wav` — decode an AVTP audio capture to WAV.
-- `statusbar-avtp-crypto-tool` — AVTP crypto / key-exchange utility.
-- `statusbar-avb-stereo-io`, `statusbar-avb-am824-io` (Linux) — example AVB
-  audio entities (stereo PCM, AM824).
-- `statusbar-nanoavb`, `statusbar-nanoavb-sm` — minimal AVB entity example.
-- `statusbar-owlm-tool` (Linux) — one-way latency measurement over a
-  gPTP-locked link.
-- `statusbar-owlm-analyze` — post-process `owlm` CSV output into plots/stats
-  (numpy / pandas / matplotlib).
-- `statusbar-rttest-send-avtp-tool` (Linux) — real-time AVTP packet sender for
-  latency tests.
-- `statusbar-stun-client-tool`, `statusbar-stun-server-tool` — STUN rendezvous
-  client / server.
-- `statusbar-stun-sm-tool` — render the STUN state machines as DOT / Markdown.
-- `statusbar-pcap-dump` — pretty-print a pcap / pcapng capture frame-by-frame.
-- `statusbar-bpf-dump` (Linux) — dump packets matching an EtherType filter via
-  eBPF.
+Full reference with examples: **[`docs/TOOLS.md`](docs/TOOLS.md)** — every
+installed binary, grouped by purpose. Highlights:
+
+- **AVB endpoints** (Linux): `statusbar-avb-audio-io` (dual-format
+  AM824 + AAF + CRF), `statusbar-avb-am824-io`, `statusbar-avb-stereo-io`,
+  `statusbar-nanoavb`. `--interface` is **required**.
+- **ATDECC**: `statusbar-atdecc-ctl` (scriptable connect / clock-source /
+  batch), `statusbar-acmp-controller` (one-shot connect),
+  `statusbar-atdecc-controller` (interactive TUI), `statusbar-atdecc-monitor`,
+  `statusbar-aem-get-counters`, `statusbar-aem-set-clock-source`,
+  `statusbar-aem-entity-blob`, `statusbar-descriptor-storage`,
+  `statusbar-aecp-aa-analyzer`.
+- **Capture / audio**: `statusbar-pcap-dump`, `statusbar-bpf-dump`,
+  `statusbar-avtp-to-wav`, `statusbar-avtp-retransmit`,
+  `statusbar-rttest-send-avtp-tool` (Linux).
+- **Timing** (Linux): `statusbar-gptp-slave`, `statusbar-gptp-ntpshm`,
+  `statusbar-ptpclient-wake`, `statusbar-gps-ratio-tracker`.
+- **Inter-site / NAT**: `owlm_tool` (Linux), `stun_client_tool`,
+  `stun_server_tool`. **SRP**: `statusbar-msrp-functional-test`.
+- **Crypto**: `statusbar-avtp-crypto-tool`.
+- **State-machine diagrams** (DOT / Markdown):
+  `statusbar-{atdecc,avtp,gptp,srp,nanoavb}-sm`, `stun_sm_tool`.
+
+Every tool supports `--help`; facility-based tools also support
+`--completion` and a TOML config cascade (`--config-load` / `--config-save`).
+The Python `owlm_analyze` (numpy / pandas / matplotlib) post-processes `owlm`
+CSV output into plots and stats.
 
 ### Modules
 
