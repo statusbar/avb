@@ -42,18 +42,11 @@
 
 namespace {
 
-// Default network interface
-#if defined(__APPLE__)
-constexpr char const* DEFAULT_INTERFACE = "en0";
-#else
-constexpr char const* DEFAULT_INTERFACE = "eth0";
-#endif
-
 // Config contains PTP fields via composition, adds nanoavb-specific fields
 struct Config
 {
     statusbar::ptpclient::PtpAppConfig ptp_app;
-    std::string interface_name{DEFAULT_INTERFACE};
+    std::string interface_name;  // no default — --interface is required
 };
 
 //
@@ -574,7 +567,8 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
     statusbar::ptpclient::add_ptp_arg_specs(specs, config.ptp_app);
 
     // NanoAVB options
-    specs.add_device("interface", "Network interface", DEFAULT_INTERFACE, [&](auto v) { config.interface_name = std::string{v}; });
+    specs.add_device(
+        "interface", "Network interface (required, e.g. eth0)", "", [&](auto v) { config.interface_name = std::string{v}; });
 
     return specs;
 }
@@ -886,6 +880,12 @@ auto main(int argc, char** argv) -> int
     auto cli_result = statusbar::config::parse_cli_args(argc, argv, specs, print_usage);
     if (!cli_result) {
         return statusbar::config::handled_builtin_command(cli_result) ? 0 : 1;
+    }
+
+    if (config.interface_name.empty()) {
+        std::println(stderr, "Error: --interface=<iface> is required");
+        print_usage(argv[0], specs);
+        return EXIT_FAILURE;
     }
 
     // Create all NanoAVB components. NanoAvbComponents is non-movable, so it

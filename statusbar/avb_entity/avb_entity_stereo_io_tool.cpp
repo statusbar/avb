@@ -47,13 +47,6 @@ namespace {
 using namespace statusbar;
 using TimePoint = sm::TimePoint;
 
-// Default network interface
-#if defined(__APPLE__)
-constexpr char const* DEFAULT_INTERFACE = "en0";
-#else
-constexpr char const* DEFAULT_INTERFACE = "eth0";
-#endif
-
 //
 // Configuration
 //
@@ -67,7 +60,7 @@ struct Config
     avb_entity::AvbEntityStereoIOConfig entity{
         .entity_id = ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x01},
         .entity_model_id = ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x00},
-        .interface_name = DEFAULT_INTERFACE,
+        // interface_name has no default — --interface is required.
         .talker_dest_mac = {0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x00},
         .vlan_id = 2,
         .filter_freq_hz = 1000.0,
@@ -102,7 +95,7 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     });
 
     specs.add_device(
-        "interface", "Network interface", DEFAULT_INTERFACE, [&](auto v) { config.entity.interface_name = std::string{v}; });
+        "interface", "Network interface (required, e.g. eth0)", "", [&](auto v) { config.entity.interface_name = std::string{v}; });
 
     specs.add<std::string>("entity.name", "Entity name (shown in ATDECC controllers)", config.entity.entity_name, [&](auto v) {
         config.entity.entity_name = v;
@@ -153,10 +146,8 @@ void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
     std::print(stderr, "\nExamples:\n");
 #if defined(__linux__)
     std::print(stderr, "  {} --ptp.driver=linuxptp --ptp.device=/dev/ptp0\n", program_name);
-    std::print(stderr, "  {} --interface=eth0 --filter.gain_db=-6\n", program_name);
-#else
-    std::print(stderr, "  {} --interface=en0 --filter.gain_db=-6\n", program_name);
 #endif
+    std::print(stderr, "  {} --interface=eth0 --filter.gain_db=-6\n", program_name);
     std::print(stderr, "  {} --ptp.driver=system\n", program_name);
     std::print(stderr, "\nPress Ctrl-C to stop.\n");
 }
@@ -364,6 +355,12 @@ auto main(int argc, char** argv) -> int
     auto cli_result = config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-avb-stereo-io");
     if (!cli_result) {
         return config::handled_builtin_command(cli_result) ? 0 : 1;
+    }
+
+    if (config.entity.interface_name.empty()) {
+        std::print(stderr, "Error: --interface=<iface> is required\n");
+        print_usage(argv[0], specs);
+        return EXIT_FAILURE;
     }
 
     // Set up signal handlers for clean shutdown

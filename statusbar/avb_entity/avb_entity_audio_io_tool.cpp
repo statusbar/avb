@@ -65,12 +65,6 @@ using TimePoint = sm::TimePoint;
     return static_cast<bool>(out);
 }
 
-#if defined(__APPLE__)
-constexpr char const* DEFAULT_INTERFACE = "en0";
-#else
-constexpr char const* DEFAULT_INTERFACE = "eth0";
-#endif
-
 auto load_file(std::filesystem::path const& path) -> std::vector<uint8_t>
 {
     std::ifstream file{path, std::ios::binary | std::ios::ate};
@@ -96,7 +90,7 @@ struct Config
         // identifies the shared descriptor MODEL, not this instance).
         .entity_id = ieee::Eui64{},
         .entity_model_id = ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x00},
-        .interface_name = DEFAULT_INTERFACE,
+        // interface_name has no default — --interface is required.
         // JDKS OUI-36 multicast (NOT the 91:E0:F0 MAAP pool). CRF = top of range.
         .am824_talker_dest_mac = {0x71, 0xB3, 0xD5, 0xED, 0xCF, 0xFD},
         .aaf_talker_dest_mac = {0x71, 0xB3, 0xD5, 0xED, 0xCF, 0xFE},
@@ -142,7 +136,7 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         config.entity.entity_model_id = v;
     });
     specs.add_device(
-        "interface", "Network interface", DEFAULT_INTERFACE, [&](auto v) { config.entity.interface_name = std::string{v}; });
+        "interface", "Network interface (required, e.g. eth0)", "", [&](auto v) { config.entity.interface_name = std::string{v}; });
     specs.add<std::string>("entity.name", "Entity name (shown in ATDECC controllers)", config.entity.entity_name, [&](auto v) {
         config.entity.entity_name = v;
     });
@@ -186,21 +180,24 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "8A ch out; patch out->in to loop it back through the tunnel. Default off.",
         config.entity.sweep_enable,
         [&](auto v) { config.entity.sweep_enable = v; });
+    specs.add<double>("sweep.f_start_hz", "Sweep start frequency Hz (default 20)", config.entity.sweep_f_start_hz, [&](auto v) {
+        config.entity.sweep_f_start_hz = v;
+    });
+    specs.add<double>("sweep.f_end_hz", "Sweep end frequency Hz (default 1000)", config.entity.sweep_f_end_hz, [&](auto v) {
+        config.entity.sweep_f_end_hz = v;
+    });
     specs.add<double>(
-        "sweep.f_start_hz", "Sweep start frequency Hz (default 20)", config.entity.sweep_f_start_hz,
-        [&](auto v) { config.entity.sweep_f_start_hz = v; });
-    specs.add<double>(
-        "sweep.f_end_hz", "Sweep end frequency Hz (default 1000)", config.entity.sweep_f_end_hz,
-        [&](auto v) { config.entity.sweep_f_end_hz = v; });
-    specs.add<double>(
-        "sweep.duration_s", "Sweep duration seconds, then repeats (default 5)", config.entity.sweep_duration_s,
-        [&](auto v) { config.entity.sweep_duration_s = v; });
+        "sweep.duration_s", "Sweep duration seconds, then repeats (default 5)", config.entity.sweep_duration_s, [&](auto v) {
+            config.entity.sweep_duration_s = v;
+        });
     specs.add<uint32_t>(
-        "sweep.channel", "Channel index carrying the sweep; others silent (default 0 = first)",
+        "sweep.channel",
+        "Channel index carrying the sweep; others silent (default 0 = first)",
         static_cast<uint32_t>(config.entity.sweep_channel),
         [&](auto v) { config.entity.sweep_channel = static_cast<uint16_t>(v); });
     specs.add<double>(
-        "sweep.amplitude", "Sweep amplitude 0..1 full scale (default 0.5)",
+        "sweep.amplitude",
+        "Sweep amplitude 0..1 full scale (default 0.5)",
         static_cast<double>(config.entity.sweep_amplitude),
         [&](auto v) { config.entity.sweep_amplitude = static_cast<float>(v); });
     specs.add<uint64_t>(
@@ -322,7 +319,8 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add<bool>(
         "udptun.silence_source",
         "Ingest emits zero-PCM (silence) frames at the media cadence even without a connected listener source -- the "
-        "entity transmits silence as if its far talker (e.g. the DSP processor) were sending zeros / not received. Keeps the reverse "
+        "entity transmits silence as if its far talker (e.g. the DSP processor) were sending zeros / not received. Keeps the "
+        "reverse "
         "tunnel + its NAT pinhole warm; with both ends transmitting, direct-peer hole-punches both ways without STUN",
         config.entity.udptun_silence_source,
         [&](auto v) { config.entity.udptun_silence_source = v; });
@@ -414,9 +412,7 @@ void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
     std::print(stderr, "{}", help);
 
     std::print(stderr, "\nExamples:\n");
-#if defined(__linux__)
     std::print(stderr, "  {} --interface=eth0 --descriptor-storage=entity_audio.bin\n", program_name);
-#endif
     std::print(stderr, "  {} --ptp.driver=system --descriptor-storage=entity_audio.bin\n", program_name);
     std::print(stderr, "\nGenerate the blob with: aem-entity-blob --dual --out entity_audio.bin\n");
     std::print(stderr, "\nPress Ctrl-C to stop.\n");
@@ -677,6 +673,12 @@ auto main(int argc, char** argv) -> int
         std::array<char, 256> host{};
         config.entity.entity_name =
             (::gethostname(host.data(), host.size() - 1) == 0) ? std::string{host.data()} : std::string{"AVB Audio IO"};
+    }
+
+    if (config.entity.interface_name.empty()) {
+        std::print(stderr, "Error: --interface=<iface> is required\n");
+        print_usage(argv[0], specs);
+        return EXIT_FAILURE;
     }
 
     if (config.descriptor_storage_path.empty()) {
