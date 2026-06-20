@@ -19,6 +19,7 @@
 
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/config/config.hpp"
 #include "statusbar/ieee/ieee.hpp"
 
 #include <array>
@@ -608,43 +609,54 @@ class AemEntityBlob
     return b.build();
 }
 
-}  // namespace
-
-int main(int argc, char** argv)
+struct Config
 {
     std::string out = "entity.bin";
     std::string name = "Statusbar AVB Bridge";
     uint16_t channels = 8;
     uint32_t sample_rate = 96000;
     bool dual = false;
+};
 
-    for (int i = 1; i < argc; ++i) {
-        std::string_view a{argv[i]};
-        auto next = [&]() -> std::string_view { return (i + 1 < argc) ? std::string_view{argv[++i]} : std::string_view{}; };
-        if (a == "--out") {
-            out = std::string{next()};
-        } else if (a == "--name") {
-            name = std::string{next()};
-        } else if (a == "--channels") {
-            channels = static_cast<uint16_t>(std::stoul(std::string{next()}));
-        } else if (a == "--sample-rate") {
-            sample_rate = static_cast<uint32_t>(std::stoul(std::string{next()}));
-        } else if (a == "--dual") {
-            dual = true;
-        } else if (a == "--help" || a == "-h") {
-            std::println(
-                "Usage: {} [--out FILE] [--channels N] [--sample-rate HZ] [--name NAME] [--dual]\n"
-                "  --dual  emit a dual-format model: 2 stream inputs + 2 stream outputs\n"
-                "          (stream 0 AM824, stream 1 AAF) for AvbEntityAudioIO",
-                argv[0]);
-            return 0;
-        } else {
-            std::println(stderr, "unknown argument: {}", a);
-            return 1;
-        }
+auto build_arg_specs(Config& c) -> args::ArgumentSpecs
+{
+    args::ArgumentSpecs specs;
+    specs.add_file("out", "Output blob path", c.out, [&](auto v) { c.out = std::string{v}; });
+    specs.add<std::string>("name", "Entity name", c.name, [&](auto v) { c.name = v; });
+    specs.add<uint16_t>("channels", "Audio channels per cluster", c.channels, [&](auto v) { c.channels = v; });
+    specs.add<uint32_t>("sample-rate", "Sample rate in Hz", c.sample_rate, [&](auto v) { c.sample_rate = v; });
+    specs.add_flag(
+        "dual", "Emit a dual-format model: 2 stream inputs + 3 stream outputs (stream 0 AM824, 1 AAF, 2 CRF)", [&](auto v) {
+            c.dual = v;
+        });
+    return specs;
+}
+
+void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
+{
+    std::print(stderr, "Usage: {} [options]\n\nOptions:\n", program_name);
+    std::string help;
+    specs.format_help_to(std::back_inserter(help));
+    std::print(stderr, "{}", help);
+}
+
+}  // namespace
+
+int main(int argc, char** argv)
+{
+    Config cfg;
+    auto specs = build_arg_specs(cfg);
+    auto const cli_result = config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-aem-entity-blob");
+    if (!cli_result) {
+        return config::handled_builtin_command(cli_result) ? 0 : 1;
     }
 
-    auto const blob = dual ? build_audio_model(name, channels, sample_rate) : build_bridge_model(name, channels, sample_rate);
+    auto const out = cfg.out;
+    auto const dual = cfg.dual;
+    auto const channels = cfg.channels;
+    auto const sample_rate = cfg.sample_rate;
+    auto const blob =
+        dual ? build_audio_model(cfg.name, channels, sample_rate) : build_bridge_model(cfg.name, channels, sample_rate);
 
     // Round-trip validate before writing — fail loudly if the blob is malformed.
     auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});

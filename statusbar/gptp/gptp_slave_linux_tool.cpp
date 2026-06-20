@@ -3,11 +3,11 @@
 
 // gptp_slave_linux_tool — gPTP slave-only follower daemon for Linux
 //
-// Usage: statusbar-gptp-slave [options]
-//   -i <interface>     Network interface (default: eth0)
-//   -p <profile>       Profile: "standard" or "automotive" (default: standard)
-//   -d <ns>            Manual peer delay in nanoseconds (disables Pdelay exchange)
-//   -v                 Verbose: print every sync update
+// Usage: statusbar-gptp-slave [options]   (see --help for the full list)
+//   --interface=<iface>         Network interface (default: eth0)
+//   --profile=standard|automotive   gPTP profile (default: standard)
+//   --manual-peer-delay=<ns>    Manual peer delay (disables Pdelay exchange)
+//   --verbose                   Print every sync update
 //
 // Requires CAP_NET_RAW + CAP_NET_ADMIN, or root.
 // After building, grant capabilities with:

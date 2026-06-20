@@ -36,6 +36,9 @@
 //
 // Needs CAP_NET_RAW (run as root or `setcap cap_net_raw,cap_net_admin+ep`).
 
+#include "statusbar/config/config.hpp"
+#include "statusbar/status/throw_or_abort.hpp"
+
 #include <unistd.h>
 
 #include <array>
@@ -46,6 +49,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
+#include <print>
 #include <span>
 #include <string>
 #include <string_view>
@@ -88,31 +93,6 @@ struct Config
     bool from_set = false;
 };
 
-void print_usage(char const* prog)
-{
-    std::printf(
-        "Usage: %s --interface=IFACE [options]\n"
-        "  --interface=IFACE   network interface (e.g. eth0)   [required]\n"
-        "  --bypass=0|1        set PACKET_QDISC_BYPASS          [default 1]\n"
-        "  --bind=0|1          bind() socket to iface first     [default 0]\n"
-        "  --count=N           frames to send per run           [default 5]\n"
-        "  --interval-ms=N     gap between frames               [default 200]\n"
-        "  --pad=0|1           pad frame to 60 bytes (runt fix) [default 1]\n"
-        "  --payload-len=N     ADPDU bytes to send (runt test)  [default 68]\n"
-        "  --dest=MAC          destination MAC (aa:bb:..)       [default ATDECC mcast]\n"
-        "  --ethertype=0xNNNN  EtherType                        [default 0x22f0]\n"
-        "  --compare           run bypass=0 then bypass=1\n"
-        "  --verbose           hexdump the frame\n"
-        "  --listen            RECEIVER mode: raw-capture --ethertype frames\n"
-        "  --listen-secs=N     receiver duration                [default 10]\n"
-        "  --from=MAC          count only frames from this src MAC (receiver)\n"
-        "  --help\n"
-        "\nReceiver example (run on the OTHER host on the same switch):\n"
-        "  %s --interface=eth0 --listen --from=<sender-mac>\n",
-        prog,
-        prog);
-}
-
 auto parse_mac(std::string_view s, std::array<uint8_t, 6>& out) -> bool
 {
     unsigned v[6] = {};
@@ -123,6 +103,51 @@ auto parse_mac(std::string_view s, std::array<uint8_t, 6>& out) -> bool
         out[static_cast<size_t>(i)] = static_cast<uint8_t>(v[i]);
     }
     return true;
+}
+
+auto build_arg_specs(Config& c) -> statusbar::args::ArgumentSpecs
+{
+    statusbar::args::ArgumentSpecs specs;
+    specs.add_device("interface", "Network interface (e.g. eth0) [required]", "", [&](auto v) { c.interface = std::string{v}; });
+    specs.add<int>("bypass", "Set PACKET_QDISC_BYPASS (0|1)", c.bypass, [&](auto v) { c.bypass = v; });
+    specs.add<int>("bind", "bind() socket to iface first (0|1)", c.bind_sock, [&](auto v) { c.bind_sock = v; });
+    specs.add<int>("count", "Frames to send per run", c.count, [&](auto v) { c.count = v; });
+    specs.add<int>("interval-ms", "Gap between frames (ms)", c.interval_ms, [&](auto v) { c.interval_ms = v; });
+    specs.add<int>("pad", "Pad frame to 60 bytes / runt fix (0|1)", c.pad, [&](auto v) { c.pad = v; });
+    specs.add<int>("payload-len", "ADPDU bytes to send (runt test)", c.payload_len, [&](auto v) { c.payload_len = v; });
+    specs.add<std::string>("dest", "Destination MAC aa:bb:.. (default ATDECC mcast)", "", [&](auto v) {
+        if (!v.empty() && !parse_mac(v, c.dest)) {
+            statusbar::throw_or_abort(std::errc::invalid_argument, "invalid --dest MAC");
+        }
+    });
+    specs.add<std::string>("ethertype", "EtherType (0xNNNN)", "0x22f0", [&](auto v) {
+        c.ethertype = static_cast<uint16_t>(std::strtoul(std::string{v}.c_str(), nullptr, 0));
+    });
+    specs.add_flag("compare", "Run bypass=0 then bypass=1 back-to-back", [&](auto v) { c.compare = v; });
+    specs.add_flag("verbose", "Hexdump the frame", [&](auto v) { c.verbose = v; });
+    specs.add_flag("listen", "RECEIVER mode: raw-capture --ethertype frames", [&](auto v) { c.listen = v; });
+    specs.add<int>("listen-secs", "Receiver duration (s)", c.listen_secs, [&](auto v) { c.listen_secs = v; });
+    specs.add<std::string>("from", "Count only frames from this src MAC (receiver)", "", [&](auto v) {
+        if (!v.empty()) {
+            if (!parse_mac(v, c.from)) {
+                statusbar::throw_or_abort(std::errc::invalid_argument, "invalid --from MAC");
+            }
+            c.from_set = true;
+        }
+    });
+    return specs;
+}
+
+void print_usage(char const* prog, statusbar::args::ArgumentSpecs const& specs)
+{
+    std::print(stderr, "Usage: {} --interface=IFACE [options]\n\nOptions:\n", prog);
+    std::string help;
+    specs.format_help_to(std::back_inserter(help));
+    std::print(stderr, "{}", help);
+    std::print(
+        stderr,
+        "\nReceiver example (run on the OTHER host on the same switch):\n  {} --interface=eth0 --listen --from=<sender-mac>\n",
+        prog);
 }
 
 // Read one counter from /sys/class/net/<iface>/statistics/<name>; -1 on error.
@@ -416,56 +441,15 @@ auto run_listen(Config const& cfg, int ifindex) -> int
 auto main(int argc, char** argv) -> int
 {
     Config cfg;
-    for (int i = 1; i < argc; ++i) {
-        std::string_view a{argv[i]};
-        auto val = [&](std::string_view key) -> std::string_view { return a.substr(key.size()); };
-        if (a.starts_with("--interface=")) {
-            cfg.interface = std::string{val("--interface=")};
-        } else if (a.starts_with("--bypass=")) {
-            cfg.bypass = std::atoi(val("--bypass=").data());
-        } else if (a.starts_with("--bind=")) {
-            cfg.bind_sock = std::atoi(val("--bind=").data());
-        } else if (a.starts_with("--count=")) {
-            cfg.count = std::atoi(val("--count=").data());
-        } else if (a.starts_with("--interval-ms=")) {
-            cfg.interval_ms = std::atoi(val("--interval-ms=").data());
-        } else if (a.starts_with("--pad=")) {
-            cfg.pad = std::atoi(val("--pad=").data());
-        } else if (a.starts_with("--payload-len=")) {
-            cfg.payload_len = std::atoi(val("--payload-len=").data());
-        } else if (a.starts_with("--ethertype=")) {
-            cfg.ethertype = static_cast<uint16_t>(std::strtoul(val("--ethertype=").data(), nullptr, 0));
-        } else if (a.starts_with("--dest=")) {
-            if (!parse_mac(val("--dest="), cfg.dest)) {
-                std::printf("invalid --dest MAC\n");
-                return 2;
-            }
-        } else if (a == "--compare") {
-            cfg.compare = true;
-        } else if (a == "--listen") {
-            cfg.listen = true;
-        } else if (a.starts_with("--listen-secs=")) {
-            cfg.listen_secs = std::atoi(val("--listen-secs=").data());
-        } else if (a.starts_with("--from=")) {
-            if (!parse_mac(val("--from="), cfg.from)) {
-                std::printf("invalid --from MAC\n");
-                return 2;
-            }
-            cfg.from_set = true;
-        } else if (a == "--verbose") {
-            cfg.verbose = true;
-        } else if (a == "--help" || a == "-h") {
-            print_usage(argv[0]);
-            return 0;
-        } else {
-            std::printf("unknown arg: %s\n", argv[i]);
-            print_usage(argv[0]);
-            return 2;
-        }
+    auto specs = build_arg_specs(cfg);
+    auto const cli_result = statusbar::config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-adp-l2send-probe");
+    if (!cli_result) {
+        return statusbar::config::handled_builtin_command(cli_result) ? 0 : 1;
     }
 
     if (cfg.interface.empty()) {
-        print_usage(argv[0]);
+        std::print(stderr, "error: --interface is required\n\n");
+        print_usage(argv[0], specs);
         return 2;
     }
 
