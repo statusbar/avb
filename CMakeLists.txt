@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.31)
 project(
   statusbar-avb
-  VERSION 1.2.0
+  VERSION 1.3.0
   LANGUAGES CXX)
 
 include(GNUInstallDirs)
@@ -99,7 +99,7 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/statusbar-avb)
   write_basic_package_version_file(
     ${CMAKE_CURRENT_BINARY_DIR}/statusbar-avbConfigVersion.cmake
-    VERSION 1.2.0
+    VERSION 1.3.0
     COMPATIBILITY AnyNewerVersion)
   install(
     FILES ${CMAKE_CURRENT_BINARY_DIR}/statusbar-avbConfig.cmake
@@ -189,7 +189,7 @@ endif()
 if(NOT STATUSBAR_AGGREGATE_BUILD)
   set(CPACK_PACKAGE_NAME "statusbar-avb")
   set(CPACK_PACKAGE_VENDOR "Jeff Koftinoff")
-  set(CPACK_PACKAGE_VERSION "1.2.0")
+  set(CPACK_PACKAGE_VERSION "1.3.0")
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
       "AVB/TSN protocol stack — SRP, AVTP, gPTP, ATDECC, NanoAVB, and AVTP crypto — with ATDECC controller and AVTP command-line tools."
   )
@@ -222,13 +222,13 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
   set(CPACK_DEBIAN_RUNTIME_PACKAGE_DEPENDS
       "python3, python3-numpy, python3-pandas, python3-matplotlib, libcap2-bin")
   # -dev pulls its own runtime so its cmake config's IMPORTED targets resolve.
-  # >= (not =) so an auto-incremented Debian revision (1.2.0-<rev>, see the
+  # >= (not =) so an auto-incremented Debian revision (1.3.0-<rev>, see the
   # container-build scripts) still satisfies the cross-dependencies.
   set(CPACK_DEBIAN_DEVEL_PACKAGE_DEPENDS
-      "statusbar-avb (>= 1.2.0), statusbar-audio-dev (>= 1.2.0), statusbar-core-dev (>= 1.2.0), statusbar-crypto-dev (>= 1.2.0)"
+      "statusbar-avb (>= 1.3.0), statusbar-audio-dev (>= 1.3.0), statusbar-core-dev (>= 1.3.0), statusbar-crypto-dev (>= 1.3.0)"
   )
   set(CPACK_RPM_DEVEL_PACKAGE_REQUIRES
-      "statusbar-avb >= 1.2.0, statusbar-audio-devel >= 1.2.0, statusbar-core-devel >= 1.2.0, statusbar-crypto-devel >= 1.2.0"
+      "statusbar-avb >= 1.3.0, statusbar-audio-devel >= 1.3.0, statusbar-core-devel >= 1.3.0, statusbar-crypto-devel >= 1.3.0"
   )
   set(CPACK_COMPONENT_DEVEL_DESCRIPTION
       "C++ headers, static libraries and CMake package config")

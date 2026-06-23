@@ -16,7 +16,7 @@ gPTP-timestamped UDP framework (`udptun`), one-way latency measurement
 (`owlm`), a STUN client and server (RFC 8489, `stun`), AVB/AVTP-aware packet
 capture and dump (`netdump`), and a real-time AVTP latency tester.
 
-Version 1.2.0.
+Version 1.3.0.
 
 > Portions of this repository were developed with assistance from Claude,
 > an AI model by Anthropic. All reference material used in this process
