@@ -24,7 +24,9 @@
 #include "statusbar/config/config.hpp"
 #include "statusbar/gptp/gptp_format.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_published.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
+#include "statusbar/itc/itc_telemetry_counter.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
@@ -66,7 +68,9 @@ struct Config
         .entity_id = ieee::Eui64{},
         .entity_model_id = ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x00},
         // interface_name has no default — --interface is required.
-        .talker_dest_mac = {0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x00},
+        // JDKS OUI-36 multicast (NOT the 91:E0:F0 MAAP pool, which must be claimed
+        // via MAAP before use); like the audio_io tool's range.
+        .talker_dest_mac = {0x71, 0xB3, 0xD5, 0xED, 0xCF, 0xF2},
         .vlan_id = 2,
         .filter_freq_hz = 1000.0,
         .filter_gain_db = 0.0,  // Unity gain by default
@@ -215,13 +219,20 @@ MainLoopResult run_main_loop(
     auto* net_handlers = entity.net_handlers();
     bool had_grandmaster = net_handlers ? net_handlers->gptp_handler().has_grandmaster() : false;
 
+    // The media-timer callback runs on a SCHED_FIFO RT thread, so it must NOT
+    // std::print (alloc/throw/block) — it publishes to these lock-free itc
+    // channels and the control loop below surfaces them off-thread.
+    itc::TelemetryCounter<int64_t> timer_error_count;
+    itc::Published<int64_t> last_wake_count;
+    itc::Published<int64_t> last_wake_error_ns;
+
     // Create PTP timer for realtime audio packet handling
     auto timer = ptpclient::make_ptp_timer(
         *ctx.bridge,
         PACKET_PERIOD_NS,
         [&](StatusValue<ptpclient::TimerWakeInfo> const& wake_info) {
             if (!wake_info) {
-                std::print(stderr, "Warning: Timer error: {}\n", wake_info.error().message());
+                timer_error_count.add(1);
                 return;
             }
 
@@ -239,11 +250,8 @@ MainLoopResult run_main_loop(
             // Process audio (DSP and packet handling)
             entity.process_audio(now);
 
-            // Print periodic status
-            if (config.verbose && wake_info->wake_count % 8000 == 0) {
-                std::print(
-                    "Wake: {:8}  Error: {:+6} ns  State: {}\n", wake_info->wake_count, wake_info->error_ns, entity.state_string());
-            }
+            last_wake_count.publish(wake_info->wake_count);
+            last_wake_error_ns.publish(wake_info->error_ns);
         },
         ctx.compensation_ns,
         ctx.enable_realtime,
@@ -268,30 +276,30 @@ MainLoopResult run_main_loop(
 
     // Wire up gPTP announce callback to update ADP advertiser
     if (net_handlers) {
-        net_handlers->gptp_handler().set_callbacks(
-            nanoavb::GptpAnnounceCallbacks{
-                .grandmaster_id_changed =
-                    [&entity](int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) {
-                        std::string gm_str;
-                        gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
-                        std::print(
-                            "gPTP: Grandmaster changed to {} (priority1={}, priority2={})\n",
-                            gm_str,
-                            announce.grandmaster_priority1.get(),
-                            announce.grandmaster_priority2.get());
+        net_handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
+            .grandmaster_id_changed =
+                [&entity](int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) {
+                    std::string gm_str;
+                    gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
+                    std::print(
+                        "gPTP: Grandmaster changed to {} (priority1={}, priority2={})\n",
+                        gm_str,
+                        announce.grandmaster_priority1.get(),
+                        announce.grandmaster_priority2.get());
 
-                        // Update ADP advertiser with new grandmaster info
-                        entity.components().adp_advertiser.set_gptp_info(grandmaster_id, 0);
-                        entity.components().adp_advertiser.notify_entity_changed();
+                    // Update ADP advertiser with new grandmaster info
+                    entity.components().adp_advertiser.set_gptp_info(grandmaster_id, 0);
+                    entity.components().adp_advertiser.notify_entity_changed();
 
-                        // Notify entity state machine
-                        (void)now_ns;
-                        auto const sm_now = std::chrono::steady_clock::now();
-                        entity.on_gptp_announce(sm_now, true);
-                    }});
+                    // Notify entity state machine
+                    (void)now_ns;
+                    auto const sm_now = std::chrono::steady_clock::now();
+                    entity.on_gptp_announce(sm_now, true);
+                }});
     }
 
     // Poll reactor for network I/O until shutdown
+    auto last_telemetry_time = std::chrono::steady_clock::now();
     while (!realtime::is_shutdown_requested()) {
         (void)reactor.poll_once(100);
 
@@ -314,10 +322,27 @@ MainLoopResult run_main_loop(
             entity.on_timeout(sm_now);
             last_state_change_time = now;
         }
+
+        // Surface the media-timer's published wake stats off the RT thread.
+        if (config.verbose && now - last_telemetry_time >= std::chrono::seconds(1)) {
+            last_telemetry_time = now;
+            std::print(
+                stderr,
+                "[media] wake={} err={:+}ns state={} timer_errors={} recovery={} missed={}\n",
+                last_wake_count.load(),
+                last_wake_error_ns.load(),
+                current_state,
+                timer_error_count.load(),
+                timer.recovery_count(),
+                timer.missed_cycles());
+        }
     }
 
     // Stop timer and capture statistics
     timer.stop();
+    if (auto const errs = timer_error_count.load(); errs > 0) {
+        std::print(stderr, "Warning: media timer had {} wake error(s) (likely gPTP sync loss)\n", errs);
+    }
     result.wake_stats = timer.stats();
     result.recovery_count = timer.recovery_count();
     result.missed_cycles = timer.missed_cycles();

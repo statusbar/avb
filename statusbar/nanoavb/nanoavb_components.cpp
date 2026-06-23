@@ -266,6 +266,49 @@ NanoAvbComponents::NanoAvbComponents(
     , msrp_handler{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{}}
 {}
 
+namespace {
+
+/// Resolve the ENTITY descriptor (config 0, index 0) from a symbol-aware handler so
+/// ADP + ACMP can read entity_id/capabilities. Goes through on_get_entity so the
+/// handler's runtime patches (e.g. entity_id derived from the NIC MAC) are applied.
+auto resolve_entity_descriptor(AemEntityHandler& handler) -> DescriptorEntity
+{
+    DescriptorEntity desc{};
+    (void)handler.on_get_entity(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = atdecc::aem::DESCRIPTOR_ENTITY, .descriptor_index = 0},
+        /*symbol=*/0,
+        desc);
+    return desc;
+}
+
+}  // namespace
+
+NanoAvbComponents::NanoAvbComponents(
+    AemEntityHandler& handler,
+    AdpAdvertiserConfig const adp_config,
+    size_t const talker_max_streams,
+    size_t const talker_max_listeners,
+    size_t const listener_max_streams)
+    : NanoAvbComponents{
+          handler, resolve_entity_descriptor(handler), adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
+{}
+
+NanoAvbComponents::NanoAvbComponents(
+    AemEntityHandler& handler,
+    DescriptorEntity const& entity,
+    AdpAdvertiserConfig const adp_config,
+    size_t const talker_max_streams,
+    size_t const talker_max_listeners,
+    size_t const listener_max_streams)
+    : entity_model{}  // empty: descriptors are served by the handler, not this member
+    , aem_handler{handler}
+    , adp_advertiser{entity, AdpAdvertiserCallbacks{}, adp_config}
+    , acmp_talker{entity.entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
+    , acmp_listener{entity.entity_id, AcmpListenerCallbacks{}, listener_max_streams}
+    , mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{}}
+    , msrp_handler{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{}}
+{}
+
 //
 // NanoAvbComponentsBuilder implementation
 //
@@ -388,35 +431,39 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
         }});
 
     // ACMP Listener: send commands + responses to multicast, L2 short form (see above).
-    components.acmp_listener.set_callbacks(
-        AcmpListenerCallbacks{
-            .tx_command = [&handlers](atdecc::AcmpCommandResponse const& cmd) -> bool {
-                auto& atdecc = handlers.atdecc_handler();
-                if (!atdecc.valid()) {
-                    return false;
-                }
-                std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
-                return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(cmd, buf)).has_value();
-            },
-            .tx_response = [&handlers](atdecc::AcmpCommandResponse const& resp) -> bool {
-                auto& atdecc = handlers.atdecc_handler();
-                if (!atdecc.valid()) {
-                    return false;
-                }
-                std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
-                return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(resp, buf)).has_value();
-            }});
+    components.acmp_listener.set_callbacks(AcmpListenerCallbacks{
+        .tx_command = [&handlers](atdecc::AcmpCommandResponse const& cmd) -> bool {
+            auto& atdecc = handlers.atdecc_handler();
+            if (!atdecc.valid()) {
+                return false;
+            }
+            std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
+            return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(cmd, buf)).has_value();
+        },
+        .tx_response = [&handlers](atdecc::AcmpCommandResponse const& resp) -> bool {
+            auto& atdecc = handlers.atdecc_handler();
+            if (!atdecc.valid()) {
+                return false;
+            }
+            std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
+            return atdecc.send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(resp, buf)).has_value();
+        }});
 
     // AECP AEM: send responses unicast to controller (unlike ADP/ACMP which use multicast)
-    components.aem_handler.set_callbacks(
-        AemCommandHandlerCallbacks{
-            .send_response = [&handlers](ieee::Eui48 const& dest_mac, std::span<uint8_t const> response) -> bool {
-                auto& atdecc = handlers.atdecc_handler();
-                if (!atdecc.valid()) {
-                    return false;
-                }
-                return atdecc.send(dest_mac, response).has_value();
-            }});
+    components.aem_handler.set_callbacks(AemCommandHandlerCallbacks{
+        .send_response = [&handlers](ieee::Eui48 const& dest_mac, std::span<uint8_t const> response) -> bool {
+            auto& atdecc = handlers.atdecc_handler();
+            if (!atdecc.valid()) {
+                return false;
+            }
+            return atdecc.send(dest_mac, response).has_value();
+        }});
+
+    // Unsolicited notifications are addressed FROM us: seed the handler's entity_id
+    // from the advertiser so they carry the right target even before the first
+    // command (e.g. an IDENTIFY button pressed at startup). process_packet keeps it
+    // current thereafter.
+    components.aem_handler.set_entity_id(components.adp_advertiser.adpdu().entity_id);
 
     // MVRP: send packets to multicast
     components.mvrp_handler.set_callbacks(MvrpCallbacks{.send_packet = [&handlers](std::span<uint8_t const> packet) -> bool {
@@ -437,30 +484,29 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
     }});
 
     // gPTP Announce: notify when grandmaster changes
-    handlers.gptp_handler().set_callbacks(
-        GptpAnnounceCallbacks{
-            .grandmaster_id_changed =
-                [&components](
-                    int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) -> void {
-                (void)now_ns;
+    handlers.gptp_handler().set_callbacks(GptpAnnounceCallbacks{
+        .grandmaster_id_changed =
+            [&components](
+                int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) -> void {
+            (void)now_ns;
 
-                // Print notification
-                std::string gm_str;
-                gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
-                std::print(
-                    "gPTP: Grandmaster changed to {} (priority1={}, priority2={}, steps={})\n",
-                    gm_str,
-                    announce.grandmaster_priority1.get(),
-                    announce.grandmaster_priority2.get(),
-                    announce.steps_removed.get());
+            // Print notification
+            std::string gm_str;
+            gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
+            std::print(
+                "gPTP: Grandmaster changed to {} (priority1={}, priority2={}, steps={})\n",
+                gm_str,
+                announce.grandmaster_priority1.get(),
+                announce.grandmaster_priority2.get(),
+                announce.steps_removed.get());
 
-                // Update ADP advertiser with new grandmaster info
-                // Domain 0 is the default gPTP domain
-                components.adp_advertiser.set_gptp_info(grandmaster_id, 0);
+            // Update ADP advertiser with new grandmaster info
+            // Domain 0 is the default gPTP domain
+            components.adp_advertiser.set_gptp_info(grandmaster_id, 0);
 
-                // Notify that entity state has changed (triggers ADP announcement)
-                components.adp_advertiser.notify_entity_changed();
-            }});
+            // Notify that entity state has changed (triggers ADP announcement)
+            components.adp_advertiser.notify_entity_changed();
+        }});
 }
 
 }  // namespace statusbar::nanoavb

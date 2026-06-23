@@ -87,28 +87,6 @@ auto NtpShmReader::get_ptp_time_ns() const noexcept -> StatusValue<int64_t>
     return success(now_ns - offset_ns);
 }
 
-auto NtpShmPtpClient::open(std::string_view device_path) noexcept -> statusbar::Status
-{
-    int segment = 0;
-    if (!device_path.empty()) {
-        // Parse the segment index from the device_path string (e.g. "0", "1").
-        // Uses std::from_chars for locale-independent, allocation-free integer parsing.
-        auto result = std::from_chars(device_path.data(), device_path.data() + device_path.size(), segment);
-        if (result.ec != std::errc{}) {
-            return statusbar::failure(ptpclient::PtpError::device_not_open);
-        }
-    }
-
-    auto reader_result = NtpShmReader::open(segment);
-    if (!reader_result) {
-        return statusbar::failure(ptpclient::PtpError::device_not_open);
-    }
-
-    reader_ = std::make_unique<NtpShmReader>(std::move(*reader_result));
-    device_name_ = std::string("ntpshm:") + std::string(device_path.empty() ? "0" : device_path);
-    return statusbar::success();
-}
-
 }  // namespace statusbar::gptp
 
 #endif  // __linux__

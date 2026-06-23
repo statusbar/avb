@@ -14,11 +14,8 @@ set(_gptp_sources
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   list(APPEND _gptp_sources gptp_clock_ops_linux.cpp gptp_linux_socket.cpp
-       gptp_slave_session.cpp)
+       gptp_ntpshm.cpp gptp_slave_session.cpp)
 endif()
-
-# Note: gptp_ntpshm.cpp implements a ptpclient driver (uses ptpclient::PtpError)
-# so it's compiled into statusbar-ptpclient by that module's CMakeLists.txt
 
 statusbar_add_module(
   NAME
@@ -33,6 +30,7 @@ statusbar_add_module(
   statusbar::status
   statusbar::tsn
   TESTS
+  gptp_servo_test.cpp
   gptp_slave_port_test.cpp
   gptp_slave_session_test.cpp
   gptp_test.cpp)

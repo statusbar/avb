@@ -232,14 +232,13 @@ class MsrpHandler
         // listener becomes ready (or stops being ready) for one of its streams.
         // Safe: MsrpHandler lives in the non-movable NanoAvbComponents, so
         // `this` is stable for the lifetime of the captured observer.
-        (void)participant_.subscribe(
-            statusbar::srp::msrp::Observer{
-                .on_listener = [this](
-                                   tsn::StreamId const& sid,
-                                   statusbar::srp::msrp::ListenerDeclaration /*decl*/,
-                                   statusbar::srp::msrp::Operation /*op*/) { notify_talker_listener(sid); },
-                .on_listener_leave = [this](tsn::StreamId const& sid) { notify_talker_listener(sid); },
-            });
+        (void)participant_.subscribe(statusbar::srp::msrp::Observer{
+            .on_listener = [this](
+                               tsn::StreamId const& sid,
+                               statusbar::srp::msrp::ListenerDeclaration /*decl*/,
+                               statusbar::srp::msrp::Operation /*op*/) { notify_talker_listener(sid); },
+            .on_listener_leave = [this](tsn::StreamId const& sid) { notify_talker_listener(sid); },
+        });
     }
 
     [[nodiscard]] static constexpr auto ethertype() noexcept -> uint16_t { return srp::MSRP_ETHERTYPE; }
@@ -266,18 +265,16 @@ class MsrpHandler
 
     /// Sticky-Listener workaround passthrough. When enabled, registered Listener
     /// attributes are re-declared on every periodic/LeaveAll pass so a bridge
-    /// keeps the forwarding path to a downstream listener warm. Needed for
-    /// jdk01E -> the DSP processor via a Luminex switch (cfea332 silenced the echo).
+    /// keeps the forwarding path to a downstream listener warm. Needed when
+    /// feeding a downstream listener through an AVB switch (the strict
+    /// end-station change silenced the echo).
     /// See MsrpParticipant::set_redeclare_registered_listeners.
-    void set_redeclare_registered_listeners(bool enabled) noexcept
-    {
-        participant_.set_redeclare_registered_listeners(enabled);
-    }
+    void set_redeclare_registered_listeners(bool enabled) noexcept { participant_.set_redeclare_registered_listeners(enabled); }
 
     /// Suppress-LeaveAll workaround passthrough. When enabled, this participant
     /// never originates a LeaveAll; it only re-asserts via the periodic timer.
-    /// Needed for jdk01E -> the DSP processor via a Luminex switch whose stream forwarding
-    /// blinks when we send periodic LeaveAlls. See
+    /// Needed when feeding a downstream listener through an AVB switch whose
+    /// stream forwarding blinks when we send periodic LeaveAlls. See
     /// MsrpParticipant::set_suppress_leaveall.
     void set_suppress_leaveall(bool enabled) noexcept { participant_.set_suppress_leaveall(enabled); }
 

@@ -18,11 +18,13 @@
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <optional>
 #include <span>
+#include <vector>
 
 using namespace statusbar;
 using namespace statusbar::nanoavb;
@@ -443,6 +445,57 @@ TEST(descriptor_storage_handler, approves_descriptor_that_exists_in_storage)
     auto const name_view = parsed.entity_name.as_string_view();
     // as_string_view trims trailing NULs so the length equals "StorageTest".
     EXPECT_EQ(std::string{name_view}, std::string{"StorageTest"});
+}
+
+TEST(descriptor_storage_handler, exposes_backing_storage_for_symbol_resolution)
+{
+    auto blob = make_blob_with_entity("StorageTest");
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+
+    DescriptorStorageHandler handler{*storage_result};
+    // The handler now exposes its blob so the dispatch can resolve symbols.
+    AemEntityHandler& base = handler;
+    EXPECT_NE(base.descriptor_storage(), nullptr);
+    auto sym = base.descriptor_storage()->get_symbol(0, DESCRIPTOR_ENTITY, 0);
+    EXPECT_TRUE(sym.has_value());
+    EXPECT_EQ(*sym, 42u);
+}
+
+namespace {
+/// Records the symbol the dispatch passes to on_get_entity, then defers to the
+/// storage-backed base. Used to prove the symbol resolves through the HANDLER's
+/// storage even when the AemEntityModel itself was built handler-only.
+class SymbolRecordingHandler : public DescriptorStorageHandler
+{
+  public:
+    using DescriptorStorageHandler::DescriptorStorageHandler;
+    auto on_get_entity(DescriptorRef ref, uint32_t symbol, DescriptorEntity& desc) -> bool override
+    {
+        last_entity_symbol = symbol;
+        return DescriptorStorageHandler::on_get_entity(ref, symbol, desc);
+    }
+    uint32_t last_entity_symbol{0xFFFFFFFF};
+};
+}  // namespace
+
+TEST(descriptor_storage_handler, symbol_resolves_via_handler_storage_when_model_built_handler_only)
+{
+    // This is the Stage-2 behavior: the command path builds AemEntityModel{handler}
+    // WITHOUT explicit storage; symbol_for must fall back to the handler's storage so
+    // on_get_* still receives the designer-assigned symbol (42 for the ENTITY here).
+    auto blob = make_blob_with_entity("SymTest");
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+
+    SymbolRecordingHandler handler{*storage_result};
+    AemEntityModel model{handler};  // handler-only -- no explicit storage attached
+
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> buf{};
+    auto const n = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_ENTITY, .descriptor_index = 0}, make_span(buf));
+    EXPECT_EQ(n, DescriptorEntity::wire_size());
+    EXPECT_EQ(handler.last_entity_symbol, 42u);  // resolved from the handler's blob
 }
 
 TEST(descriptor_storage_handler, rejects_descriptor_not_in_storage)
@@ -1088,6 +1141,261 @@ TEST(aem_model_dispatch, all_descriptor_types_dispatch_through_handler)
     run_type(DESCRIPTOR_TIMING);
     run_type(DESCRIPTOR_PTP_INSTANCE);
     run_type(DESCRIPTOR_PTP_PORT);
+}
+
+// ===========================================================================
+// General symbol-keyed SET/GET descriptor-value dispatch (the AEM command
+// family: SET/GET_CONTROL, SET/GET_STREAM_FORMAT, ...). One handler pair serves
+// them all, keyed by (command_type, symbol).
+// ===========================================================================
+
+namespace {
+/// A storage-backed handler that stores a descriptor "value" and records the
+/// command_type + symbol it was dispatched with.
+class ValueHandler : public DescriptorStorageHandler
+{
+  public:
+    using DescriptorStorageHandler::DescriptorStorageHandler;
+
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorRef /*ref*/, uint32_t symbol, std::span<uint8_t const> value)
+        -> uint8_t override
+    {
+        last_set_command = command_type;
+        last_set_symbol = symbol;
+        store.assign(value.begin(), value.end());
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+
+    auto on_get_descriptor_value(uint16_t command_type, DescriptorRef /*ref*/, uint32_t symbol, std::span<uint8_t> out)
+        -> size_t override
+    {
+        last_get_command = command_type;
+        last_get_symbol = symbol;
+        if (out.size() < store.size()) {
+            return 0;
+        }
+        std::copy(store.begin(), store.end(), out.begin());
+        return store.size();
+    }
+
+    std::vector<uint8_t> store{};
+    uint16_t last_set_command{0};
+    uint16_t last_get_command{0};
+    uint32_t last_set_symbol{0xFFFFFFFFu};
+    uint32_t last_get_symbol{0xFFFFFFFFu};
+};
+}  // namespace
+
+TEST(aem_value_commands, set_then_get_round_trips_keyed_by_symbol)
+{
+    // make_blob_with_entity binds symbol 42 to the ENTITY descriptor (type 0). The
+    // value commands are descriptor-type-agnostic -- they resolve the symbol for the
+    // targeted (type, index) and pass it to the hook. Target ENTITY(0) for simplicity.
+    auto blob = make_blob_with_entity("ValTest");
+    auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+    ValueHandler handler{*storage};
+    AemEntityModel model{handler};  // handler-only -> symbol resolves via the handler's storage
+
+    // SET: descriptor_type(0) + descriptor_index(0) + value{0xAA,0xBB}
+    std::array<uint8_t, 6> const set_cmd{0x00, 0x00, 0x00, 0x00, 0xAA, 0xBB};
+    std::array<uint8_t, 64> out{};
+    auto const sr = model.apply_set_descriptor_value(atdecc::AEM_COMMAND_SET_CONTROL, set_cmd, out);
+    EXPECT_EQ(sr.status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(sr.size, set_cmd.size());  // response echoes the command
+    EXPECT_EQ(handler.last_set_command, atdecc::AEM_COMMAND_SET_CONTROL);
+    EXPECT_EQ(handler.last_set_symbol, 42u);  // resolved from the blob symbol table
+    EXPECT_EQ(handler.store.size(), 2u);
+    EXPECT_EQ(static_cast<int>(handler.store[0]), 0xAA);
+
+    // GET: descriptor_type(0) + descriptor_index(0) -> response = type/index + value
+    std::array<uint8_t, 4> const get_cmd{0x00, 0x00, 0x00, 0x00};
+    std::array<uint8_t, 64> out2{};
+    auto const n = model.get_descriptor_value_for_wire(atdecc::AEM_COMMAND_GET_CONTROL, get_cmd, out2);
+    EXPECT_EQ(n, size_t{6});  // 4-byte type/index header + 2-byte value
+    EXPECT_EQ(handler.last_get_command, atdecc::AEM_COMMAND_GET_CONTROL);
+    EXPECT_EQ(handler.last_get_symbol, 42u);
+    EXPECT_EQ(static_cast<int>(out2[4]), 0xAA);
+    EXPECT_EQ(static_cast<int>(out2[5]), 0xBB);
+}
+
+TEST(aem_value_commands, unhandled_value_command_reports_not_implemented)
+{
+    // A handler that does not override the value hooks (read-only) -> NOT_IMPLEMENTED / 0.
+    auto blob = make_blob_with_entity();
+    auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+    DescriptorStorageHandler handler{*storage};
+    AemEntityModel model{handler};
+
+    std::array<uint8_t, 6> const set_cmd{0, 0, 0, 0, 0, 0};
+    std::array<uint8_t, 64> out{};
+    EXPECT_EQ(
+        model.apply_set_descriptor_value(atdecc::AEM_COMMAND_SET_CONTROL, set_cmd, out).status, atdecc::AEM_STATUS_NOT_IMPLEMENTED);
+    std::array<uint8_t, 4> const get_cmd{0, 0, 0, 0};
+    EXPECT_EQ(model.get_descriptor_value_for_wire(atdecc::AEM_COMMAND_GET_CONTROL, get_cmd, out), size_t{0});
+}
+
+// ===========================================================================
+// Built-in entity-name GET_NAME / SET_NAME (DescriptorStorageHandler).
+//
+// A blob-backed handler that opts in via manage_entity_name() serves GET_NAME and
+// SET_NAME for the ENTITY descriptor's entity_name (descriptor 0, name 0) with no
+// per-entity code, reflects the current value in READ_DESCRIPTOR, fires the change
+// callback, and rejects names for any other (descriptor, name_index).
+// ===========================================================================
+
+namespace {
+
+/// Drive a single AEM command through AemCommandHandler::handle_command and return
+/// {status, response bytes}. Mirrors the wire path a controller's command takes.
+struct NameCmdResult
+{
+    uint8_t status{AEM_STATUS_SUCCESS};
+    std::vector<uint8_t> bytes;
+};
+
+auto run_aem_command(AemCommandHandler& h, uint16_t cmd, std::span<uint8_t const> body) -> NameCmdResult
+{
+    atdecc::AemDu header{};
+    header.init_command(cmd, static_cast<uint16_t>(atdecc::AemDu::AEM_DATA_LENGTH + body.size()));
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> buf{};
+    auto const resp = h.handle_command(header, body, make_span(buf));
+    return {.status = resp.status, .bytes = std::vector<uint8_t>(buf.data(), buf.data() + resp.size)};
+}
+
+/// GET_NAME command body: the 8-byte AemNameCommandPayload (type/index/name_index/config).
+auto make_get_name_body(uint16_t descriptor_type, uint16_t descriptor_index, uint16_t name_index) -> std::vector<uint8_t>
+{
+    atdecc::aem::AemNameCommandPayload cmd{
+        .descriptor_type = descriptor_type,
+        .descriptor_index = descriptor_index,
+        .name_index = name_index,
+        .configuration_index = 0};
+    std::vector<uint8_t> body(atdecc::aem::AemNameCommandPayload::LENGTH, 0);
+    span_store(make_span(body), cmd);
+    return body;
+}
+
+/// SET_NAME command body: the 72-byte AemNamePayload (8-byte header + 64-byte name).
+auto make_set_name_body(uint16_t descriptor_type, uint16_t descriptor_index, uint16_t name_index, std::string_view name)
+    -> std::vector<uint8_t>
+{
+    atdecc::aem::AemNamePayload payload{
+        .descriptor_type = descriptor_type,
+        .descriptor_index = descriptor_index,
+        .name_index = name_index,
+        .configuration_index = 0};
+    std::memcpy(payload.name.data(), name.data(), std::min<size_t>(name.size(), payload.name.size()));
+    std::vector<uint8_t> body(atdecc::aem::AemNamePayload::LENGTH, 0);
+    span_store(make_span(body), payload);
+    return body;
+}
+
+/// Parse a GET_NAME/SET_NAME wire response (an AemNamePayload) and return its name.
+auto name_from_response(std::span<uint8_t const> bytes) -> std::string
+{
+    atdecc::aem::AemNamePayload resp{};
+    span_load(resp, bytes);
+    return std::string{AtdeccString{resp.name.data()}.as_string_view()};
+}
+
+}  // namespace
+
+TEST(entity_name, get_set_round_trip_and_callback_and_read_descriptor)
+{
+    auto blob = make_blob_with_entity("SeedName");
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+
+    DescriptorStorageHandler handler{*storage_result};
+    handler.manage_entity_name(AtdeccString{"SeedName"});
+
+    std::string changed_to;
+    handler.set_on_entity_name_changed([&](AtdeccString const& n) {
+        changed_to = std::string{n.as_string_view()};
+        return AEM_STATUS_SUCCESS;
+    });
+
+    AemCommandHandler cmd_handler{handler};
+
+    // GET_NAME of the seed value.
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_NAME, make_get_name_body(DESCRIPTOR_ENTITY, 0, 0));
+    EXPECT_EQ(get0.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(get0.bytes.size(), atdecc::aem::AemNamePayload::LENGTH);
+    EXPECT_EQ(name_from_response(get0.bytes), std::string{"SeedName"});
+
+    // SET_NAME to a new value; the callback fires and the in-memory name updates.
+    auto const set =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, "LiveName"));
+    EXPECT_EQ(set.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(changed_to, std::string{"LiveName"});
+    EXPECT_EQ(std::string{handler.entity_name().as_string_view()}, std::string{"LiveName"});
+
+    // GET_NAME now returns the new value.
+    auto const get1 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_NAME, make_get_name_body(DESCRIPTOR_ENTITY, 0, 0));
+    EXPECT_EQ(get1.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(name_from_response(get1.bytes), std::string{"LiveName"});
+
+    // READ_DESCRIPTOR of the ENTITY now reflects the updated name too.
+    AemEntityModel const model{handler, *storage_result};
+    std::array<uint8_t, MAX_AEM_DESCRIPTOR_SIZE> dbuf{};
+    auto const dn = model.get_descriptor_for_wire(
+        DescriptorRef{.configuration_index = 0, .descriptor_type = DESCRIPTOR_ENTITY, .descriptor_index = 0}, make_span(dbuf));
+    EXPECT_EQ(dn, DescriptorEntity::wire_size());
+    DescriptorEntity parsed{};
+    span_load_padded(parsed, std::span<uint8_t const>{dbuf.data(), dn});
+    EXPECT_EQ(std::string{parsed.entity_name.as_string_view()}, std::string{"LiveName"});
+}
+
+TEST(entity_name, callback_rejection_keeps_old_name)
+{
+    auto blob = make_blob_with_entity("SeedName");
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+
+    DescriptorStorageHandler handler{*storage_result};
+    handler.manage_entity_name(AtdeccString{"SeedName"});
+    handler.set_on_entity_name_changed([](AtdeccString const&) { return AEM_STATUS_NOT_IMPLEMENTED; });
+
+    AemCommandHandler cmd_handler{handler};
+    auto const set =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, "Rejected"));
+    EXPECT_EQ(set.status, AEM_STATUS_NOT_IMPLEMENTED);
+    // Rejected: the in-memory name is unchanged.
+    EXPECT_EQ(std::string{handler.entity_name().as_string_view()}, std::string{"SeedName"});
+}
+
+TEST(entity_name, unmanaged_field_reports_not_implemented)
+{
+    auto blob = make_blob_with_entity("SeedName");
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+
+    DescriptorStorageHandler handler{*storage_result};
+    handler.manage_entity_name(AtdeccString{"SeedName"});
+    AemCommandHandler cmd_handler{handler};
+
+    // group_name (name_index 1) is NOT the managed entity_name.
+    auto const get_group = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_NAME, make_get_name_body(DESCRIPTOR_ENTITY, 0, 1));
+    EXPECT_EQ(get_group.status, AEM_STATUS_NOT_IMPLEMENTED);
+
+    auto const set_group =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, make_set_name_body(DESCRIPTOR_ENTITY, 0, 1, "Nope"));
+    EXPECT_EQ(set_group.status, AEM_STATUS_NOT_IMPLEMENTED);
+}
+
+TEST(entity_name, unmanaged_handler_does_not_serve_entity_name)
+{
+    // Without manage_entity_name(), the handler serves no GET_NAME/SET_NAME at all.
+    auto blob = make_blob_with_entity("SeedName");
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+
+    DescriptorStorageHandler handler{*storage_result};  // not managed
+    AemCommandHandler cmd_handler{handler};
+    auto const get0 = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_NAME, make_get_name_body(DESCRIPTOR_ENTITY, 0, 0));
+    EXPECT_EQ(get0.status, AEM_STATUS_NOT_IMPLEMENTED);
 }
 
 //

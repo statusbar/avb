@@ -330,17 +330,16 @@ void process_one_rx_datagram(
         return 0;
     }();
 
-    ctx.csv_sink.append(
-        UdpTunCsvRecord{
-            .rx_gptp_ns = rx_gptp,
-            .presentation_time_ns = presentation_time_ns,
-            .latency_ns = latency_for_csv,
-            .sender_id = codec.sender_id(pkt),
-            .sequence = codec.sequence(pkt),
-            .interval_us = codec.announced_interval_us(pkt),
-            .role = static_cast<uint8_t>(role),
-            ._pad = {},
-        });
+    ctx.csv_sink.append(UdpTunCsvRecord{
+        .rx_gptp_ns = rx_gptp,
+        .presentation_time_ns = presentation_time_ns,
+        .latency_ns = latency_for_csv,
+        .sender_id = codec.sender_id(pkt),
+        .sequence = codec.sequence(pkt),
+        .interval_us = codec.announced_interval_us(pkt),
+        .role = static_cast<uint8_t>(role),
+        ._pad = {},
+    });
 
     switch (role) {
         case PacketRole::SelfPrimary:
@@ -651,8 +650,7 @@ class Session
             csv_writer_.emplace(cfg_.csv_output_path, kUdpTunCsvHeader);
         }
         if (!cfg_.bin_output_path.empty()) {
-            statusbar::colbin::WriterConfig const bin_cfg{
-                .max_capacity_bytes = cfg_.bin_capacity_bytes, .preallocate = true};
+            statusbar::colbin::WriterConfig const bin_cfg{.max_capacity_bytes = cfg_.bin_capacity_bytes, .preallocate = true};
             auto w = statusbar::colbin::Writer::create(cfg_.bin_output_path, udptun_colbin_schema(), bin_cfg);
             if (!w) {
                 statusbar::throw_or_abort(w.error(), "colbin::Writer::create failed");

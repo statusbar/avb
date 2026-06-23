@@ -11,7 +11,7 @@ statusbar_add_module(
   avtp_aem_frame.cpp
   p256_wire.cpp
   DEPS
-  statusbar-avtp
+  statusbar::avtp
   statusbar::buffer
   statusbar::crypto
   TESTS

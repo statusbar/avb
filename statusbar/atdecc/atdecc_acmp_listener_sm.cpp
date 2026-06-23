@@ -59,7 +59,24 @@ void send_connect_tx(ListenerContext<>& ctx, sm::TimePoint const event_time)
             ctx.clear_pending();
             return;
         }
-        // Same talker: proceed (idempotent reconnect)
+        // Already connected to the SAME talker: this is a redundant CONNECT_RX (e.g.
+        // a controller re-asserting an existing connection). Respond SUCCESS straight
+        // from the stored stream state and do NOT re-run the handshake — re-sending
+        // CONNECT_TX would make the talker re-process the connection and needlessly
+        // churn its MSRP reservation / Listener-Ready state for a stream that is
+        // already up, briefly disrupting live audio. True idempotency: confirm the
+        // existing connection.
+        ctx.response = cmd;
+        ctx.response.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE);
+        ctx.response.set_status(ACMP_STATUS_SUCCESS);
+        ctx.response.stream_id = stream->stream_id;
+        ctx.response.stream_dest_mac = stream->stream_dest_mac;
+        ctx.response.connection_count = 1;
+        if (ctx.tx_response) {
+            ctx.tx_response(ctx.response);
+        }
+        ctx.clear_pending();
+        return;
     }
 
     // Build CONNECT_TX_COMMAND to send to talker (copy and modify)

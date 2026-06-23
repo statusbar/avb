@@ -122,14 +122,13 @@ struct ControllerContext
     /// Add a new inflight command. Returns true if added, false if at capacity.
     auto add_inflight(AcmpCommandResponse const& cmd, TimePoint const timeout_time) -> bool
     {
-        return inflight_.add(
-            InflightCommand{
-                .timeout_time = timeout_time,
-                .retried = false,
-                .command = cmd,
-                .original_sequence_id = cmd.sequence_id,
-                .valid = true,
-            });
+        return inflight_.add(InflightCommand{
+            .timeout_time = timeout_time,
+            .retried = false,
+            .command = cmd,
+            .original_sequence_id = cmd.sequence_id,
+            .valid = true,
+        });
     }
 
     /// Remove an inflight command by index. No-op if out of range.

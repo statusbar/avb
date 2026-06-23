@@ -76,10 +76,11 @@ static auto make_adp_config() -> AdpAdvertiserConfig
 }
 
 AvbEntityStereoIO::AvbEntityStereoIO(AvbEntityStereoIOConfig config)
-    : config_{std::move(config)}  // Construct components_ in place: 1 talker stream (4 max listeners),
-    // 1 listener stream. NanoAvbComponents is non-movable and wires its
-    // handlers against its own entity_model member — never moved.
-    , components_{create_entity_model(), make_adp_config(), 1, 4, 1}
+    // Build the control plane host in place from the hand-built model: 1 talker
+    // stream (4 max listeners), 1 listener stream. create_entity_model() reads
+    // config_ (constructed first); the host's NanoAvbComponents is non-movable.
+    : config_{std::move(config)}
+    , host_{create_entity_model(), make_adp_config(), 1, 4, 1}
 {
     // Configure biquad filters for both channels
     configure_filter(config_.filter_freq_hz, config_.filter_gain_db, config_.filter_q);
@@ -88,20 +89,19 @@ AvbEntityStereoIO::AvbEntityStereoIO(AvbEntityStereoIOConfig config)
     talker_stream_id_ = config_.entity_id;
 
     // Post-construction setup that needs config-supplied values.
-    auto const& entity = components_.entity_model.get_entity();
+    auto const& entity = host_.components().entity_model.get_entity();
 
     // Configure talker stream 0 with the hardwired multicast destination MAC.
     ieee::Eui64 stream_id{};
     span_copy(stream_id.span().first(6), entity.entity_id.span().first(6));
-    (void)components_.acmp_talker.configure_stream(0, stream_id, config_.talker_dest_mac);
+    (void)host_.components().acmp_talker.configure_stream(0, stream_id, config_.talker_dest_mac);
 
     // Register the VLAN with MVRP and set the MSRP SR-class domain.
-    (void)components_.mvrp_handler.register_vlan(config_.vlan_id, sm::Clock::now());
-    components_.msrp_handler.set_domain(
-        DomainInfo{
-            .sr_class_id = 6,                   // SR Class A
-            .sr_class_priority = 3,             // Priority 3
-            .sr_class_vid = config_.vlan_id});  // VLAN ID
+    (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, sm::Clock::now());
+    host_.components().msrp_handler.set_domain(DomainInfo{
+        .sr_class_id = 6,                   // SR Class A
+        .sr_class_priority = 3,             // Priority 3
+        .sr_class_vid = config_.vlan_id});  // VLAN ID
 }
 
 AvbEntityStereoIO::~AvbEntityStereoIO()
@@ -110,7 +110,7 @@ AvbEntityStereoIO::~AvbEntityStereoIO()
     // stop() (and compiles to a plain call under -fno-exceptions).
     (void)statusbar::catch_or_status(
         [&]() -> statusbar::Status {
-            if (running_) {
+            if (host_.is_running()) {
                 (void)stop();
             }
             return {};
@@ -206,207 +206,26 @@ auto AvbEntityStereoIO::create_entity_model() const -> nanoavb::EntityModel
 }
 
 //
-// State Machine Callback Wiring
+// Stream-specific control-plane wiring (the host owns the generic SM wiring)
 //
 
-void AvbEntityStereoIO::wire_callbacks()
+void AvbEntityStereoIO::wire_stream_callbacks()
 {
-    //
-    // Supervisor callbacks - coordinate protocol lifecycle
-    //
-
-    supervisor_ctx_.callbacks.init_iface = [this](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-        // Reset protocol state machines to initial state
-        gptp_.reset();
-        mvrp_.reset();
-    };
-
-    supervisor_ctx_.callbacks.start_protocols = [this](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        // Link is up. Start gPTP (runs independently to acquire lock) and start
-        // advertising ADP immediately — discovery/enumeration (ADP/AECP/ACMP)
-        // is independent of gPTP and SRP. SRP (MVRP + MSRP) is NOT started here;
-        // it is gated on gPTP lock and brought up in enter_ready(). stop_all()
-        // stops ADP again on link-down.
-        gptp_.handle_event(gptp_ctx_, nanoavb::gptp_sm::Def::Event::AsCapableUp, time);
-        auto result = components_.adp_advertiser.start(time);
-        if (!result) {
-            std::print(stderr, "Warning: ADP start failed: {}\n", result.error().message());
-        }
-    };
-
-    supervisor_ctx_.callbacks.enter_ready = [this](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        // gPTP is locked: bring up SRP and allow the stream engines to run.
-        // MVRP VLAN registration is best-effort (streaming is gated on gPTP,
-        // not on the VLAN join). ADP/AECP/ACMP are unaffected — live since
-        // link-up.
-        mvrp_.handle_event(mvrp_ctx_, nanoavb::mvrp_sm::Def::Event::Acquire, time);
-        // Advertise our talker stream reservation via MSRP. Gated on gPTP lock
-        // (this is the enter_ready hook), so MSRP follows gPTP lock/unlock.
-        msrp_talker_.handle_event(msrp_talker_ctx_, nanoavb::msrp_talker_sm::Def::Event::StartAdvertise, time);
-        talker_engine_ctx_.send_allowed = true;
-        listener_engine_ctx_.play_allowed = true;
-    };
-
-    supervisor_ctx_.callbacks.degrade_stop_streams = [this](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        // gPTP lost: tear down SRP (MVRP + MSRP) and stop the stream engines.
-        // ADP keeps advertising — the link is still up.
-        talker_engine_.handle_event(talker_engine_ctx_, nanoavb::talker_engine_sm::Def::Event::GateStop, time);
-        listener_engine_.handle_event(listener_engine_ctx_, nanoavb::listener_engine_sm::Def::Event::GateStop, time);
-        talker_engine_ctx_.send_allowed = false;
-        listener_engine_ctx_.play_allowed = false;
-        // Withdraw the MSRP talker reservation before resetting the SMs.
-        msrp_talker_.handle_event(msrp_talker_ctx_, nanoavb::msrp_talker_sm::Def::Event::StopAdvertise, time);
-        mvrp_.reset();
-        msrp_talker_.reset();
-        msrp_listener_.reset();
-    };
-
-    supervisor_ctx_.callbacks.stop_all = [this](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        // Stop ADP
-        (void)components_.adp_advertiser.stop(time);
-        // Stop stream engines
-        talker_engine_.handle_event(talker_engine_ctx_, nanoavb::talker_engine_sm::Def::Event::Fatal, time);
-        listener_engine_.handle_event(listener_engine_ctx_, nanoavb::listener_engine_sm::Def::Event::GateStop, time);
-        // Reset protocol state machines
-        gptp_.reset();
-        mvrp_.reset();
-        msrp_talker_.reset();
-        msrp_listener_.reset();
-        talker_engine_ctx_.send_allowed = false;
-        listener_engine_ctx_.play_allowed = false;
-    };
-
-    supervisor_ctx_.callbacks.timeout_gptp = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-        std::print(stderr, "[supervisor] gPTP lock timeout\n");
-    };
-
-    //
-    // gPTP callbacks - notify supervisor of sync status
-    //
-
-    gptp_ctx_.callbacks.init = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    gptp_ctx_.callbacks.start_servo = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    gptp_ctx_.callbacks.report_locked = [this](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::GptpLocked, time);
-    };
-
-    gptp_ctx_.callbacks.report_unlocked = [this](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::GptpLost, time);
-    };
-
-    //
-    // MVRP callbacks - notify supervisor of VLAN registration
-    //
-
-    mvrp_ctx_.callbacks.init = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    mvrp_ctx_.callbacks.send_join = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    mvrp_ctx_.callbacks.mark_joined = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-        // VLAN registered with the bridge. Best-effort: streaming is gated on
-        // gPTP lock (enter_ready), not on this join, so nothing to do here.
-    };
-
-    mvrp_ctx_.callbacks.mark_error = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-        std::print(stderr, "[mvrp] VLAN registration failed\n");
-    };
-
-    mvrp_ctx_.callbacks.send_leave = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    mvrp_ctx_.callbacks.mark_left = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    mvrp_ctx_.callbacks.reset = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    //
-    // MSRP Talker callbacks
-    //
-
-    msrp_talker_ctx_.callbacks.init = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    msrp_talker_ctx_.callbacks.msrp_talker_advertise = [this](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        // Register/advertise our talker stream reservation with MSRP.
-        auto result = components_.msrp_handler.talker_advertise(make_talker_srp_info(), time);
+    // One talker stream. The host declares the SR class domain for us before these
+    // fire, then advertises/withdraws on the MSRP cycle. No transmit gate and no
+    // listener hook here -- this entity's readiness is the host's generic SM drive.
+    host_.set_advertise_streams([this](TimePoint time) {
+        auto result = host_.components().msrp_handler.talker_advertise(make_talker_srp_info(), time);
         if (!result) {
             std::print(stderr, "Warning: MSRP talker_advertise failed: {}\n", result.error().message());
         }
-    };
-
-    msrp_talker_ctx_.callbacks.mark_ready = [this](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        if (supervisor_.current_state() == nanoavb::supervisor_sm::Def::State::Ready) {
-            talker_engine_.handle_event(talker_engine_ctx_, nanoavb::talker_engine_sm::Def::Event::AudioReady, time);
-        }
-    };
-
-    msrp_talker_ctx_.callbacks.mark_failed = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    msrp_talker_ctx_.callbacks.msrp_talker_withdraw = [this](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        // Withdraw our talker stream reservation from MSRP.
-        (void)components_.msrp_handler.talker_withdraw(make_talker_srp_info().stream_id, time);
-    };
-
-    msrp_talker_ctx_.callbacks.mark_idle = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    // Inbound MSRP: a remote listener becoming ready (or not) for our talker
-    // stream drives the MSRP talker SM Ready/Lost (mark_ready fires the talker
-    // engine AudioReady). The SM ignores events invalid for its state.
-    components_.msrp_handler.set_on_talker_listener([this](nanoavb::StreamId const& /*stream_id*/, bool ready) {
-        auto const now = sm::Clock::now();
-        msrp_talker_.handle_event(
-            msrp_talker_ctx_, ready ? nanoavb::msrp_talker_sm::Def::Event::Ready : nanoavb::msrp_talker_sm::Def::Event::Lost, now);
     });
+    host_.set_withdraw_streams(
+        [this](TimePoint time) { (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info().stream_id, time); });
 
     // ACMP: observe controller-initiated connections to our talker (diagnostic;
-    // streaming is gated by MSRP listener-ready + gPTP). Preserves tx_response.
-    components_.acmp_talker.set_connection_callbacks(
+    // streaming is gated by MSRP listener-ready + gPTP).
+    host_.components().acmp_talker.set_connection_callbacks(
         [](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             std::print(
                 "[acmp] talker stream {} CONNECTED  by listener {:012x} unique_id {}\n",
@@ -421,130 +240,6 @@ void AvbEntityStereoIO::wire_callbacks()
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
         });
-
-    //
-    // MSRP Listener callbacks
-    //
-
-    msrp_listener_ctx_.callbacks.init = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    msrp_listener_ctx_.callbacks.msrp_listener_ready = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    msrp_listener_ctx_.callbacks.mark_ready = [this](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        if (supervisor_.current_state() == nanoavb::supervisor_sm::Def::State::Ready) {
-            listener_engine_.handle_event(listener_engine_ctx_, nanoavb::listener_engine_sm::Def::Event::GateListen, time);
-        }
-    };
-
-    msrp_listener_ctx_.callbacks.mark_failed = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    msrp_listener_ctx_.callbacks.msrp_listener_leave = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    msrp_listener_ctx_.callbacks.mark_idle = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    //
-    // Talker Engine callbacks - audio TX pipeline
-    //
-
-    talker_engine_ctx_.callbacks.init = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    talker_engine_ctx_.callbacks.start_audio_source = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    talker_engine_ctx_.callbacks.arm_stream = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    talker_engine_ctx_.callbacks.start_tx = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    talker_engine_ctx_.callbacks.stop_tx = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    talker_engine_ctx_.callbacks.mute_tx = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    talker_engine_ctx_.callbacks.unmute_tx = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    talker_engine_ctx_.callbacks.stop_all = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    //
-    // Listener Engine callbacks - audio RX pipeline
-    //
-
-    listener_engine_ctx_.callbacks.init = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    listener_engine_ctx_.callbacks.enable_rx_filter = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    listener_engine_ctx_.callbacks.start_sync = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    listener_engine_ctx_.callbacks.start_audio_sink = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    listener_engine_ctx_.callbacks.stop_all = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    listener_engine_ctx_.callbacks.resync = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    listener_engine_ctx_.callbacks.mute_out = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
-
-    listener_engine_ctx_.callbacks.unmute_out = [](auto& ctx, TimePoint time) -> void {
-        (void)ctx;
-        (void)time;
-    };
 }
 
 //
@@ -553,85 +248,37 @@ void AvbEntityStereoIO::wire_callbacks()
 
 auto AvbEntityStereoIO::start(net::MessageReactor& reactor) -> Status
 {
-    if (running_) {
-        return failure(std::make_error_code(std::errc::already_connected));
+    // Bring up the shared control plane (net handlers + generic SM wiring), then
+    // attach this entity's stream-specific callbacks. The host has no data plane of
+    // its own to set up here -- this entity's TX/RX runs through the nanoavb handlers.
+    if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
+        return status;
     }
-
-    // Create the handler container, then construct the per-protocol handlers
-    // (which open their raw sockets) and register them with the reactor FIRST.
-    // print_warnings() and setup_nanoavb_callbacks() inspect/wire the
-    // constructed handlers, so they must run after add_to_reactor() — otherwise
-    // they dereference the still-null handler pointers (segfault) and report
-    // spurious "could not open socket" warnings before the sockets exist.
-    net_handlers_ = std::make_unique<NanoAvbNetHandlers>(config_.interface_name, components_);
-    net_handlers_->add_to_reactor(reactor);
-    net_handlers_->print_warnings(config_.interface_name);
-
-    // Wire up callbacks between components and network handlers
-    setup_nanoavb_callbacks(components_, *net_handlers_);
-
-    // Wire up state machine callbacks
-    wire_callbacks();
-
-    running_ = true;
+    wire_stream_callbacks();
     return success();
 }
 
 auto AvbEntityStereoIO::stop() -> Status
 {
-    if (!running_) {
+    if (!host_.is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));
     }
-
-    // Stop ADP advertising
     auto const now = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    (void)components_.adp_advertiser.stop(now);
-
-    // Clean up network handlers
-    net_handlers_.reset();
-
-    running_ = false;
-    return success();
+    return host_.stop_control_plane(now);
 }
 
 //
 // State Queries
 //
 
-auto AvbEntityStereoIO::is_ready() const noexcept -> bool
-{
-    return supervisor_.current_state() == nanoavb::supervisor_sm::Def::State::Ready;
-}
-
-auto AvbEntityStereoIO::state_string() const -> std::string_view
-{
-    using nanoavb::supervisor_sm::Def;
-    auto const state = supervisor_.current_state();
-
-    switch (state) {
-        case Def::State::Start:
-            return "Start";
-        case Def::State::Down:
-            return "Down";
-        case Def::State::Init:
-            return "Init";
-        case Def::State::Ready:
-            return "Ready";
-        case Def::State::Degraded:
-            return "Degraded";
-        default:
-            return "Unknown";
-    }
-}
-
 void AvbEntityStereoIO::print_state() const
 {
     std::print(
         "State: supervisor={} gptp={} mvrp={} acmp_connections={}\n",
         state_string(),
-        gptp_ctx_.time_locked ? "Locked" : "Unlocked",
-        mvrp_ctx_.joined ? "Joined" : "NotJoined",
-        components_.acmp_talker.connection_count(0));
+        host_.gptp_locked() ? "Locked" : "Unlocked",
+        host_.mvrp_joined() ? "Joined" : "NotJoined",
+        host_.components().acmp_talker.connection_count(0));
 }
 
 //
@@ -644,7 +291,7 @@ auto AvbEntityStereoIO::make_talker_srp_info() const -> nanoavb::TalkerStreamSrp
 
     // Source stream id / destination / VLAN from the ACMP-configured talker
     // stream 0 so MSRP advertises the exact same stream the controller sees.
-    if (auto const* stream = components_.acmp_talker.get_stream(0); stream != nullptr) {
+    if (auto const* stream = host_.components().acmp_talker.get_stream(0); stream != nullptr) {
         (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &info.stream_id);
         info.dest_address = stream->stream_dest_mac;
         info.vlan_id = stream->stream_vlan_id;
@@ -671,34 +318,22 @@ auto AvbEntityStereoIO::make_talker_srp_info() const -> nanoavb::TalkerStreamSrp
 // Event Handlers
 //
 
+// The entity's events drive the shared SM stack, owned by the host.
 void AvbEntityStereoIO::on_link_up(TimePoint time)
 {
-    supervisor_ctx_.link_up = true;
-    supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkUp, time);
+    host_.on_link_up(time);
 }
-
 void AvbEntityStereoIO::on_link_down(TimePoint time)
 {
-    supervisor_ctx_.link_up = false;
-    supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkDown, time);
+    host_.on_link_down(time);
 }
-
 void AvbEntityStereoIO::on_gptp_announce(TimePoint time, bool has_grandmaster)
 {
-    if (has_grandmaster && !gptp_ctx_.time_locked) {
-        gptp_.handle_event(gptp_ctx_, nanoavb::gptp_sm::Def::Event::LockedStable, time);
-    }
+    host_.on_gptp_announce(time, has_grandmaster);
 }
-
 void AvbEntityStereoIO::on_timeout(TimePoint time)
 {
-    using nanoavb::supervisor_sm::Def;
-    auto const state = supervisor_.current_state();
-
-    // Only Init has a watchdog now (gPTP-lock timeout). There is no VLAN gate.
-    if (state == Def::State::Init) {
-        supervisor_.handle_event(supervisor_ctx_, Def::Event::Timeout, time);
-    }
+    host_.on_timeout(time);
 }
 
 //

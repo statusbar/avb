@@ -32,42 +32,42 @@
     summary_interval       0
 
 
-## Grandmaster sync quality — TimeMachines TM2000B (±500 ns / 3 µs class)
+## Grandmaster sync quality — GPS grandmaster clock (±500 ns / 3 µs class)
 
-The lab gPTP grandmaster at each site is a **TimeMachines TM2000B** GPS time
+The lab gPTP grandmaster at each site is a **GPS grandmaster clock** GPS time
 server (OUI `90:06:f2`). It is a **~microsecond-class** PTP grandmaster, not a
 telecom-grade one. This matters for Milan/AVB media sync.
 
-**Vendor numbers** (TM2000B/TM2500C manual rev 0.6.4 §8.1, and the TimeMachines
-"Time Server Accuracy" report rev D):
+**Datasheet numbers** (from the grandmaster's manual and its
+"Time Server Accuracy" report):
 
 - Datasheet **PTP Server Time Precision: "better than 3 µs + network jitter."**
 - Accuracy report best case (GPS + HW timestamping, vs a NIST Microsemi TP-2700):
   **within ~200 ns of reference, jitter ±500 ns.**
 - The GPS module's raw 1PPS is **±20 ns** (§8.2); the ~µs of PTP jitter is added in
-  the TM2000B's PTP packet-generation/timestamping path, *not* the GPS.
+  the GPS grandmaster's PTP packet-generation/timestamping path, *not* the GPS.
 - Without GPS (software timestamping) jitter is **~10× worse (±~5 µs).**
 
 **Measured on this bench (2026-06-07), Pi5 slaves:**
 
 | Path | lock rms | peak \|offset\| |
 |---|---|---|
-| Pi5 → TM2000B **via a switch boundary clock** (2 hops) | ~700–800 ns | ~1.6–1.7 µs |
-| Pi5 → **free-running AVB switch as GM** (Luminex / the audio interface, own oscillator) | ~20–30 ns | ~50 ns |
+| Pi5 → GPS grandmaster **via a switch boundary clock** (2 hops) | ~700–800 ns | ~1.6–1.7 µs |
+| Pi5 → **free-running AVB switch as GM** (own oscillator) | ~20–30 ns | ~50 ns |
 
-The ~1.7 µs through the relay is **within the TM2000B's 3 µs spec** — the device is
-performing to spec, not broken. The same Luminex/the audio interface switch delivers ~20–30 ns
+The ~1.7 µs through the relay is **within the GPS grandmaster's 3 µs spec** — the device is
+performing to spec, not broken. The same AVB switch delivers ~20–30 ns
 when it free-runs as GM, so the **boundary clocks are not the problem**: a boundary
 clock is a slave on its upstream port and can only relay its lock to the GM. The
-~±500 ns originates *at the TM2000B*; both a Luminex (LA) and a the audio interface AVB switch
-(Saratoga) reproduce the same degradation, so it is **switch-brand-independent.**
+~±500 ns originates *at the GPS grandmaster*; AVB switches at both sites (LA and
+Saratoga) reproduce the same degradation, so it is **switch-brand-independent.**
 802.1AS conformance is otherwise clean (`gmTimeBaseIndicator`/`lastGmPhaseChange`
 stable = no GM phase jumps; large boundary-clock residence ~1.15–1.77 ms is legal).
-A the DSP vendor endpoint shows a **yellow "AVB sync" LED + audible sample slips
-("snats")** on the relayed TM2000B, and **green + clean** when the switch free-runs.
+A DSP-processor endpoint shows a **yellow "AVB sync" LED + audible sample slips
+("snats")** on the relayed GPS grandmaster, and **green + clean** when the switch free-runs.
 
-**TM2000B web-admin jitter levers** (PTP Config page §3.8; login `admin`/`tmachine`,
-default IP `192.168.1.20`), to push toward the ±500 ns best case:
+**GPS-grandmaster web-admin jitter levers** (its PTP Config page), to push toward
+the ±500 ns best case:
 
 1. **Time Stamping Source = Hardware (GPS)** — Software = 10× worse jitter.
 2. **Transport Specific Field = 1** (default `0`; gPTP needs majorSdoId 1).
@@ -83,16 +83,15 @@ the AVB switch be GM on its own oscillator (lose GPS-absolute time, win short-te
 stability — which is what audio needs). For GPS-traceable **and** tight, use a
 telecom-grade GM (Microsemi TP-2700 / Orolia / Meinberg, sub-100 ns).
 
-**Lab grandmaster inventory** (discover via TimeMachines Locator: UDP `A1 04 B2` →
-port 7372, broadcast; reply is an 80-byte status packet):
+**Lab grandmaster inventory:**
 
-| Site | Pi5 nodes | TM2000B web IP | gPTP clock id |
+| Site | Pi5 nodes | GPS grandmaster web IP | gPTP clock id |
 |---|---|---|---|
 | Campbell | jdk01a, jdk01d | `192.168.1.90` | `9006f2.fffe.15cca3` |
 | Saratoga | jdk01b | `192.168.1.20` | `9006f2.fffe.162c22` |
-| LA | jdk01e | (Luminex segment) | `9006f2.fffe.15d213` |
+| LA | jdk01e | (AVB switch segment) | `9006f2.fffe.15d213` |
 
-Note: at Campbell the TM2000B has a 3D GPS lock but is **not** the active gPTP GM
-(the the audio interface AVB switch free-runs as GM); fix is on the TM2000B's PTP Config page
+Note: at Campbell the GPS grandmaster has a 3D GPS lock but is **not** the active gPTP GM
+(the AVB switch free-runs as GM); fix is on the GPS grandmaster's PTP Config page
 (`Packet Output = 802.1AS`).
 

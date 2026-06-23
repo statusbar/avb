@@ -204,14 +204,22 @@ TEST(audio_io_udptun, redundancy_bit_is_collision_proof_and_owlm_maskable)
 
 TEST(audio_io_model, declares_streams_and_ports)
 {
+    // The symbol-aware entity serves descriptors straight from the .aem blob, so
+    // verify the fixture's shape via the DescriptorStorage (the source of truth).
     auto blob = load_file(entity_audio_bin_path());
-    auto result = AvbEntityAudioIO::create(make_config_with_blob(std::move(blob)));
-    EXPECT_TRUE(result.has_value());
-    auto const& model = (*result)->components().entity_model;
-    EXPECT_EQ(model.stream_input_count(), 2);   // AM824 + AAF
-    EXPECT_EQ(model.stream_output_count(), 3);  // AM824 + AAF + CRF media clock
-    EXPECT_EQ(model.audio_cluster_count(), 4);
-    EXPECT_EQ(model.audio_map_count(), 4);
+    auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+    auto const count = [&](uint16_t type) -> size_t {
+        size_t n = 0;
+        while (storage->get_descriptor(0, type, static_cast<uint16_t>(n)).has_value()) {
+            ++n;
+        }
+        return n;
+    };
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 2u);   // AM824 + AAF
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 3u);  // AM824 + AAF + CRF media clock
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 4u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_MAP), 4u);
 }
 
 TEST(audio_io_model, crf_stream_output_is_milan_48k)
@@ -222,19 +230,17 @@ TEST(audio_io_model, crf_stream_output_is_milan_48k)
     // (e.g. a 96 kHz base, or the right base with a wrong interval) is rejected by
     // Milan listeners as UNSUPPORTED_FORMAT. This pins the fixture so it cannot drift.
     auto blob = load_file(entity_audio_bin_path());
-    auto result = AvbEntityAudioIO::create(make_config_with_blob(std::move(blob)));
-    EXPECT_TRUE(result.has_value());
-    if (!result.has_value()) {
+    auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+    auto const desc = storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, AvbEntityAudioIO::CRF_STREAM_INDEX);
+    EXPECT_TRUE(desc.has_value());
+    if (!desc.has_value()) {
         return;
     }
-    auto const& model = (*result)->components().entity_model;
-    auto so = model.get_stream_output(AvbEntityAudioIO::CRF_STREAM_INDEX);
-    EXPECT_TRUE(so.has_value());
-    if (!so.has_value()) {
-        return;
-    }
+    atdecc::aem::DescriptorStream so{};
+    span_load_padded(so, *desc);
     std::array<uint8_t, 8> const milan_crf{0x04, 0x10, 0x60, 0x01, 0x00, 0x00, 0xBB, 0x80};
-    auto const fmt = (*so)->current_format.span();
+    auto const fmt = so.current_format.span();
     EXPECT_EQ(fmt.size(), milan_crf.size());  // Eui64 span is 8 bytes
     bool bytes_match = fmt.size() == milan_crf.size();
     for (size_t i = 0; i < milan_crf.size(); ++i) {

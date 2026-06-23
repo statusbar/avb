@@ -1,0 +1,306 @@
+// Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+// SPDX-License-Identifier: MIT
+
+// AvbEntityHost — the reusable AVB entity control plane. Owns the nanoavb state
+// machines + NanoAvbComponents + net handlers and the lifecycle that drives them.
+// The generic SM-callback wiring lives here once (it was duplicated verbatim in
+// every entity); the stream-specific bits are reached through the three typed hooks
+// (advertise / withdraw / on-listener-ready) and through components() (ACMP/MSRP).
+
+#include "statusbar/avb_entity/avb_entity_host.hpp"
+
+#include "statusbar/srp/srp_msrp.hpp"
+
+#include <chrono>
+#include <cstdint>
+#include <print>
+#include <utility>
+
+namespace statusbar::avb_entity {
+
+AvbEntityHost::AvbEntityHost(
+    nanoavb::EntityModel model,
+    nanoavb::AdpAdvertiserConfig adp_config,
+    size_t const talker_max_streams,
+    size_t const talker_max_listeners,
+    size_t const listener_max_streams)
+    : components_{std::move(model), adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
+{}
+
+AvbEntityHost::AvbEntityHost(
+    std::unique_ptr<nanoavb::AemEntityHandler> handler,
+    nanoavb::AdpAdvertiserConfig adp_config,
+    size_t const talker_max_streams,
+    size_t const talker_max_listeners,
+    size_t const listener_max_streams)
+    // handler_ is constructed first (declared before components_) so the components,
+    // which reference it on the symbol-aware path, outlive nothing.
+    : handler_{std::move(handler)}
+    , components_{*handler_, adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
+{}
+
+//
+// Lifecycle
+//
+
+auto AvbEntityHost::start_control_plane(net::MessageReactor& reactor, std::string_view const interface_name) -> Status
+{
+    if (running_) {
+        return failure(std::make_error_code(std::errc::already_connected));
+    }
+    interface_name_ = std::string{interface_name};
+
+    net_handlers_ = std::make_unique<nanoavb::NanoAvbNetHandlers>(interface_name_, components_);
+    net_handlers_->add_to_reactor(reactor);
+    net_handlers_->print_warnings(interface_name_);
+
+    nanoavb::setup_nanoavb_callbacks(components_, *net_handlers_);
+    wire_callbacks();
+
+    running_ = true;
+    return success();
+}
+
+auto AvbEntityHost::stop_control_plane(TimePoint const now) -> Status
+{
+    if (!running_) {
+        return failure(std::make_error_code(std::errc::not_connected));
+    }
+    (void)components_.adp_advertiser.stop(now);
+    net_handlers_.reset();
+    running_ = false;
+    return success();
+}
+
+//
+// Event handlers (drive the SM stack)
+//
+
+void AvbEntityHost::on_link_up(TimePoint const time)
+{
+    supervisor_ctx_.link_up = true;
+    supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkUp, time);
+}
+
+void AvbEntityHost::on_link_down(TimePoint const time)
+{
+    supervisor_ctx_.link_up = false;
+    supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkDown, time);
+}
+
+void AvbEntityHost::on_gptp_announce(TimePoint const time, bool const has_grandmaster)
+{
+    if (has_grandmaster && !gptp_ctx_.time_locked) {
+        gptp_.handle_event(gptp_ctx_, nanoavb::gptp_sm::Def::Event::LockedStable, time);
+    }
+}
+
+void AvbEntityHost::on_timeout(TimePoint const time)
+{
+    using nanoavb::supervisor_sm::Def;
+    if (supervisor_.current_state() == Def::State::Init) {
+        supervisor_.handle_event(supervisor_ctx_, Def::Event::Timeout, time);
+    }
+}
+
+//
+// State queries
+//
+
+auto AvbEntityHost::is_ready() const noexcept -> bool
+{
+    return supervisor_.current_state() == nanoavb::supervisor_sm::Def::State::Ready;
+}
+
+auto AvbEntityHost::state_string() const -> std::string_view
+{
+    using nanoavb::supervisor_sm::Def;
+    switch (supervisor_.current_state()) {
+        case Def::State::Start:
+            return "Start";
+        case Def::State::Down:
+            return "Down";
+        case Def::State::Init:
+            return "Init";
+        case Def::State::Ready:
+            return "Ready";
+        case Def::State::Degraded:
+            return "Degraded";
+        default:
+            return "Unknown";
+    }
+}
+
+//
+// Generic SM-callback wiring (no stream specifics)
+//
+
+void AvbEntityHost::wire_callbacks()
+{
+    wire_supervisor_callbacks();
+    wire_gptp_callbacks();
+    wire_mvrp_callbacks();
+    wire_srp_callbacks();
+    wire_engine_callbacks();
+}
+
+void AvbEntityHost::wire_supervisor_callbacks()
+{
+    supervisor_ctx_.callbacks.init_iface = [this](auto& /*ctx*/, TimePoint /*time*/) -> void {
+        gptp_.reset();
+        mvrp_.reset();
+    };
+
+    supervisor_ctx_.callbacks.start_protocols = [this](auto& /*ctx*/, TimePoint time) -> void {
+        gptp_.handle_event(gptp_ctx_, nanoavb::gptp_sm::Def::Event::AsCapableUp, time);
+        auto result = components_.adp_advertiser.start(time);
+        if (!result) {
+            std::print(stderr, "Warning: ADP start failed: {}\n", result.error().message());
+        }
+    };
+
+    supervisor_ctx_.callbacks.enter_ready = [this](auto& /*ctx*/, TimePoint time) -> void {
+        mvrp_.handle_event(mvrp_ctx_, nanoavb::mvrp_sm::Def::Event::Acquire, time);
+        msrp_talker_.handle_event(msrp_talker_ctx_, nanoavb::msrp_talker_sm::Def::Event::StartAdvertise, time);
+        talker_engine_ctx_.send_allowed = true;
+        listener_engine_ctx_.play_allowed = true;
+    };
+
+    supervisor_ctx_.callbacks.degrade_stop_streams = [this](auto& /*ctx*/, TimePoint time) -> void {
+        talker_engine_.handle_event(talker_engine_ctx_, nanoavb::talker_engine_sm::Def::Event::GateStop, time);
+        listener_engine_.handle_event(listener_engine_ctx_, nanoavb::listener_engine_sm::Def::Event::GateStop, time);
+        talker_engine_ctx_.send_allowed = false;
+        listener_engine_ctx_.play_allowed = false;
+        msrp_talker_.handle_event(msrp_talker_ctx_, nanoavb::msrp_talker_sm::Def::Event::StopAdvertise, time);
+        mvrp_.reset();
+        msrp_talker_.reset();
+        msrp_listener_.reset();
+    };
+
+    supervisor_ctx_.callbacks.stop_all = [this](auto& /*ctx*/, TimePoint time) -> void {
+        (void)components_.adp_advertiser.stop(time);
+        talker_engine_.handle_event(talker_engine_ctx_, nanoavb::talker_engine_sm::Def::Event::Fatal, time);
+        listener_engine_.handle_event(listener_engine_ctx_, nanoavb::listener_engine_sm::Def::Event::GateStop, time);
+        gptp_.reset();
+        mvrp_.reset();
+        msrp_talker_.reset();
+        msrp_listener_.reset();
+        talker_engine_ctx_.send_allowed = false;
+        listener_engine_ctx_.play_allowed = false;
+    };
+
+    supervisor_ctx_.callbacks.timeout_gptp = [](auto& /*ctx*/, TimePoint /*time*/) -> void {
+        std::print(stderr, "[supervisor] gPTP lock timeout\n");
+    };
+}
+
+void AvbEntityHost::wire_gptp_callbacks()
+{
+    gptp_ctx_.callbacks.init = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    gptp_ctx_.callbacks.start_servo = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    gptp_ctx_.callbacks.report_locked = [this](auto& /*ctx*/, TimePoint time) -> void {
+        supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::GptpLocked, time);
+    };
+    gptp_ctx_.callbacks.report_unlocked = [this](auto& /*ctx*/, TimePoint time) -> void {
+        supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::GptpLost, time);
+    };
+}
+
+void AvbEntityHost::wire_mvrp_callbacks()
+{
+    mvrp_ctx_.callbacks.init = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    mvrp_ctx_.callbacks.send_join = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    mvrp_ctx_.callbacks.mark_joined = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    mvrp_ctx_.callbacks.mark_error = [](auto& /*ctx*/, TimePoint /*time*/) -> void {
+        std::print(stderr, "[mvrp] VLAN registration failed\n");
+    };
+    mvrp_ctx_.callbacks.send_leave = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    mvrp_ctx_.callbacks.mark_left = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    mvrp_ctx_.callbacks.reset = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+}
+
+void AvbEntityHost::wire_srp_callbacks()
+{
+    msrp_talker_ctx_.callbacks.init = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    msrp_talker_ctx_.callbacks.msrp_talker_advertise = [this](auto& /*ctx*/, TimePoint time) -> void {
+        // Declare our SR class domain(s) before advertising streams so the bridge
+        // includes this port in the SRP domain; otherwise inbound Talker Advertise
+        // declarations are converted to Talker Failed (failure_code 8). This is
+        // generic; the per-stream reservations are the entity's job (the hook).
+        (void)components_.msrp_handler.declare_domain(time);
+        if (advertise_streams_) {
+            advertise_streams_(time);
+        }
+    };
+    msrp_talker_ctx_.callbacks.mark_ready = [this](auto& /*ctx*/, TimePoint time) -> void {
+        if (supervisor_.current_state() == nanoavb::supervisor_sm::Def::State::Ready) {
+            talker_engine_.handle_event(talker_engine_ctx_, nanoavb::talker_engine_sm::Def::Event::AudioReady, time);
+        }
+    };
+    msrp_talker_ctx_.callbacks.mark_failed = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    msrp_talker_ctx_.callbacks.msrp_talker_withdraw = [this](auto& /*ctx*/, TimePoint time) -> void {
+        if (withdraw_streams_) {
+            withdraw_streams_(time);
+        }
+    };
+    msrp_talker_ctx_.callbacks.mark_idle = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+
+    components_.msrp_handler.set_on_talker_listener([this](nanoavb::StreamId const& stream_id, bool ready) {
+        auto const now = sm::Clock::now();
+        msrp_talker_.handle_event(
+            msrp_talker_ctx_, ready ? nanoavb::msrp_talker_sm::Def::Event::Ready : nanoavb::msrp_talker_sm::Def::Event::Lost, now);
+
+        // Diagnostic: log the EXACT reason behind every gate decision (fires on each
+        // listener register/leave for one of our talker streams), so a listener-ready
+        // flap is explained -- which of the four conditions (record present,
+        // operation==Register, registrar In, Ready substate) is flipping.
+        auto const dbg = components_.msrp_handler.listener_permit_debug(stream_id);
+        std::print(
+            "[srp-gate] sid={:016x} permits={} | record={} op={} registrar_in={} substate={}\n",
+            stream_id.to_uint64(),
+            dbg.permits,
+            dbg.has_record,
+            dbg.operation == statusbar::srp::msrp::Operation::Register ? "Register" : "Declare",
+            dbg.registrar_in,
+            statusbar::srp::msrp::listener_declaration_name(dbg.substate));
+
+        // The entity's transmit gate tracks readiness (TalkerGate::note_listener_ready).
+        if (on_listener_ready_) {
+            on_listener_ready_(stream_id, ready);
+        }
+    });
+
+    msrp_listener_ctx_.callbacks.init = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    msrp_listener_ctx_.callbacks.msrp_listener_ready = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    msrp_listener_ctx_.callbacks.mark_ready = [this](auto& /*ctx*/, TimePoint time) -> void {
+        if (supervisor_.current_state() == nanoavb::supervisor_sm::Def::State::Ready) {
+            listener_engine_.handle_event(listener_engine_ctx_, nanoavb::listener_engine_sm::Def::Event::GateListen, time);
+        }
+    };
+    msrp_listener_ctx_.callbacks.mark_failed = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    msrp_listener_ctx_.callbacks.msrp_listener_leave = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    msrp_listener_ctx_.callbacks.mark_idle = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+}
+
+void AvbEntityHost::wire_engine_callbacks()
+{
+    talker_engine_ctx_.callbacks.init = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    talker_engine_ctx_.callbacks.start_audio_source = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    talker_engine_ctx_.callbacks.arm_stream = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    talker_engine_ctx_.callbacks.start_tx = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    talker_engine_ctx_.callbacks.stop_tx = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    talker_engine_ctx_.callbacks.mute_tx = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    talker_engine_ctx_.callbacks.unmute_tx = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    talker_engine_ctx_.callbacks.stop_all = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+
+    listener_engine_ctx_.callbacks.init = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    listener_engine_ctx_.callbacks.enable_rx_filter = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    listener_engine_ctx_.callbacks.start_sync = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    listener_engine_ctx_.callbacks.start_audio_sink = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    listener_engine_ctx_.callbacks.stop_all = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    listener_engine_ctx_.callbacks.resync = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    listener_engine_ctx_.callbacks.mute_out = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+    listener_engine_ctx_.callbacks.unmute_out = [](auto& /*ctx*/, TimePoint /*time*/) -> void {};
+}
+
+}  // namespace statusbar::avb_entity

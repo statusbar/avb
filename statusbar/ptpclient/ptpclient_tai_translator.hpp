@@ -5,7 +5,7 @@
 // timeline). Since the site GMs became free-running switches (the
 // boundary-clock fixes), the local master timeline has an arbitrary epoch —
 // it is NOT TAI. Absolute GPS time reaches each node only as NTP-disciplined
-// CLOCK_REALTIME (chrony <- TM2000B). This class recovers an absolute TAI
+// CLOCK_REALTIME (chrony <- the GPS grandmaster). This class recovers an absolute TAI
 // timeline by combining the two:
 //
 //   TAI(master) = master - offset_predicted(master) + tai_minus_utc

@@ -59,12 +59,11 @@ auto AvtpAudioStreamDecoder::initialize_aaf(avtp::AafPdu const& pdu) -> bool
 
     if (format_.sample_rate_hz == 0 || format_.channel_count == 0 || avtp::aaf_bytes_per_sample(format_.aaf_format) == 0) {
         if (diagnostic_) {
-            diagnostic_(
-                std::format(
-                    "first AAF packet has unusable format (format={}, nsr={}, channels={})",
-                    avtp::aaf_format_name(format_.aaf_format),
-                    avtp::aaf_sample_rate_name(format_.aaf_rate),
-                    format_.channel_count));
+            diagnostic_(std::format(
+                "first AAF packet has unusable format (format={}, nsr={}, channels={})",
+                avtp::aaf_format_name(format_.aaf_format),
+                avtp::aaf_sample_rate_name(format_.aaf_rate),
+                format_.channel_count));
         }
         format_.kind = StreamKind::unknown;  // un-initialize so caller can retry
         return false;
@@ -82,11 +81,10 @@ auto AvtpAudioStreamDecoder::initialize_am824(avtp::Am824Pdu const& pdu) -> bool
 
     if (format_.sample_rate_hz == 0 || format_.channel_count == 0) {
         if (diagnostic_) {
-            diagnostic_(
-                std::format(
-                    "first AM824 packet has unusable format (rate={}, channels={})",
-                    avtp::am824_sample_rate_name(format_.am824_rate),
-                    format_.channel_count));
+            diagnostic_(std::format(
+                "first AM824 packet has unusable format (rate={}, channels={})",
+                avtp::am824_sample_rate_name(format_.am824_rate),
+                format_.channel_count));
         }
         format_.kind = StreamKind::unknown;
         return false;

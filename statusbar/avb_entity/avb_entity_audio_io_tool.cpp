@@ -18,8 +18,11 @@
 #include "statusbar/config/config.hpp"
 #include "statusbar/gptp/gptp_format.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_published.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
+#include "statusbar/itc/itc_telemetry_counter.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/net/net_link_monitor.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_posix_util.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
@@ -145,22 +148,28 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add<std::string>(
         "atdecc.version",
         "ATDECC wire version: '2016' truncates descriptors to their 1722.1-2013/2016 lengths for "
-        "controllers that reject 2021 forms (Hive/Compass); '2021' emits full 2021 descriptors. Default 2016.",
+        "controllers that reject 2021 forms; '2021' emits full 2021 descriptors. Default 2016.",
         config.entity.atdecc_version,
         [&](auto v) { config.entity.atdecc_version = std::string{v}; });
     specs.add<uint16_t>("vlan_id", "VLAN ID for AVB streams", config.entity.vlan_id, [&](auto v) { config.entity.vlan_id = v; });
+    specs.add<std::string>(
+        "stream.address_mode",
+        "Talker stream dest-address source: 'static' (the configured *_dest_mac) or 'maap' (acquire a "
+        "block from the 1722 dynamic pool via MAAP at startup). Default static.",
+        config.entity.stream_address_mode,
+        [&](auto v) { config.entity.stream_address_mode = std::string{v}; });
     specs.add<bool>(
         "srp.redeclare_registered_listeners",
         "Sticky-Listener MSRP workaround: re-declare REGISTERED Listener attributes every periodic/LeaveAll "
         "pass (echo a downstream listener's Listener-Ready back to the bridge) so the bridge keeps forwarding "
-        "our stream to that listener. Needed for jdk01E -> the DSP processor via a Luminex switch. Default off.",
+        "our stream to that listener. Needed when feeding a downstream listener through an AVB switch. Default off.",
         config.entity.redeclare_registered_listeners,
         [&](auto v) { config.entity.redeclare_registered_listeners = v; });
     specs.add<bool>(
         "srp.suppress_leaveall",
         "Suppress-LeaveAll MSRP workaround: never originate a periodic LeaveAll; only re-assert declarations "
-        "via the periodic timer (never release). Reproduces the pre-006bf73 sticky behaviour a Luminex switch "
-        "needs for stable E->the DSP processor forwarding. Default off.",
+        "via the periodic timer (never release). Reproduces the earlier sticky behaviour some AVB switches "
+        "need for stable downstream forwarding. Default off.",
         config.entity.suppress_leaveall,
         [&](auto v) { config.entity.suppress_leaveall = v; });
     specs.add<std::string>(
@@ -497,12 +506,19 @@ MainLoopResult run_main_loop(
     // shape owlm uses; dumped to --media-timer-duration-csv at exit.
     stats::AtomicHistogram<128> media_dur_hist{stats::AtomicHistogramConfig{.low_ns = 0, .high_ns = 100'000, .bin_width_ns = 1000}};
 
+    // The media-timer callback runs on a SCHED_FIFO RT thread, so it must NOT
+    // std::print (alloc/throw/block) — it publishes to these lock-free itc
+    // channels and the control loop below surfaces them off-thread.
+    itc::TelemetryCounter<int64_t> timer_error_count;
+    itc::Published<int64_t> last_wake_count;
+    itc::Published<int64_t> last_wake_error_ns;
+
     auto timer = ptpclient::make_ptp_timer(
         *ctx.bridge,
         PACKET_PERIOD_NS,
         [&](StatusValue<ptpclient::TimerWakeInfo> const& wake_info) {
             if (!wake_info) {
-                std::print(stderr, "Warning: Timer error: {}\n", wake_info.error().message());
+                timer_error_count.add(1);
                 return;
             }
             auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
@@ -517,10 +533,8 @@ MainLoopResult run_main_loop(
             entity.process_audio(now);
             media_dur_hist.update(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - cb_t0).count());
-            if (config.verbose && wake_info->wake_count % 8000 == 0) {
-                std::print(
-                    "Wake: {:8}  Error: {:+6} ns  State: {}\n", wake_info->wake_count, wake_info->error_ns, entity.state_string());
-            }
+            last_wake_count.publish(wake_info->wake_count);
+            last_wake_error_ns.publish(wake_info->error_ns);
         },
         ctx.compensation_ns,
         ctx.enable_realtime,
@@ -533,8 +547,23 @@ MainLoopResult run_main_loop(
         return result;
     }
 
+    // Drive the initial link-up synchronously (before the reactor runs) so the
+    // supervisor leaves Down -> Init before any gPTP announce is processed.
     auto startup_time = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
     entity.on_link_up(startup_time);
+
+    // Then track the interface link state continuously: a real cable/switch/port
+    // flap now emits genuine down/up events (the redundant first up is a no-op
+    // since the supervisor already left Down), instead of staying on the stale
+    // startup assumption. Polls SIOCGIFFLAGS/IFF_RUNNING every 500 ms.
+    reactor.add(std::make_unique<net::LinkMonitor>(config.entity.interface_name, [&entity](bool up, int64_t now_ns) {
+        auto const tp = TimePoint{std::chrono::nanoseconds{now_ns}};
+        if (up) {
+            entity.on_link_up(tp);
+        } else {
+            entity.on_link_down(tp);
+        }
+    }));
 
     constexpr auto GPTP_LOCK_TIMEOUT = std::chrono::seconds{10};
     auto last_state_change_time = std::chrono::steady_clock::now();
@@ -542,23 +571,22 @@ MainLoopResult run_main_loop(
     auto last_telemetry_time = std::chrono::steady_clock::now();
 
     if (net_handlers) {
-        net_handlers->gptp_handler().set_callbacks(
-            nanoavb::GptpAnnounceCallbacks{
-                .grandmaster_id_changed =
-                    [&entity](int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) {
-                        std::string gm_str;
-                        gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
-                        std::print(
-                            "gPTP: Grandmaster changed to {} (priority1={}, priority2={})\n",
-                            gm_str,
-                            announce.grandmaster_priority1.get(),
-                            announce.grandmaster_priority2.get());
-                        entity.components().adp_advertiser.set_gptp_info(grandmaster_id, 0);
-                        entity.components().adp_advertiser.notify_entity_changed();
-                        (void)now_ns;
-                        auto const sm_now = std::chrono::steady_clock::now();
-                        entity.on_gptp_announce(sm_now, true);
-                    }});
+        net_handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
+            .grandmaster_id_changed =
+                [&entity](int64_t now_ns, gptp::ClockIdentity const& grandmaster_id, gptp::AnnounceMessage const& announce) {
+                    std::string gm_str;
+                    gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
+                    std::print(
+                        "gPTP: Grandmaster changed to {} (priority1={}, priority2={})\n",
+                        gm_str,
+                        announce.grandmaster_priority1.get(),
+                        announce.grandmaster_priority2.get());
+                    entity.components().adp_advertiser.set_gptp_info(grandmaster_id, 0);
+                    entity.components().adp_advertiser.notify_entity_changed();
+                    (void)now_ns;
+                    auto const sm_now = std::chrono::steady_clock::now();
+                    entity.on_gptp_announce(sm_now, true);
+                }});
     }
 
     while (!realtime::is_shutdown_requested()) {
@@ -598,7 +626,8 @@ MainLoopResult run_main_loop(
             auto const bt = ctx.bridge->telemetry();
             std::print(
                 stderr,
-                "[bridge] healthy={} epoch={} rms={}ns reject={} step={} overruns={} | timer recovery={} missed={}\n",
+                "[bridge] healthy={} epoch={} rms={}ns reject={} step={} overruns={} | timer recovery={} missed={} "
+                "wake={} err={:+}ns state={} timer_errors={}\n",
                 bt.healthy,
                 bt.epoch,
                 bt.rms_residual_ns,
@@ -606,11 +635,18 @@ MainLoopResult run_main_loop(
                 bt.step_count,
                 bt.regression_overruns,
                 timer.recovery_count(),
-                timer.missed_cycles());
+                timer.missed_cycles(),
+                last_wake_count.load(),
+                last_wake_error_ns.load(),
+                entity.state_string(),
+                timer_error_count.load());
         }
     }
 
     timer.stop();
+    if (auto const errs = timer_error_count.load(); errs > 0) {
+        std::print(stderr, "Warning: media timer had {} wake error(s) (likely gPTP sync loss)\n", errs);
+    }
     result.wake_stats = timer.stats();
     result.recovery_count = timer.recovery_count();
     result.missed_cycles = timer.missed_cycles();

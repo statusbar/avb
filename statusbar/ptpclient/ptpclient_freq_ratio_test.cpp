@@ -111,8 +111,8 @@ TEST(kalman_ratio_tracker, seed_step_does_not_bake_bogus_rate)
     // step-sized f0 and re-base, not bake the bogus rate.
     constexpr std::int64_t kStep = 21'000'000;  // 21 ms PHC step between sample 0 and 1
     KalmanRatioTracker kf{KalmanRatioTracker::Config{.meas_noise_ns = 400.0, .jerk_psd = 1e-2}};
-    kf.add(synth_offset(1.000045, 0), k_dt);                  // sample 0 -> base
-    kf.add(synth_offset(1.000045, 1) + kStep, k_dt);          // sample 1 -> +21 ms STEP
+    kf.add(synth_offset(1.000045, 0), k_dt);          // sample 0 -> base
+    kf.add(synth_offset(1.000045, 1) + kStep, k_dt);  // sample 1 -> +21 ms STEP
     for (int k = 2; k < 300; ++k) {
         kf.add(synth_offset(1.000045, k) + kStep, k_dt);
         auto const e = kf.estimate();
@@ -147,8 +147,8 @@ TEST(kalman_ratio_tracker, runtime_step_reacquires_true_rate)
     }
     auto const e = kf.estimate();
     EXPECT_TRUE(e.valid);
-    EXPECT_TRUE(std::fabs(e.ppm() - 45.0) < 1.0);              // re-acquired the true rate (not frozen)
-    EXPECT_TRUE(std::fabs(e.freq_uncertainty_ppb) < 1.0e6);   // converged (uncertainty did not explode)
+    EXPECT_TRUE(std::fabs(e.ppm() - 45.0) < 1.0);            // re-acquired the true rate (not frozen)
+    EXPECT_TRUE(std::fabs(e.freq_uncertainty_ppb) < 1.0e6);  // converged (uncertainty did not explode)
     // Filtered phase tracks the NEW (stepped) offset level, not the old one.
     std::int64_t const expected = synth_offset(kR, 399) + kStep;
     EXPECT_TRUE(std::llabs(e.filtered_offset_ns - expected) < 200'000);

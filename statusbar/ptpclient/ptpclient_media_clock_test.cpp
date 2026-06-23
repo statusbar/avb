@@ -23,7 +23,7 @@ constexpr std::uint64_t k_wake_ns = 125'000;                    // 12 samples @ 
 }  // namespace
 
 // The defining property: a JITTERY wake input must yield SMOOTH, near-linear
-// presentation timestamps -- that is the whole point (the the audio interface recovers its
+// presentation timestamps -- that is the whole point (an audio interface recovers its
 // media clock from these and warbles if they jitter).
 TEST(media_clock_generator, deterministic_timestamps_reject_wake_jitter)
 {

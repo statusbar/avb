@@ -11,11 +11,12 @@ statusbar_add_module(
   ptpclient_linuxptp.cpp
   ptpclient_setup.cpp
   ptpclient_timer.cpp
+  ptpclient_ntpshm.cpp
   DEPS
   statusbar::config
   statusbar::container
   statusbar::dsp
-  statusbar-gptp
+  statusbar::gptp
   statusbar::realtime
   statusbar::status
   statusbar::itc
@@ -26,14 +27,6 @@ statusbar_add_module(
   ptpclient_media_clock_test.cpp
   ptpclient_tai_translator_test.cpp
   ptpclient_test.cpp)
-
-# gptp_ntpshm.cpp implements a ptpclient driver (uses ptpclient::PtpError)
-# Linux-only NTP SHM reader lives here because it's a ptpclient driver
-# implementation, even though the header lives in statusbar/gptp/
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_sources(statusbar-ptpclient
-                 PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../gptp/gptp_ntpshm.cpp)
-endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(ptpclient_wake_example ptpclient_wake_example.cpp)

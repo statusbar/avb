@@ -634,9 +634,8 @@ void ControllerTuiApp::begin_disconnect()
     pending_->talker_unique_id = row.stream_index;
     mode_ = ControllerMode::DisconnectSelectListener;
     focus_ = Focus::Listeners;
-    set_status(
-        std::format(
-            "Talker {}:{}  — select LISTENER sink to disconnect (Enter, Esc to cancel)", row.entity_name, row.stream_index));
+    set_status(std::format(
+        "Talker {}:{}  — select LISTENER sink to disconnect (Enter, Esc to cancel)", row.entity_name, row.stream_index));
 }
 
 void ControllerTuiApp::confirm_selection()

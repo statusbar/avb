@@ -24,7 +24,7 @@ statusbar_add_module(
   atdecc_error.cpp
   atdecc_jdks.cpp
   DEPS
-  statusbar-avtp
+  statusbar::avtp
   statusbar::buffer
   statusbar::container
   statusbar::ieee
@@ -96,4 +96,5 @@ add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_adp_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_acmp_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_aecp_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_aecp_aem_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_aecp_aa_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/atdecc_aem_descriptor_fuzzer.cpp)

@@ -45,7 +45,7 @@ auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<
         if (!d.entity_model_id.is_set()) {
             add(Severity::Error,
                 "ENTITY",
-                "entity_model_id is 0 — Hive caches the static AEM by this ID; an unset model ID breaks model "
+                "entity_model_id is 0 — controllers cache the static AEM by this ID; an unset model ID breaks model "
                 "caching/identification.");
         }
         if (d.configurations_count.get() == 0) {
@@ -71,7 +71,7 @@ auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<
         DescriptorAvbInterface a{};
         span_load_padded(a, make_const_span(r.data));
         if (!a.mac_address.is_set()) {
-            add(Severity::Error, where, "mac_address is all-zero — Hive rejects this; it must carry the interface's real NIC MAC.");
+            add(Severity::Error, where, "mac_address is all-zero — it must carry the interface's real NIC MAC.");
         }
         if (!a.clock_identity.is_set()) {
             add(Severity::Error,

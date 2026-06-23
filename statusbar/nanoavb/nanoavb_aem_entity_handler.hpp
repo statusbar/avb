@@ -40,8 +40,14 @@
 #include "statusbar/atdecc/atdecc_aecp_aem.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
+
+namespace statusbar::atdecc::aem {
+class DescriptorStorage;  // forward decl: descriptor_storage() returns a pointer only
+}
 
 namespace statusbar::nanoavb {
 
@@ -77,6 +83,7 @@ using atdecc::aem::DescriptorSignalMultiplexer;
 using atdecc::aem::DescriptorSignalSelector;
 using atdecc::aem::DescriptorSignalSplitter;
 using atdecc::aem::DescriptorSignalTranscoder;
+using atdecc::aem::DescriptorStorage;
 using atdecc::aem::DescriptorStream;
 using atdecc::aem::DescriptorStreamPort;
 using atdecc::aem::DescriptorStrings;
@@ -115,6 +122,14 @@ class AemEntityHandler
     auto operator=(AemEntityHandler const&) -> AemEntityHandler& = delete;
     AemEntityHandler(AemEntityHandler&&) noexcept = default;
     auto operator=(AemEntityHandler&&) noexcept -> AemEntityHandler& = default;
+
+    /// The DescriptorStorage backing this handler, if any. The command dispatch
+    /// uses it to resolve a descriptor's well-known **symbol** (the blob symbol
+    /// table) so every on_get_*/on_set_* handler receives the symbol -- the stable
+    /// identifier that decouples handler code from the designer's descriptor-index
+    /// choices. Default: none (symbols resolve to 0). A storage-backed handler
+    /// (e.g. DescriptorStorageHandler) overrides this to return its blob.
+    [[nodiscard]] virtual auto descriptor_storage() const noexcept -> DescriptorStorage const* { return nullptr; }
 
     // ---- Top-level descriptors -------------------------------------------
 
@@ -309,6 +324,36 @@ class AemEntityHandler
     virtual auto on_set_name(NameRef /*ref*/, uint32_t /*symbol*/, AtdeccString const& /*name*/) -> uint8_t
     {
         return AEM_STATUS_NOT_IMPLEMENTED;
+    }
+
+    // ---- General descriptor-value SET/GET (the AEM command family) -------
+    //
+    // One symbol-keyed pair serves the whole family of AEM commands that read or
+    // write a descriptor's mutable VALUE: SET/GET_CONTROL, SET/GET_STREAM_FORMAT,
+    // SET/GET_SAMPLING_RATE, SET/GET_CLOCK_SOURCE, SET/GET_SIGNAL_SELECTOR, ... The
+    // dispatch resolves the target descriptor (@p ref) and its well-known @p symbol;
+    // the handler branches on @p command_type (and/or @p symbol) and interprets the
+    // raw value bytes per that command's wire format. To learn valid ranges (e.g. a
+    // CONTROL's min/max/step) the handler queries its own descriptor_storage().
+
+    /// A controller wrote a descriptor value (@p command_type is the AEM_COMMAND_SET_*
+    /// code). @p value is the command payload after the descriptor_type/index header.
+    /// Apply it (e.g. map a CONTROL value to DSP coefficients), optionally clamped to
+    /// the descriptor's range, and return an AEM_STATUS_* code. Default: NOT_IMPLEMENTED.
+    virtual auto on_set_descriptor_value(
+        uint16_t /*command_type*/, DescriptorRef /*ref*/, uint32_t /*symbol*/, std::span<uint8_t const> /*value*/) -> uint8_t
+    {
+        return AEM_STATUS_NOT_IMPLEMENTED;
+    }
+
+    /// A controller read a descriptor value (@p command_type is the AEM_COMMAND_GET_*
+    /// code). Write the current value payload (the bytes that follow the
+    /// descriptor_type/index header on the wire) into @p out and return the number of
+    /// bytes written, or 0 for NOT_IMPLEMENTED / no such descriptor. Default: 0.
+    virtual auto on_get_descriptor_value(
+        uint16_t /*command_type*/, DescriptorRef /*ref*/, uint32_t /*symbol*/, std::span<uint8_t> /*out*/) -> size_t
+    {
+        return 0;
     }
 };
 

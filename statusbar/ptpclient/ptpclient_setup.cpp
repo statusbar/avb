@@ -25,7 +25,7 @@ auto create_client(PtpSetupConfig const& config) -> StatusValue<std::unique_ptr<
         return success(std::unique_ptr<PtpClientBase>(std::move(client)));
     }
     if (config.driver_name == "ntpshm") {
-        auto client = std::make_unique<gptp::NtpShmPtpClient>();
+        auto client = std::make_unique<NtpShmPtpClient>();
         if (auto status = client->open(config.device_path); !status) {
             return failure(status.error());
         }

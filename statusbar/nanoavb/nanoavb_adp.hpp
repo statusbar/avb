@@ -174,9 +174,16 @@ class NanoAvbAdpAdvertiser
     /// @param index The AVB interface index
     void set_interface_index(uint16_t index) { adpdu_.interface_index = index; }
 
-    /// Set the identify control index
+    /// Set the identify control index and advertise it as valid.
+    /// Sets the ADPDU identify_control_index and the AEM_IDENTIFY_CONTROL_INDEX_VALID
+    /// entity-capability bit (IEEE 1722.1 6.2.1.10) so controllers know which CONTROL
+    /// descriptor is the entity's IDENTIFY control.
     /// @param index The identify control descriptor index
-    void set_identify_control_index(uint16_t index) { adpdu_.identify_control_index = index; }
+    void set_identify_control_index(uint16_t index)
+    {
+        adpdu_.identify_control_index = index;
+        adpdu_.entity_capabilities.set_flag(atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID);
+    }
 
     // Packet Processing
 

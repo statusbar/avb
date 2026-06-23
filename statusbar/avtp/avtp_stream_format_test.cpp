@@ -20,7 +20,7 @@ TEST(stream_format, aaf_48khz_2ch_24bit)
     EXPECT_TRUE(s == "AAF 2ch 48kHz 24-bit");
 }
 
-// Verified against a the DSP processor STREAM_INPUT: 02 07 02 20 02 00 c0 00
+// Verified against a reference STREAM_INPUT: 02 07 02 20 02 00 c0 00
 // = 96000(nsr=7) INT_32(0x02) 32-bit, 8 channels, 12 samples/frame.
 TEST(stream_format, aaf_96khz_8ch_32bit)
 {

@@ -457,6 +457,9 @@ TEST(nanoavb_adp_advertiser, set_identify_control_index)
     advertiser.set_identify_control_index(123);
 
     EXPECT_EQ(advertiser.adpdu().identify_control_index.get(), 123);
+    // Advertising the index must also assert AEM_IDENTIFY_CONTROL_INDEX_VALID so
+    // controllers know the index is meaningful.
+    EXPECT_TRUE(advertiser.adpdu().has_entity_capability(statusbar::atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID));
 }
 
 TEST(nanoavb_adp_advertiser, update_config)

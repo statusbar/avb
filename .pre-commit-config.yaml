@@ -1,6 +1,10 @@
-# Auto-format C++, CMake, and Python on commit. Hooks call the system
-# tools (no version pinning) so commit-time formatting matches whatever
-# `./reformat.sh` would produce.
+# Auto-format C++, CMake, and Python on commit.
+#
+# clang-format is pinned to the exact version in requirements-format.txt (19.1.7)
+# via the pre-commit mirror, which downloads the same standalone wheel used on the
+# host and in the dev container — so commit-time formatting is identical on every
+# build context (no version drift, no churn). cmake-format/ruff are system tools.
+# Keep the rev below in lockstep with CLANG_FORMAT_VERSION in reformat.sh.
 #
 # Setup (once per checkout):
 #     pre-commit install
@@ -14,14 +18,14 @@
 # re-commit.
 
 repos:
-  - repo: local
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v19.1.7
     hooks:
       - id: clang-format
-        name: clang-format
-        entry: clang-format -i
-        language: system
         types_or: [c, c++]
 
+  - repo: local
+    hooks:
       - id: cmake-format
         name: cmake-format
         entry: cmake-format -i

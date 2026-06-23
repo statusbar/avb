@@ -10,6 +10,7 @@
 /// Audio flows from listener through DSP biquad filters to talker.
 
 #include "statusbar/atdecc/atdecc.hpp"
+#include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/avtp/avtp_am824_stream_input.hpp"
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
@@ -192,7 +193,7 @@ class AvbEntityAm824IO
     AvbEntityAm824IO(
         CreateKey,
         AvbEntityAm824IOConfig config,
-        nanoavb::EntityModel entity_model,
+        std::unique_ptr<nanoavb::AemEntityHandler> handler,
         size_t channels,
         std::pmr::memory_resource* memory_resource);
 
@@ -206,13 +207,13 @@ class AvbEntityAm824IO
     [[nodiscard]] auto stop() -> Status;
 
     /// Check if entity is running
-    [[nodiscard]] auto is_running() const noexcept -> bool { return running_; }
+    [[nodiscard]] auto is_running() const noexcept -> bool { return host_.is_running(); }
 
     /// Check if entity has reached Ready state (gPTP locked, VLAN registered)
-    [[nodiscard]] auto is_ready() const noexcept -> bool;
+    [[nodiscard]] auto is_ready() const noexcept -> bool { return host_.is_ready(); }
 
     /// Get current supervisor state as string
-    [[nodiscard]] auto state_string() const -> std::string_view;
+    [[nodiscard]] auto state_string() const -> std::string_view { return host_.state_string(); }
 
     /// Print current state of all state machines
     auto print_state() const -> void;
@@ -257,11 +258,11 @@ class AvbEntityAm824IO
     auto configure_filter(double freq_hz, double gain_db, double q) -> void;
 
     /// Get access to NanoAVB components (for advanced use)
-    [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return components_; }
-    [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return components_; }
+    [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return host_.components(); }
+    [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return host_.components(); }
 
     /// Get access to network handlers (for advanced use)
-    [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return net_handlers_.get(); }
+    [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return host_.net_handlers(); }
 
     /// Get the configuration
     [[nodiscard]] auto config() const noexcept -> AvbEntityAm824IOConfig const& { return config_; }
@@ -270,8 +271,10 @@ class AvbEntityAm824IO
     [[nodiscard]] auto channels() const noexcept -> size_t { return channels_; }
 
   private:
-    /// Wire up state machine callbacks
-    auto wire_callbacks() -> void;
+    /// Attach this entity's stream-specific control-plane behavior to the host:
+    /// single-stream MSRP advertise/withdraw + the ACMP talker connection log. The
+    /// host owns the generic SM wiring + lifecycle.
+    auto wire_stream_callbacks() -> void;
 
     /// Build the MSRP talker reservation (TSpec) for our AM824 stream. The
     /// stream id / destination / VLAN are sourced from the ACMP-configured
@@ -288,23 +291,11 @@ class AvbEntityAm824IO
     /// Custom audio callback (optional)
     Am824AudioProcessCallback audio_callback_;
 
-    //
-    // State Machine Contexts (large structs grouped together)
-    //
-
-    nanoavb::gptp_sm::Context gptp_ctx_{};
-    nanoavb::msrp_talker_sm::Context msrp_talker_ctx_{};
-    nanoavb::msrp_listener_sm::Context msrp_listener_ctx_{};
-    nanoavb::mvrp_sm::Context mvrp_ctx_{};
-    nanoavb::supervisor_sm::Context supervisor_ctx_{};
-    nanoavb::talker_engine_sm::Context talker_engine_ctx_{};
-    nanoavb::listener_engine_sm::Context listener_engine_ctx_{};
-
-    /// NanoAVB components (entity model, ADP, ACMP, MVRP, MSRP handlers)
-    nanoavb::NanoAvbComponents components_;
-
-    /// Network handlers (created on start)
-    std::unique_ptr<nanoavb::NanoAvbNetHandlers> net_handlers_;
+    /// The reusable AVB control plane: state machines + NanoAvbComponents + net
+    /// handlers + lifecycle. This entity supplies only its single AM824 stream + DSP
+    /// and attaches them via host_.components() + the typed hooks. Declared after
+    /// config_ (the model is built from config_ and passed in at construction).
+    AvbEntityHost host_;
 
     /// Number of audio channels (determined from descriptor blob at construction)
     size_t channels_{0};
@@ -349,21 +340,6 @@ class AvbEntityAm824IO
     std::atomic<uint64_t> stream_rx_packets_{0};
     std::atomic<uint64_t> stream_rx_samples_{0};
     std::atomic<uint64_t> stream_rx_bad_{0};
-
-    /// Running state
-    bool running_{false};
-
-    //
-    // State Machines (supervisor and protocol coordinators)
-    //
-
-    nanoavb::supervisor_sm::Machine supervisor_{};
-    nanoavb::gptp_sm::Machine gptp_{};
-    nanoavb::mvrp_sm::Machine mvrp_{};
-    nanoavb::msrp_talker_sm::Machine msrp_talker_{};
-    nanoavb::msrp_listener_sm::Machine msrp_listener_{};
-    nanoavb::talker_engine_sm::Machine talker_engine_{};
-    nanoavb::listener_engine_sm::Machine listener_engine_{};
 
     //
     // Packet Handling

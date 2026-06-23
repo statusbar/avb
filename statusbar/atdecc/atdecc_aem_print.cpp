@@ -96,13 +96,16 @@ namespace statusbar::atdecc {
 auto parse_aem(uint16_t const cmd, bool const is_response, std::span<uint8_t const> payload)
     -> StatusValue<aem::ParsedAemPayload const*>
 {
-    // Look up minimum length from table
-    size_t min_length = 0;
-    if (cmd < aem::NUM_AEM_COMMANDS) {
-        auto const& lengths = aem_command_min_lengths[cmd];
-        min_length = is_response && lengths.response > 0 ? lengths.response : lengths.command;
+    // Unknown command codes have no min-length table entry, so the payload can't
+    // be validated -- refuse rather than hand out a ParsedAemPayload pointer over
+    // an unchecked (possibly zero-length) buffer.
+    if (cmd >= aem::NUM_AEM_COMMANDS) {
+        return failure(BufferError::insufficient_data);
     }
 
+    // Look up minimum length from the table for this known command.
+    auto const& lengths = aem_command_min_lengths[cmd];
+    size_t const min_length = is_response && lengths.response > 0 ? lengths.response : lengths.command;
     if (min_length > 0 && payload.size() < min_length) {
         return failure(BufferError::insufficient_data);
     }

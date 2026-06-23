@@ -7,7 +7,7 @@
 // time at which a sample is presented. The naive implementation reads the media
 // timer's wake time each tick and uses it as the base -- so the wake jitter
 // (tens of ns) lands directly in the timestamp, and a listener that recovers its
-// media clock from the timestamp (e.g. a the audio interface) warbles.
+// media clock from the timestamp (e.g. an audio interface) warbles.
 //
 // MediaClockGenerator removes that jitter with a PHASE ACCUMULATOR: the
 // presentation time of each sample advances by exactly one GPS-pinned sample

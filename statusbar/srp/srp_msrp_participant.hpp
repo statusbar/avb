@@ -397,11 +397,12 @@ class MsrpParticipantT
     /// and echoing it keeps the bridge's forwarding path to that listener warm.
     /// We deliberately do NOT extend this to the Talker type: re-declaring a
     /// registered TalkerAdvertise makes the bridge see a SECOND source for the
-    /// StreamID and reject it with TalkerFailed code 19 (the cfea332 bug). A
-    /// Listener has no such two-source conflict, so this echo is safe.
-    /// Observed need: jdk01E -> the DSP processor (via a Luminex switch) stops being
-    /// forwarded after cfea332 silenced the Listener echo. Default OFF (strict
-    /// end-station behaviour); enable per host where a bridge needs the refresh.
+    /// StreamID and reject it with TalkerFailed code 19. A Listener has no such
+    /// two-source conflict, so this echo is safe.
+    /// Observed need: a downstream listener reached through an AVB switch stops
+    /// being forwarded after the strict end-station change silenced the Listener
+    /// echo. Default OFF (strict end-station behaviour); enable per host where a
+    /// bridge needs the refresh.
     void set_redeclare_registered_listeners(bool enabled) noexcept { redeclare_registered_listeners_ = enabled; }
 
     [[nodiscard]] auto redeclare_registered_listeners() const noexcept -> bool { return redeclare_registered_listeners_; }
@@ -410,12 +411,13 @@ class MsrpParticipantT
     /// NEVER transmits a LeaveAll on the wire and never drives our applicants
     /// into the leave/re-declare path: we just keep re-asserting our attributes
     /// via the periodic (1 Hz JoinIn/JoinMt) timer and never RELEASE them. This
-    /// reproduces the pre-006bf73 era (when a hardcoded leave_all_flag=false meant
-    /// we never sent a LeaveAll) that fed a the DSP processor through a Luminex switch
-    /// reliably. Hypothesis: the Luminex installs stream forwarding on a listener
-    /// join but drops it when our LeaveAll drives the registration through Leaving,
-    /// and only re-installs on a fresh join -- so a periodic LeaveAll makes E->the DSP processor
-    /// forwarding blink. We still RECEIVE and honour peer LeaveAlls; we just don't
+    /// reproduces an earlier era (when a hardcoded leave_all_flag=false meant
+    /// we never sent a LeaveAll) that fed a downstream listener through an AVB
+    /// switch reliably. Hypothesis: the switch installs stream forwarding on a
+    /// listener join but drops it when our LeaveAll drives the registration
+    /// through Leaving, and only re-installs on a fresh join -- so a periodic
+    /// LeaveAll makes the downstream forwarding blink. We still RECEIVE and
+    /// honour peer LeaveAlls; we just don't
     /// originate them. Default OFF (spec-compliant periodic LeaveAll); enable per
     /// host that talks to a bridge with this behaviour.
     void set_suppress_leaveall(bool enabled) noexcept { suppress_leaveall_ = enabled; }
@@ -499,7 +501,7 @@ class MsrpParticipantT
     // waiting the full JoinTime (~100 ms). A bridge that issued the LeaveAll
     // declares our just-leaving registration as Mt toward downstream listeners on
     // its own join timer (~100 ms); a re-declare that lands just after that
-    // window lets the listener (a the DSP processor via a Luminex switch) see our
+    // window lets the listener (a DSP processor reached through an AVB switch) see our
     // talker blink out and drop its reservation. Re-declaring synchronously beats
     // that window.
     bool rx_leaveall_seen_{false};

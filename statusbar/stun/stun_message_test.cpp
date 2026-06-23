@@ -161,9 +161,8 @@ TEST(stun_xor_mapped, ipv4_round_trip)
 
     std::array<uint8_t, 64> buf{};
     size_t cursor = 0;
-    EXPECT_FALSE(
-        static_cast<bool>(
-            append_xor_mapped_address(buf, cursor, static_cast<uint16_t>(AttributeType::XorMappedAddress), addr, txid)));
+    EXPECT_FALSE(static_cast<bool>(
+        append_xor_mapped_address(buf, cursor, static_cast<uint16_t>(AttributeType::XorMappedAddress), addr, txid)));
 
     AttributeIterator it{std::span<uint8_t const>{buf.data(), cursor}};
     uint16_t at = 0;
@@ -203,9 +202,8 @@ TEST(stun_xor_mapped, ipv6_round_trip)
 
     std::array<uint8_t, 64> buf{};
     size_t cursor = 0;
-    EXPECT_FALSE(
-        static_cast<bool>(
-            append_xor_mapped_address(buf, cursor, static_cast<uint16_t>(AttributeType::XorMappedAddress), addr, txid)));
+    EXPECT_FALSE(static_cast<bool>(
+        append_xor_mapped_address(buf, cursor, static_cast<uint16_t>(AttributeType::XorMappedAddress), addr, txid)));
 
     AttributeIterator it{std::span<uint8_t const>{buf.data(), cursor}};
     uint16_t at = 0;

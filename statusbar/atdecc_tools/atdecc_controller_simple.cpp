@@ -565,21 +565,19 @@ void ControllerSimple::wire_controller()
                 };
                 if (st == ACMP_STATUS_SUCCESS) {
                     if (mt == ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE) {
-                        emit_status(
-                            std::format(
-                                "Connected: {}:{} -> {}:{}",
-                                name_or_id(resp.talker_entity_id),
-                                resp.talker_unique_id.get(),
-                                name_or_id(resp.listener_entity_id),
-                                resp.listener_unique_id.get()));
+                        emit_status(std::format(
+                            "Connected: {}:{} -> {}:{}",
+                            name_or_id(resp.talker_entity_id),
+                            resp.talker_unique_id.get(),
+                            name_or_id(resp.listener_entity_id),
+                            resp.listener_unique_id.get()));
                     } else if (mt == ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE) {
-                        emit_status(
-                            std::format(
-                                "Disconnected: {}:{} -> {}:{}",
-                                name_or_id(resp.talker_entity_id),
-                                resp.talker_unique_id.get(),
-                                name_or_id(resp.listener_entity_id),
-                                resp.listener_unique_id.get()));
+                        emit_status(std::format(
+                            "Disconnected: {}:{} -> {}:{}",
+                            name_or_id(resp.talker_entity_id),
+                            resp.talker_unique_id.get(),
+                            name_or_id(resp.listener_entity_id),
+                            resp.listener_unique_id.get()));
                     }
                 } else {
                     emit_status(std::format("ACMP {}: {}", acmp_message_type_name(mt), acmp_status_name(st)));
@@ -709,14 +707,13 @@ void ControllerSimple::dispatch_acmp(std::span<uint8_t const> payload, int64_t n
     // listener's relayed CONNECT_TX_COMMAND, which is a command and would
     // otherwise be dropped by the is_response() gate below.
     if (acmp_trace_) {
-        pending_events_.emplace_back(
-            AcmpTraceEvent{
-                .message_type = acmp.message_type(),
-                .status = acmp.status(),
-                .talker_entity_id = acmp.talker_entity_id,
-                .talker_unique_id = acmp.talker_unique_id.get(),
-                .listener_entity_id = acmp.listener_entity_id,
-                .listener_unique_id = acmp.listener_unique_id.get()});
+        pending_events_.emplace_back(AcmpTraceEvent{
+            .message_type = acmp.message_type(),
+            .status = acmp.status(),
+            .talker_entity_id = acmp.talker_entity_id,
+            .talker_unique_id = acmp.talker_unique_id.get(),
+            .listener_entity_id = acmp.listener_entity_id,
+            .listener_unique_id = acmp.listener_unique_id.get()});
     }
 
     if (!acmp.is_response()) {
@@ -729,14 +726,13 @@ void ControllerSimple::dispatch_acmp(std::span<uint8_t const> payload, int64_t n
     // Surface every GET_RX_STATE_RESPONSE (any status), so a diagnostic caller
     // can tell "entity answered" from "no reply" even for an unconnected sink.
     if (mt == ACMP_MESSAGE_TYPE_GET_RX_STATE_RESPONSE) {
-        pending_events_.emplace_back(
-            RxStateEvent{
-                .listener_entity_id = acmp.listener_entity_id,
-                .listener_unique_id = acmp.listener_unique_id.get(),
-                .status = st,
-                .connected = (st == ACMP_STATUS_SUCCESS) && (acmp.talker_entity_id != Eui64{}),
-                .talker_entity_id = acmp.talker_entity_id,
-                .talker_unique_id = acmp.talker_unique_id.get()});
+        pending_events_.emplace_back(RxStateEvent{
+            .listener_entity_id = acmp.listener_entity_id,
+            .listener_unique_id = acmp.listener_unique_id.get(),
+            .status = st,
+            .connected = (st == ACMP_STATUS_SUCCESS) && (acmp.talker_entity_id != Eui64{}),
+            .talker_entity_id = acmp.talker_entity_id,
+            .talker_unique_id = acmp.talker_unique_id.get()});
     }
     if (st == ACMP_STATUS_SUCCESS) {
         if (mt == ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE || mt == ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE) {
@@ -746,9 +742,8 @@ void ControllerSimple::dispatch_acmp(std::span<uint8_t const> payload, int64_t n
                 pending_events_.emplace_back(ConnectionAddedEvent{make_active_connection(acmp)});
             }
         } else if (mt == ACMP_MESSAGE_TYPE_DISCONNECT_TX_RESPONSE || mt == ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE) {
-            pending_events_.emplace_back(
-                ConnectionRemovedEvent{
-                    .listener_entity_id = acmp.listener_entity_id, .listener_unique_id = acmp.listener_unique_id.get()});
+            pending_events_.emplace_back(ConnectionRemovedEvent{
+                .listener_entity_id = acmp.listener_entity_id, .listener_unique_id = acmp.listener_unique_id.get()});
         }
     }
 
@@ -793,14 +788,13 @@ void ControllerSimple::handle_aem_response(
         data.size() >= AemClockSourcePayload::LENGTH) {
         AemClockSourcePayload csp{};
         span_load(csp, data.subspan(0, AemClockSourcePayload::LENGTH));
-        emit_status(
-            std::format(
-                "{} {}: {} clock_domain={} clock_source={}",
-                aem_command_name(cmd),
-                name,
-                aem_status_name(status),
-                csp.descriptor_index.get(),
-                csp.clock_source_index.get()));
+        emit_status(std::format(
+            "{} {}: {} clock_domain={} clock_source={}",
+            aem_command_name(cmd),
+            name,
+            aem_status_name(status),
+            csp.descriptor_index.get(),
+            csp.clock_source_index.get()));
         return;
     }
     // Show status for other commands (identify, start/stop streaming, etc.)

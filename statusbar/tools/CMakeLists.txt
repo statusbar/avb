@@ -45,6 +45,13 @@ set_target_properties(aem_entity_blob_tool PROPERTIES OUTPUT_NAME
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                     aem_entity_blob_tool)
 
+# Unit test for the AemEntityBlob writer (statusbar/tools/aem_entity_blob.hpp).
+# tools/ is not a statusbar_add_module, so register the test file directly into
+# the global list the umbrella feeds to create_test_sourcelist.
+set_property(
+  GLOBAL APPEND PROPERTY STATUSBAR_TEST_FILES
+                         "${CMAKE_CURRENT_LIST_DIR}/aem_entity_blob_test.cpp")
+
 # Ship the canonical dual-format AEM descriptor blob. Generate it at build time
 # from the just-built tool so the entity always has a correct, build-matched
 # descriptor present (no hand-placed /tmp blob that can go stale). Installed to

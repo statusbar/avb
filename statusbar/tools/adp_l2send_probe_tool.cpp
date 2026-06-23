@@ -36,6 +36,7 @@
 //
 // Needs CAP_NET_RAW (run as root or `setcap cap_net_raw,cap_net_admin+ep`).
 
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
 #include "statusbar/status/throw_or_abort.hpp"
@@ -101,7 +102,7 @@ auto parse_mac(std::string_view s, std::array<uint8_t, 6>& out) -> bool
     if (!e) {
         return false;
     }
-    std::memcpy(out.data(), e->span().data(), out.size());
+    statusbar::span_copy(statusbar::make_span(out), e->span());
     return true;
 }
 
@@ -336,9 +337,8 @@ auto run_probe(Config const& cfg, int ifindex, std::array<uint8_t, 6> const& mac
     long long const dpkts = (before.packets < 0 || after.packets < 0) ? -1 : (after.packets - before.packets);
     if (dpkts >= 0 && ok > 0) {
         if (dpkts >= ok) {
-            std::printf(
-                "  => driver counted >= our sends as TX'd. If tcpdump saw nothing, loss is past the counter "
-                "(offload/HW/switch).\n");
+            std::printf("  => driver counted >= our sends as TX'd. If tcpdump saw nothing, loss is past the counter "
+                        "(offload/HW/switch).\n");
         } else {
             std::printf(
                 "  => driver TX'd only %lld of %d accepted frames. The driver is DROPPING after sendto succeeded.\n", dpkts, ok);

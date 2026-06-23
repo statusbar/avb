@@ -8,28 +8,40 @@ statusbar_add_module(
   avb_entity_stereo_io.cpp
   avb_entity_am824_io.cpp
   avb_entity_audio_io.cpp
+  avb_entity_host.cpp
+  avb_entity_stream_counters.cpp
+  avb_entity_listener_streams.cpp
+  avb_entity_talker_streams.cpp
+  avb_entity_talker_gate.cpp
+  avb_entity_udptun_bridge.cpp
   DEPS
-  statusbar-atdecc
-  statusbar-avtp
+  statusbar::atdecc
+  statusbar::avtp
   statusbar::buffer
   statusbar::crypto
   statusbar::dsp
-  statusbar-gptp
+  statusbar::gptp
   statusbar::ieee
-  statusbar-nanoavb
+  statusbar::nanoavb
   statusbar::net
-  statusbar-pcap
-  statusbar-ptpclient
+  statusbar::pcap
+  statusbar::ptpclient
   statusbar::realtime
   statusbar::sm
   statusbar::status
-  statusbar-stun
+  statusbar::stun
   statusbar::tsn
-  statusbar-udptun
+  statusbar::udptun
   TESTS
+  avb_entity_host_test.cpp
   avb_entity_stereo_io_test.cpp
   avb_entity_am824_io_test.cpp
   avb_entity_audio_io_test.cpp
+  avb_entity_stream_counters_test.cpp
+  avb_entity_media_rate_test.cpp
+  avb_entity_udptun_egress_test.cpp
+  avb_entity_udptun_ingest_test.cpp
+  avb_entity_stream_rx_sink_test.cpp
   avb_entity_aaf_reframe_test.cpp
   tx_pcap_recorder_test.cpp
   log_sweep_generator_test.cpp)

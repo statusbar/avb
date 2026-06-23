@@ -26,12 +26,12 @@
 ///           int64_t ptp_ns = sample->ptp_ns;
 ///       }
 ///   }
-///
-///   // As a PtpClientBase for PtpTimeBridge
-///   auto client = std::make_unique<NtpShmPtpClient>();
-///   client->open("0");
-///   bridge.start_sampling(*client);
 /// @endcode
+///
+/// To use NTP SHM as a PTP clock source in the create_client / setup_ptp
+/// pipeline, see @c ptpclient::NtpShmPtpClient in
+/// @c statusbar/ptpclient/ptpclient_ntpshm.hpp, which adapts this reader to the
+/// PtpClientBase interface.
 ///
 /// @see https://docs.ntpsec.org/latest/driver_shm.html
 
@@ -39,7 +39,6 @@
 
 #    include "statusbar/status/status.hpp"
 
-#    include <charconv>
 #    include <cstdint>
 #    include <ctime>
 #    include <functional>
@@ -195,57 +194,8 @@ template <>
 struct std::is_error_code_enum<statusbar::gptp::NtpShmError> : std::true_type
 {};
 
-#    include "statusbar/ptpclient/ptpclient_base.hpp"
-
-namespace statusbar::gptp {
-
-/// PtpClientBase adapter for NtpShmReader.
-///
-/// Allows NTP SHM to be used as a drop-in PTP clock source in the
-/// existing @c create_client / @c setup_ptp pipeline. The @c open() method
-/// accepts a segment index as a string (e.g. "0") and creates an internal
-/// NtpShmReader.
-///
-/// Usage with PtpTimeBridge:
-/// @code
-///   auto client = std::make_unique<NtpShmPtpClient>();
-///   client->open("0");  // segment number as string
-///   bridge.start_sampling(*client);
-/// @endcode
-class NtpShmPtpClient : public ptpclient::PtpClientBase
-{
-  public:
-    NtpShmPtpClient() = default;
-    ~NtpShmPtpClient() noexcept override = default;
-
-    NtpShmPtpClient(NtpShmPtpClient const&) = delete;
-    auto operator=(NtpShmPtpClient const&) -> NtpShmPtpClient& = delete;
-    NtpShmPtpClient(NtpShmPtpClient&&) noexcept = default;
-    auto operator=(NtpShmPtpClient&&) noexcept -> NtpShmPtpClient& = default;
-
-    /// Open the NTP SHM segment
-    /// @param device_path Segment index as string (e.g., "0", "1"); default "0"
-    [[nodiscard]] auto open(std::string_view device_path) noexcept -> statusbar::Status override;
-
-    void close() noexcept override { reader_.reset(); }
-
-    [[nodiscard]] auto is_open() const noexcept -> bool override { return reader_ != nullptr; }
-
-    [[nodiscard]] auto get_time_ns() const noexcept -> statusbar::StatusValue<int64_t> override
-    {
-        if (!reader_) {
-            return statusbar::failure(ptpclient::PtpError::device_not_open);
-        }
-        return reader_->get_ptp_time_ns();
-    }
-
-    [[nodiscard]] auto device_path() const noexcept -> std::string_view override { return device_name_; }
-
-  private:
-    std::unique_ptr<NtpShmReader> reader_;
-    std::string device_name_{"ntpshm"};
-};
-
-}  // namespace statusbar::gptp
+// NOTE: the PtpClientBase adapter for this reader (NtpShmPtpClient) lives in the
+// ptpclient module (statusbar/ptpclient/ptpclient_ntpshm.hpp), not here, so the
+// gptp module never depends on ptpclient. gptp owns only the raw SHM reader.
 
 #endif  // __linux__

@@ -3,6 +3,7 @@
 
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 
+#include "statusbar/atdecc/atdecc_addresses.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 
 #include <cstring>
@@ -17,44 +18,44 @@ namespace {
 /// the descriptor types whose fixed length grew in 2021 are altered; every
 /// other type is returned unchanged. Used when the entity is configured for
 /// `atdecc.version = "2016"` so controllers that reject 2021-length
-/// descriptors (e.g. Hive/Compass) can still enumerate the model.
+/// descriptors can still enumerate the model.
 [[nodiscard]] auto downgrade_descriptor_to_legacy_2016(uint16_t type, std::span<uint8_t> out, size_t n) -> size_t
 {
     using namespace atdecc::aem;
     switch (type) {
-    case DESCRIPTOR_STREAM_INPUT:
-    case DESCRIPTOR_STREAM_OUTPUT: {
-        // 2021 wire: [0..138) header + stream_formats[138..n). 2016 wire:
-        // [0..132) header + formats[132..]. The three 2021-only fields
-        // (redundant_offset / number_of_redundant_streams / timing) sit at
-        // bytes 132..137 -- BEFORE the formats trailer -- so drop them and
-        // slide the trailer down 6 bytes, and rewrite formats_offset
-        // (big-endian, bytes 82..83) from 138 to 132.
-        constexpr size_t L2021 = DescriptorStream::LENGTH;          // 138
-        constexpr size_t L2016 = DescriptorStream::MINIMUM_LENGTH;  // 132
-        constexpr size_t FORMATS_OFFSET_POS = 82;
-        if (n < L2021) {
+        case DESCRIPTOR_STREAM_INPUT:
+        case DESCRIPTOR_STREAM_OUTPUT: {
+            // 2021 wire: [0..138) header + stream_formats[138..n). 2016 wire:
+            // [0..132) header + formats[132..]. The three 2021-only fields
+            // (redundant_offset / number_of_redundant_streams / timing) sit at
+            // bytes 132..137 -- BEFORE the formats trailer -- so drop them and
+            // slide the trailer down 6 bytes, and rewrite formats_offset
+            // (big-endian, bytes 82..83) from 138 to 132.
+            constexpr size_t L2021 = DescriptorStream::LENGTH;          // 138
+            constexpr size_t L2016 = DescriptorStream::MINIMUM_LENGTH;  // 132
+            constexpr size_t FORMATS_OFFSET_POS = 82;
+            if (n < L2021) {
+                return n;
+            }
+            size_t const trailer = n - L2021;
+            out[FORMATS_OFFSET_POS] = static_cast<uint8_t>((L2016 >> 8) & 0xFFU);
+            out[FORMATS_OFFSET_POS + 1] = static_cast<uint8_t>(L2016 & 0xFFU);
+            if (trailer != 0) {
+                std::memmove(out.data() + L2016, out.data() + L2021, trailer);
+            }
+            return L2016 + trailer;
+        }
+        // Tail-only 2021 additions, no variable trailer -> plain truncate.
+        case DESCRIPTOR_AVB_INTERFACE:
+            return (n >= DescriptorAvbInterface::LENGTH) ? DescriptorAvbInterface::MINIMUM_LENGTH : n;
+        case DESCRIPTOR_AUDIO_CLUSTER:
+            return (n >= DescriptorAudioCluster::LENGTH) ? DescriptorAudioCluster::MINIMUM_LENGTH : n;
+        case DESCRIPTOR_CONTROL_BLOCK:
+            return (n >= DescriptorControlBlock::LENGTH) ? DescriptorControlBlock::MINIMUM_LENGTH : n;
+        case DESCRIPTOR_SIGNAL_TRANSCODER:
+            return (n >= DescriptorSignalTranscoder::LENGTH) ? DescriptorSignalTranscoder::MINIMUM_LENGTH : n;
+        default:
             return n;
-        }
-        size_t const trailer = n - L2021;
-        out[FORMATS_OFFSET_POS] = static_cast<uint8_t>((L2016 >> 8) & 0xFFU);
-        out[FORMATS_OFFSET_POS + 1] = static_cast<uint8_t>(L2016 & 0xFFU);
-        if (trailer != 0) {
-            std::memmove(out.data() + L2016, out.data() + L2021, trailer);
-        }
-        return L2016 + trailer;
-    }
-    // Tail-only 2021 additions, no variable trailer -> plain truncate.
-    case DESCRIPTOR_AVB_INTERFACE:
-        return (n >= DescriptorAvbInterface::LENGTH) ? DescriptorAvbInterface::MINIMUM_LENGTH : n;
-    case DESCRIPTOR_AUDIO_CLUSTER:
-        return (n >= DescriptorAudioCluster::LENGTH) ? DescriptorAudioCluster::MINIMUM_LENGTH : n;
-    case DESCRIPTOR_CONTROL_BLOCK:
-        return (n >= DescriptorControlBlock::LENGTH) ? DescriptorControlBlock::MINIMUM_LENGTH : n;
-    case DESCRIPTOR_SIGNAL_TRANSCODER:
-        return (n >= DescriptorSignalTranscoder::LENGTH) ? DescriptorSignalTranscoder::MINIMUM_LENGTH : n;
-    default:
-        return n;
     }
 }
 
@@ -80,6 +81,9 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
     if (header.target_entity_id != our_entity_id) {
         return false;  // Not for us
     }
+
+    // Keep our id current for unsolicited notifications (their target_entity_id).
+    our_entity_id_ = our_entity_id;
 
     // Stash the source MAC so per-command handlers can retain it if they
     // need to emit an out-of-band late response (e.g. ACQUIRE_ENTITY's
@@ -110,6 +114,12 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
         case AEM_COMMAND_READ_DESCRIPTOR:
             return handle_read_descriptor(header, command_data, out_buffer);
 
+        case AEM_COMMAND_GET_NAME:
+            return handle_get_name(command_data, out_buffer);
+
+        case AEM_COMMAND_SET_NAME:
+            return handle_set_name(command_data, out_buffer);
+
         case AEM_COMMAND_ENTITY_AVAILABLE:
             return handle_entity_available(header);
 
@@ -126,10 +136,10 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
             return handle_controller_available(header);
 
         case AEM_COMMAND_SET_CONTROL:
-            return handle_set_control(header, command_data);
+            return handle_set_descriptor_value(AEM_COMMAND_SET_CONTROL, command_data, out_buffer);
 
         case AEM_COMMAND_GET_CONTROL:
-            return handle_get_control(header, command_data);
+            return handle_get_descriptor_value(AEM_COMMAND_GET_CONTROL, command_data, out_buffer);
 
         case AEM_COMMAND_GET_COUNTERS:
             return handle_get_counters(header, command_data, out_buffer);
@@ -211,6 +221,85 @@ auto AemCommandHandler::handle_read_descriptor(
     return {.status = AEM_STATUS_SUCCESS, .size = AemReadDescriptorResponsePayload::LENGTH + bytes_written};
 }
 
+auto AemCommandHandler::handle_get_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    // GET_NAME command body (Clause 7.4.18.1): descriptor_type(2) +
+    // descriptor_index(2) + name_index(2) + configuration_index(2).
+    constexpr size_t GET_NAME_HEADER = 8;
+    if (command_data.size() < GET_NAME_HEADER) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    doublet_t dtype{};
+    doublet_t dindex{};
+    doublet_t nindex{};
+    doublet_t cindex{};
+    span_load(dtype, command_data.subspan(0, 2));
+    span_load(dindex, command_data.subspan(2, 2));
+    span_load(nindex, command_data.subspan(4, 2));
+    span_load(cindex, command_data.subspan(6, 2));
+
+    NameRef const ref{
+        .descriptor =
+            DescriptorRef{.configuration_index = cindex.get(), .descriptor_type = dtype.get(), .descriptor_index = dindex.get()},
+        .name_index = nindex.get()};
+
+    // Per-call model; symbols resolve through the handler's storage.
+    AemEntityModel const aem_model{*handler_};
+    auto const n = aem_model.get_name_for_wire(ref, out_buffer);
+    if (n == 0) {
+        // The handler serves no name for this (descriptor, name_index) — the
+        // conservative default, consistent with the SET path.
+        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+    }
+    return {.status = AEM_STATUS_SUCCESS, .size = n};
+}
+
+auto AemCommandHandler::handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    // Per-call model; the handler applies the name by (descriptor, name_index,
+    // symbol). The response echoes the command (header + 64-byte name).
+    AemEntityModel aem_model{*handler_};
+    auto const status = aem_model.apply_set_name(command_data);
+
+    size_t size = 0;
+    if (status == AEM_STATUS_SUCCESS && out_buffer.size() >= command_data.size()) {
+        std::copy(command_data.begin(), command_data.end(), out_buffer.begin());
+        size = command_data.size();
+    }
+    return {.status = status, .size = size};
+}
+
+auto AemCommandHandler::handle_set_descriptor_value(
+    uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    // Per-call model (handler_ resolves the descriptor symbol via its storage). The
+    // handler applies the value by (command_type, symbol); the response echoes the command.
+    AemEntityModel aem_model{*handler_};
+    auto const r = aem_model.apply_set_descriptor_value(command_type, command_data, out_buffer);
+
+    // A controller changed a control: notify every registered controller (IEEE
+    // 1722.1 9.6 unsolicited notifications). All subscribers are notified,
+    // including the originator — the U-bit + distinct sequence_id let a
+    // controller tell its own unsolicited echo from the direct response.
+    if (r.status == AEM_STATUS_SUCCESS) {
+        emit_unsolicited(command_type, std::span<uint8_t const>{out_buffer.data(), r.size});
+    }
+    return {.status = r.status, .size = r.size};
+}
+
+auto AemCommandHandler::handle_get_descriptor_value(
+    uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
+    AemEntityModel const aem_model{*handler_};
+    auto const n = aem_model.get_descriptor_value_for_wire(command_type, command_data, out_buffer);
+    if (n == 0) {
+        // The handler served no value: the entity does not implement this GET (the
+        // conservative default, consistent with the SET hook's NOT_IMPLEMENTED).
+        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+    }
+    return {.status = AEM_STATUS_SUCCESS, .size = n};
+}
+
 auto AemCommandHandler::handle_get_stream_format(
     AemDu const& /*header*/, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
@@ -276,8 +365,8 @@ auto AemCommandHandler::handle_get_sampling_rate(
     resp.descriptor_index = descriptor_index;
     // current_sampling_rate is a network-order quadlet in the wire descriptor.
     resp.sampling_rate = static_cast<uint32_t>(
-        (static_cast<uint32_t>(desc[SR_OFFSET]) << 24) | (static_cast<uint32_t>(desc[SR_OFFSET + 1]) << 16)
-        | (static_cast<uint32_t>(desc[SR_OFFSET + 2]) << 8) | static_cast<uint32_t>(desc[SR_OFFSET + 3]));
+        (static_cast<uint32_t>(desc[SR_OFFSET]) << 24) | (static_cast<uint32_t>(desc[SR_OFFSET + 1]) << 16) |
+        (static_cast<uint32_t>(desc[SR_OFFSET + 2]) << 8) | static_cast<uint32_t>(desc[SR_OFFSET + 3]));
     span_store(out_buffer, resp);
     return {.status = AEM_STATUS_SUCCESS, .size = AemSamplingRatePayload::LENGTH};
 }
@@ -579,7 +668,10 @@ auto AemCommandHandler::handle_register_unsolicited(AemDu const& header) -> AemC
         return {.status = AEM_STATUS_SUCCESS, .size = 0};
     }
 
-    if (!unsolicited_registrations_.add(UnsolicitedRegistration{.controller_entity_id = header.controller_entity_id})) {
+    // Stash the source MAC (set by process_packet) so unsolicited notifications
+    // can be unicast back to this controller.
+    if (!unsolicited_registrations_.add(
+            UnsolicitedRegistration{.controller_entity_id = header.controller_entity_id, .controller_mac = current_src_mac_})) {
         return {.status = AEM_STATUS_NO_RESOURCES, .size = 0};
     }
     return {.status = AEM_STATUS_SUCCESS, .size = 0};
@@ -599,6 +691,74 @@ auto AemCommandHandler::handle_deregister_unsolicited(AemDu const& header) -> Ae
 auto AemCommandHandler::unsolicited_registration_count() const noexcept -> size_t
 {
     return unsolicited_registrations_.size();
+}
+
+void AemCommandHandler::send_unsolicited_to(
+    Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t const command_type, std::span<uint8_t const> body)
+{
+    // Frame an unsolicited AEM response: our id as target, the controller's id,
+    // a fresh sequence_id, and the U-bit set.
+    AemDu hdr{};
+    hdr.target_entity_id = our_entity_id_;
+    hdr.controller_entity_id = controller_id;
+    hdr.sequence_id = doublet_t{unsolicited_sequence_id_++};
+    hdr.init_response(
+        command_type,
+        AEM_STATUS_SUCCESS,
+        static_cast<uint16_t>(AemDu::AEM_DATA_LENGTH + body.size()),
+        /*unsolicited=*/true);
+
+    std::array<uint8_t, AemDu::LENGTH + MAX_AEM_RESPONSE_SIZE> buffer{};
+    auto buffer_span = std::span{buffer};
+    span_store(buffer_span, hdr);
+    if (!body.empty()) {
+        span_copy(buffer_span.subspan(AemDu::LENGTH), body);
+    }
+    (void)callbacks_.send_response(dest_mac, {buffer.data(), AemDu::LENGTH + body.size()});
+}
+
+auto AemCommandHandler::targets_identify_control(uint16_t const command_type, std::span<uint8_t const> body) const noexcept -> bool
+{
+    // Body header: descriptor_type(2) + descriptor_index(2), big-endian.
+    if (!identify_control_index_valid_ || command_type != AEM_COMMAND_SET_CONTROL || body.size() < 4) {
+        return false;
+    }
+    auto const descriptor_type = static_cast<uint16_t>((static_cast<uint16_t>(body[0]) << 8) | body[1]);
+    auto const descriptor_index = static_cast<uint16_t>((static_cast<uint16_t>(body[2]) << 8) | body[3]);
+    return descriptor_type == DESCRIPTOR_CONTROL && descriptor_index == identify_control_index_;
+}
+
+void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<uint8_t const> body)
+{
+    if (!callbacks_.send_response) {
+        return;
+    }
+
+    for (auto const& reg : unsolicited_registrations_) {
+        send_unsolicited_to(reg.controller_mac, reg.controller_entity_id, command_type, body);
+    }
+
+    // An IDENTIFY-control change is additionally announced to the IDENTIFY
+    // multicast (IEEE 1722.1) so any controller — even one not registered for
+    // unsolicited notifications — observes the identify. No specific controller,
+    // so controller_entity_id is left zero.
+    if (targets_identify_control(command_type, body)) {
+        send_unsolicited_to(atdecc::ATDECC_IDENTIFY_MULTICAST_MAC, Eui64{}, command_type, body);
+    }
+}
+
+auto AemCommandHandler::apply_local_descriptor_value(uint16_t const command_type, std::span<uint8_t const> command_body) -> uint8_t
+{
+    // Apply the change exactly as a controller's SET would (same symbol-keyed
+    // hook), then fan out unsolicited notifications. This is the entry point for
+    // an entity changing its own controls (e.g. a software IDENTIFY button).
+    AemEntityModel aem_model{*handler_};
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
+    auto const r = aem_model.apply_set_descriptor_value(command_type, command_body, echo);
+    if (r.status == AEM_STATUS_SUCCESS) {
+        emit_unsolicited(command_type, std::span<uint8_t const>{echo.data(), r.size});
+    }
+    return r.status;
 }
 
 void AemCommandHandler::controller_available_response_received()

@@ -6,6 +6,7 @@
 #include "statusbar/atdecc/atdecc_aecp_aem.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 
@@ -148,10 +149,15 @@ static_assert(NAME_RESPONSE_SIZE == NAME_HEADER_SIZE + AtdeccString::LENGTH);
 
 auto AemEntityModel::symbol_for(DescriptorRef ref) const -> uint32_t
 {
-    if (!storage_) {
+    // Resolve the symbol from this model's own attached storage if it has one,
+    // otherwise from the handler's backing storage (DescriptorStorageHandler and
+    // friends). This lets symbols resolve through the normal command path even when
+    // the per-command AemEntityModel is built handler-only (the usual case).
+    DescriptorStorage const* const store = storage_ ? &*storage_ : handler_->descriptor_storage();
+    if (store == nullptr) {
         return 0;
     }
-    auto result = storage_->get_symbol(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+    auto result = store->get_symbol(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
     if (!result) {
         return 0;
     }
@@ -223,6 +229,52 @@ auto AemEntityModel::apply_set_name(std::span<uint8_t const> command_body) -> ui
     std::memcpy(name.value.data(), name_bytes.data(), AtdeccString::LENGTH);
 
     return handler_->on_set_name(ref, symbol_for(ref.descriptor), name);
+}
+
+auto AemEntityModel::apply_set_descriptor_value(
+    uint16_t const command_type, std::span<uint8_t const> command_body, std::span<uint8_t> out) -> SetValueResult
+{
+    // Command body: descriptor_type(2) + descriptor_index(2) + value bytes.
+    if (command_body.size() < 4) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    doublet_t dtype{};
+    doublet_t dindex{};
+    span_load(dtype, command_body.subspan(0, 2));
+    span_load(dindex, command_body.subspan(2, 2));
+    DescriptorRef const ref{.configuration_index = 0, .descriptor_type = dtype.get(), .descriptor_index = dindex.get()};
+
+    auto const status = handler_->on_set_descriptor_value(command_type, ref, symbol_for(ref), command_body.subspan(4));
+
+    // AECP echoes the SET command (descriptor_type/index + value) as the response body.
+    size_t size = 0;
+    if (out.size() >= command_body.size()) {
+        std::copy(command_body.begin(), command_body.end(), out.begin());
+        size = command_body.size();
+    }
+    return {.status = status, .size = size};
+}
+
+auto AemEntityModel::get_descriptor_value_for_wire(
+    uint16_t const command_type, std::span<uint8_t const> command_body, std::span<uint8_t> out) const -> size_t
+{
+    // Command body: descriptor_type(2) + descriptor_index(2). Response echoes those,
+    // then the handler's current value bytes.
+    if (command_body.size() < 4 || out.size() < 4) {
+        return 0;
+    }
+    doublet_t dtype{};
+    doublet_t dindex{};
+    span_load(dtype, command_body.subspan(0, 2));
+    span_load(dindex, command_body.subspan(2, 2));
+    DescriptorRef const ref{.configuration_index = 0, .descriptor_type = dtype.get(), .descriptor_index = dindex.get()};
+
+    std::copy(command_body.begin(), command_body.begin() + 4, out.begin());
+    auto const n = handler_->on_get_descriptor_value(command_type, ref, symbol_for(ref), out.subspan(4));
+    if (n == 0) {
+        return 0;  // no such descriptor / not implemented
+    }
+    return 4 + n;
 }
 
 }  // namespace statusbar::nanoavb

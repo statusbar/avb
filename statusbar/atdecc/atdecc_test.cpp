@@ -1742,8 +1742,8 @@ TEST(acmp_serialize_2016, wire_field_offsets)
     EXPECT_EQ(wire.size(), AcmpDu::LENGTH);  // 56-byte 2013/2016 short form
 
     // Common AVTP control header.
-    EXPECT_EQ(wire[0], static_cast<uint8_t>(AvtpSubtype::acmp));      // subtype @0
-    EXPECT_EQ(wire[1] & 0x0F, ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);  // message_type @1
+    EXPECT_EQ(wire[0], static_cast<uint8_t>(AvtpSubtype::acmp));        // subtype @0
+    EXPECT_EQ(wire[1] & 0x0F, ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);    // message_type @1
     EXPECT_EQ(((wire[2] & 0x07) << 8) | wire[3], AcmpDu::DATA_LENGTH);  // control_data_length @2-3 == 44
 
     auto const field_at = [&](size_t off, std::span<uint8_t const> bytes) {
@@ -1755,16 +1755,16 @@ TEST(acmp_serialize_2016, wire_field_offsets)
     field_at(12, resp.controller_entity_id.span());  // controller_entity_id @12-19
     field_at(20, resp.talker_entity_id.span());      // talker_entity_id     @20-27
     field_at(28, resp.listener_entity_id.span());    // listener_entity_id   @28-35
-    EXPECT_EQ(wire[36], 0x01);                        // talker_unique_id     @36-37 (network order)
+    EXPECT_EQ(wire[36], 0x01);                       // talker_unique_id     @36-37 (network order)
     EXPECT_EQ(wire[37], 0x02);
-    EXPECT_EQ(wire[38], 0x03);                        // listener_unique_id   @38-39
+    EXPECT_EQ(wire[38], 0x03);  // listener_unique_id   @38-39
     EXPECT_EQ(wire[39], 0x04);
-    field_at(40, resp.stream_dest_mac.span());        // stream_dest_mac      @40-45
-    EXPECT_EQ(wire[46], 0x00);                        // connection_count     @46-47
+    field_at(40, resp.stream_dest_mac.span());  // stream_dest_mac      @40-45
+    EXPECT_EQ(wire[46], 0x00);                  // connection_count     @46-47
     EXPECT_EQ(wire[47], 0x05);
-    EXPECT_EQ(wire[48], 0x00);                        // sequence_id          @48-49
+    EXPECT_EQ(wire[48], 0x00);  // sequence_id          @48-49
     EXPECT_EQ(wire[49], 0x06);
-    EXPECT_EQ(wire[52], 0x00);                        // stream_vlan_id       @52-53
+    EXPECT_EQ(wire[52], 0x00);  // stream_vlan_id       @52-53
     EXPECT_EQ(wire[53], 0x02);
 }
 

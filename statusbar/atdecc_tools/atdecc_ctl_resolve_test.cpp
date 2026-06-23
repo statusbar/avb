@@ -42,9 +42,9 @@ TEST(atdecc_ctl_endpoint, name_with_uid)
 
 TEST(atdecc_ctl_endpoint, bare_name_defaults_uid_zero)
 {
-    auto e = parse_endpoint("the audio interface");
+    auto e = parse_endpoint("audio-iface");
     EXPECT_TRUE(e.has_value());
-    EXPECT_EQ(e->name, std::string{"the audio interface"});
+    EXPECT_EQ(e->name, std::string{"audio-iface"});
     EXPECT_EQ(e->unique_id, 0U);
 }
 
@@ -85,10 +85,10 @@ TEST(atdecc_ctl_resolve, case_insensitive_substring)
 {
     std::vector<EntityDisplayInfo> entities{
         make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 1}, "jdk01a"),
-        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 2}, "the audio interface"),
+        make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 2}, "audio-iface"),
     };
     std::string err;
-    auto id = resolve_entity("the audio interface", entities, err);
+    auto id = resolve_entity("AUDIO-IFACE", entities, err);  // differing case exercises the match
     EXPECT_TRUE(id.has_value());
     EXPECT_EQ(*id, (Eui64{0, 0, 0, 0, 0, 0, 0, 2}));
 }
@@ -97,7 +97,7 @@ TEST(atdecc_ctl_resolve, no_match_is_error)
 {
     std::vector<EntityDisplayInfo> entities{make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 1}, "jdk01a")};
     std::string err;
-    auto id = resolve_entity("the dsp processor", entities, err);
+    auto id = resolve_entity("dsp-rack", entities, err);
     EXPECT_FALSE(id.has_value());
     EXPECT_FALSE(err.empty());
 }
@@ -133,17 +133,16 @@ TEST(atdecc_ctl_resolve, same_id_twice_is_not_ambiguous)
 
 TEST(atdecc_ctl_batch, parses_connect_clock_disconnect_in_order)
 {
-    auto doc = toml::parse(
-        "[[connect]]\n"
-        "talker = \"jdk01a:0\"\n"
-        "listener = \"jdk01d:1\"\n"
-        "[[disconnect]]\n"
-        "talker = \"jdk01a:1\"\n"
-        "listener = \"jdk01e:1\"\n"
-        "[[set_clock_source]]\n"
-        "entity = \"the audio interface\"\n"
-        "clock_domain = 0\n"
-        "clock_source = 2\n");
+    auto doc = toml::parse("[[connect]]\n"
+                           "talker = \"jdk01a:0\"\n"
+                           "listener = \"jdk01d:1\"\n"
+                           "[[disconnect]]\n"
+                           "talker = \"jdk01a:1\"\n"
+                           "listener = \"jdk01e:1\"\n"
+                           "[[set_clock_source]]\n"
+                           "entity = \"audio-iface\"\n"
+                           "clock_domain = 0\n"
+                           "clock_source = 2\n");
     EXPECT_TRUE(doc.has_value());
 
     std::string err;
@@ -155,7 +154,7 @@ TEST(atdecc_ctl_batch, parses_connect_clock_disconnect_in_order)
     EXPECT_EQ((*ops)[0].talker.name, std::string{"jdk01a"});
     EXPECT_EQ((*ops)[0].listener.unique_id, 1U);
     EXPECT_TRUE((*ops)[1].kind == OpKind::SetClockSource);
-    EXPECT_EQ((*ops)[1].entity, std::string{"the audio interface"});
+    EXPECT_EQ((*ops)[1].entity, std::string{"audio-iface"});
     EXPECT_EQ((*ops)[1].clock_source, 2U);
     EXPECT_TRUE((*ops)[2].kind == OpKind::Disconnect);
     EXPECT_EQ((*ops)[2].listener.name, std::string{"jdk01e"});
@@ -163,9 +162,8 @@ TEST(atdecc_ctl_batch, parses_connect_clock_disconnect_in_order)
 
 TEST(atdecc_ctl_batch, missing_listener_is_error)
 {
-    auto doc = toml::parse(
-        "[[connect]]\n"
-        "talker = \"jdk01a:0\"\n");
+    auto doc = toml::parse("[[connect]]\n"
+                           "talker = \"jdk01a:0\"\n");
     EXPECT_TRUE(doc.has_value());
     std::string err;
     auto ops = parse_batch_ops(*doc, err);
@@ -278,7 +276,9 @@ TEST(atdecc_ctl_trace, talker_ok_but_no_listener_reply)
 TEST(atdecc_ctl_trace, listener_nonsuccess_is_rejected)
 {
     HandshakeLegs legs{
-        .relay_seen = true, .talker_status = atdecc::ACMP_STATUS_SUCCESS, .listener_status = atdecc::ACMP_STATUS_LISTENER_EXCLUSIVE};
+        .relay_seen = true,
+        .talker_status = atdecc::ACMP_STATUS_SUCCESS,
+        .listener_status = atdecc::ACMP_STATUS_LISTENER_EXCLUSIVE};
     EXPECT_TRUE(classify_handshake(legs) == HandshakeFault::ListenerRejected);
 }
 

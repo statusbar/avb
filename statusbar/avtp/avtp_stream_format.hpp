@@ -90,7 +90,7 @@ namespace statusbar::avtp {
 }
 
 /// Decode an AAF stream format. Layout (IEEE 1722-2016 Clause 7.3.4), verified
-/// byte-for-byte against a the DSP processor (02 07 02 20 02 00 c0 00 =
+/// byte-for-byte against a reference device (02 07 02 20 02 00 c0 00 =
 /// AAF 96 kHz INT_32 8ch 12 samples/frame):
 ///   Byte 0: subtype (0x02)
 ///   Byte 1: reserved[7:4] | nsr[3:0]

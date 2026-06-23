@@ -14,7 +14,10 @@
 using statusbar::avb_entity::LogSweepGenerator;
 
 namespace {
-auto approx(double a, double b, double tol) -> bool { return std::fabs(a - b) <= tol; }
+auto approx(double a, double b, double tol) -> bool
+{
+    return std::fabs(a - b) <= tol;
+}
 }  // namespace
 
 TEST(log_sweep, frequency_sweeps_log_start_to_end_and_repeats)
@@ -67,7 +70,7 @@ TEST(log_sweep, output_bounded_by_amplitude_and_monotonic_freq_within_period)
         }
         prev_f = f;
     }
-    EXPECT_TRUE(monotonic);            // frequency rises across the sweep
+    EXPECT_TRUE(monotonic);             // frequency rises across the sweep
     EXPECT_TRUE(peak <= 0.5F + 1e-6F);  // never exceeds amplitude
     EXPECT_TRUE(peak > 0.1F);           // actually produced signal
 }

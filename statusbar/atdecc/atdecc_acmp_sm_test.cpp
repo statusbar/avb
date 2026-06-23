@@ -884,19 +884,29 @@ TEST(listener_sm, connect_same_talker_idempotent)
     ListenerContext ctx(4);
     ctx.my_id = LISTENER_ID;
 
-    // Pre-connect stream 0 to TALKER_ID
+    // Pre-connect stream 0 to TALKER_ID with concrete stream params.
     auto* stream = ctx.get_stream(0);
     stream->connected = true;
     stream->talker_entity_id = TALKER_ID;
     stream->talker_unique_id = 0;
+    stream->stream_id = Eui64{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    stream->stream_dest_mac = Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0x34};
 
     std::vector<AcmpCommandResponse> sent_commands;
     ctx.tx_command = [&](AcmpCommandResponse const& cmd) {
         sent_commands.push_back(cmd);
         return true;
     };
+    std::vector<AcmpCommandResponse> sent_responses;
+    ctx.tx_response = [&](AcmpCommandResponse const& resp) {
+        sent_responses.push_back(resp);
+        return true;
+    };
 
-    // Connect from the same talker should proceed (idempotent)
+    // Re-CONNECT_RX from the SAME talker (a controller re-asserting an existing
+    // connection) must be idempotent: confirm SUCCESS straight away, do NOT re-run
+    // the handshake (no CONNECT_TX to the talker, no pending state) — re-handshaking
+    // would churn the talker's MSRP reservation for a live stream.
     ctx.rcvd_cmd_resp = {};
     ctx.rcvd_cmd_resp.init_command(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
     ctx.rcvd_cmd_resp.listener_entity_id = LISTENER_ID;
@@ -908,10 +918,17 @@ TEST(listener_sm, connect_same_talker_idempotent)
     sm.handle_event(ctx, ListenerEvent::UCT, test_time(0));
     sm.handle_event(ctx, ListenerEvent::RcvdConnectRx, test_time(0));
 
-    // Should send CONNECT_TX_COMMAND to talker (not reject)
-    EXPECT_EQ(sent_commands.size(), 1U);
-    EXPECT_EQ(sent_commands[0].message_type(), ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
-    EXPECT_TRUE(ctx.has_pending);
+    // No re-handshake: nothing sent to the talker, no pending.
+    EXPECT_TRUE(sent_commands.empty());
+    EXPECT_FALSE(ctx.has_pending);
+    EXPECT_TRUE(stream->connected);  // still connected
+
+    // Immediate idempotent SUCCESS response carrying the existing stream params.
+    EXPECT_EQ(sent_responses.size(), 1U);
+    EXPECT_EQ(sent_responses[0].message_type(), ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE);
+    EXPECT_EQ(sent_responses[0].status(), ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(sent_responses[0].stream_id, stream->stream_id);
+    EXPECT_EQ(sent_responses[0].stream_dest_mac, stream->stream_dest_mac);
 }
 
 TEST(listener_sm, connect_receives_response)

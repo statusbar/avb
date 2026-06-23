@@ -30,6 +30,7 @@ statusbar_add_module(
   avtp_tscf.cpp
   avtp_tscf_v1.cpp
   avtp_maap_sm.cpp
+  avtp_maap_handler.cpp
   avtp_types.cpp
   DEPS
   statusbar::buffer
@@ -62,6 +63,7 @@ statusbar_add_module(
   avtp_tscf_test.cpp
   avtp_tscf_v1_test.cpp
   avtp_maap_sm_test.cpp
+  avtp_maap_handler_test.cpp
   avtp_stream_format_test.cpp
   avtp_types_test.cpp)
 

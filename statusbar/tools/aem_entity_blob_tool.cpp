@@ -21,6 +21,7 @@
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/tools/aem_entity_blob.hpp"
 
 #include <array>
 #include <cstdint>
@@ -57,7 +58,7 @@ constexpr uint16_t NO_LOCALIZED = 0xFFFF;
 }
 
 // AAF 8-channel 96 kHz INT_32 stream format (IEEE 1722-2016 Clause 7.3.4).
-// Verified byte-for-byte against a the DSP processor STREAM_INPUT descriptor:
+// Verified byte-for-byte against a reference STREAM_INPUT descriptor:
 //   byte0 subtype=0x02 (AAF)
 //   byte1 = nsr in the LOW nibble: 0x07 = 96 kHz   (NOT the high nibble!)
 //   byte2 = format = 0x02 (INT_32)                 (sample format, not channels)
@@ -65,7 +66,7 @@ constexpr uint16_t NO_LOCALIZED = 0xFFFF;
 //   bytes4-7 (32-bit BE) = channels_per_frame(8)<<22 | samples_per_frame(12)<<12
 //                        = (8<<22)|(12<<12) = 0x0200C000 -> 02 00 c0 00
 // The earlier code (02 70 08 20 00 00 00 00) put nsr in the high nibble and the
-// channel count where the format byte goes, so compliant controllers / the the DSP processor
+// channel count where the format byte goes, so compliant controllers
 // decoded it as "AAF 0 kHz, 0 channels" and refused the format. The int-vs-float
 // distinction also lives in the AAF PDU format field at run time (int_32bit).
 [[nodiscard]] auto aaf_8ch_96k_32bit() -> ieee::Eui64
@@ -90,90 +91,10 @@ constexpr uint16_t NO_LOCALIZED = 0xFFFF;
     return ieee::Eui64{0x04, 0x10, 0x60, 0x01, 0x00, 0x00, 0xBB, 0x80};
 }
 
-// --------------------------------------------------------------------------
-// AemEntityBlob — assembles a DescriptorStorage blob (AEM1 header + TOC +
-// concatenated descriptor bytes). No symbol table (the entity loader resolves
-// descriptors by (configuration, type, index) via the TOC).
-// --------------------------------------------------------------------------
-
-// Wire length of a descriptor: its variable-trailer-aware wire_size().
-template <typename T>
-[[nodiscard]] auto descriptor_wire_bytes(T const& d) -> std::vector<uint8_t>
-{
-    size_t n = 0;
-    if constexpr (requires { d.wire_size(); }) {
-        n = d.wire_size();
-    } else {
-        n = T::LENGTH;
-    }
-    // The fixed header is followed in-memory by the trailer array at offset
-    // LENGTH, so the first wire_size() bytes are exactly the on-wire form.
-    std::vector<uint8_t> v(n);
-    std::memcpy(v.data(), &d, n);
-    return v;
-}
-
-class AemEntityBlob
-{
-  public:
-    template <typename T>
-    void add(uint16_t configuration, T const& desc)
-    {
-        entries_.push_back(
-            Entry{
-                .type = static_cast<uint16_t>(desc.descriptor_type.get()),
-                .index = static_cast<uint16_t>(desc.descriptor_index.get()),
-                .config = configuration,
-                .bytes = descriptor_wire_bytes(desc),
-            });
-    }
-
-    [[nodiscard]] auto build() const -> std::vector<uint8_t>
-    {
-        size_t const toc_offset = atdecc::aem::DescriptorStorageHeader::LENGTH;  // 20
-        size_t const desc_base = toc_offset + (entries_.size() * DescriptorStorageTocEntry::LENGTH);
-        size_t total = desc_base;
-        for (auto const& e : entries_) {
-            total += e.bytes.size();
-        }
-
-        std::vector<uint8_t> blob(total, 0);
-
-        atdecc::aem::DescriptorStorageHeader header{};
-        header.magic = atdecc::aem::DescriptorStorage::MAGIC;
-        header.toc_count = static_cast<uint32_t>(entries_.size());
-        header.toc_offset = static_cast<uint32_t>(toc_offset);
-        header.symbol_count = 0;
-        header.symbol_offset = static_cast<uint32_t>(desc_base);  // empty table at desc base
-        std::memcpy(blob.data(), &header, DescriptorStorageHeader::LENGTH);
-
-        size_t off = desc_base;
-        for (size_t i = 0; i < entries_.size(); ++i) {
-            auto const& e = entries_[i];
-            DescriptorStorageTocEntry toc{};
-            toc.descriptor_type = e.type;
-            toc.descriptor_index = e.index;
-            toc.configuration_index = e.config;
-            toc.length = static_cast<uint16_t>(e.bytes.size());
-            toc.offset = static_cast<uint32_t>(off);
-            std::memcpy(
-                blob.data() + toc_offset + (i * DescriptorStorageTocEntry::LENGTH), &toc, DescriptorStorageTocEntry::LENGTH);
-            std::memcpy(blob.data() + off, e.bytes.data(), e.bytes.size());
-            off += e.bytes.size();
-        }
-        return blob;
-    }
-
-  private:
-    struct Entry
-    {
-        uint16_t type;
-        uint16_t index;
-        uint16_t config;
-        std::vector<uint8_t> bytes;
-    };
-    std::vector<Entry> entries_;
-};
+// AemEntityBlob — the DescriptorStorage (AEM1) blob writer — and its
+// descriptor_wire_bytes helper now live in statusbar/tools/aem_entity_blob.hpp
+// so they can be unit tested and reused.
+using statusbar::tools::AemEntityBlob;
 
 // --------------------------------------------------------------------------
 // Model construction
@@ -182,6 +103,7 @@ class AemEntityBlob
 [[nodiscard]] auto build_bridge_model(std::string_view name, uint16_t channels, uint32_t sample_rate) -> std::vector<uint8_t>
 {
     AemEntityBlob b;
+    bool ok = true;  // accumulates every descriptor push; a false means inline overflow
     constexpr uint16_t CFG = 0;
     ieee::Eui64 const stream_format = am824_8ch_96k();
 
@@ -206,18 +128,18 @@ class AemEntityBlob
         d.object_name = AtdeccString{"Bridge"};
         d.localized_description = NO_LOCALIZED;
         // In ascending descriptor-type order.
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_UNIT, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_INPUT, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AVB_INTERFACE, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_SOURCE, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_LOCALE, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STRINGS, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_INPUT, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_OUTPUT, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_CLUSTER, .count = 2});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_MAP, .count = 2});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .count = 1});
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_UNIT, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_INPUT, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AVB_INTERFACE, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_SOURCE, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_LOCALE, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STRINGS, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_INPUT, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_OUTPUT, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_CLUSTER, .count = 2})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_MAP, .count = 2})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .count = 1})) && ok;
         b.add(CFG, d);
     }
 
@@ -232,7 +154,7 @@ class AemEntityBlob
         d.number_of_stream_output_ports = 1;
         d.base_stream_output_port = 0;
         d.current_sampling_rate = sample_rate;
-        (void)d.push_sampling_rate(sample_rate);
+        ok = (d.push_sampling_rate(sample_rate)) && ok;
         b.add(CFG, d);
     }
 
@@ -245,7 +167,7 @@ class AemEntityBlob
         d.clock_domain_index = 0;
         d.stream_flags = STREAM_FLAG_CLASS_A;
         d.current_format = stream_format;
-        (void)d.push_stream_format(stream_format);
+        ok = (d.push_stream_format(stream_format)) && ok;
         d.avb_interface_index = 0;
         b.add(CFG, d);
     }
@@ -257,7 +179,7 @@ class AemEntityBlob
         d.clock_domain_index = 0;
         d.stream_flags = STREAM_FLAG_CLASS_A;
         d.current_format = stream_format;
-        (void)d.push_stream_format(stream_format);
+        ok = (d.push_stream_format(stream_format)) && ok;
         d.avb_interface_index = 0;
         b.add(CFG, d);
     }
@@ -306,7 +228,7 @@ class AemEntityBlob
             m.mapping_stream_channel = ch;
             m.mapping_cluster_offset = 0;
             m.mapping_cluster_channel = ch;
-            (void)d.push_mapping(m);
+            ok = (d.push_mapping(m)) && ok;
         }
         b.add(CFG, d);
     }
@@ -336,7 +258,7 @@ class AemEntityBlob
         d.object_name = AtdeccString{"ClockDomain"};
         d.localized_description = NO_LOCALIZED;
         d.clock_source_index = 0;
-        (void)d.push_clock_source(0);
+        ok = (d.push_clock_source(0)) && ok;
         b.add(CFG, d);
     }
 
@@ -354,6 +276,9 @@ class AemEntityBlob
         b.add(CFG, d);
     }
 
+    if (!ok) {
+        return {};  // a descriptor push overflowed its inline capacity → malformed blob
+    }
     return b.build();
 }
 
@@ -365,6 +290,7 @@ class AemEntityBlob
 [[nodiscard]] auto build_audio_model(std::string_view name, uint16_t channels, uint32_t sample_rate) -> std::vector<uint8_t>
 {
     AemEntityBlob b;
+    bool ok = true;  // accumulates every descriptor push; a false means inline overflow
     constexpr uint16_t CFG = 0;
     ieee::Eui64 const am824_format = am824_8ch_96k();
     ieee::Eui64 const aaf_format = aaf_8ch_96k_32bit();
@@ -398,20 +324,20 @@ class AemEntityBlob
         DescriptorConfiguration d{};
         d.object_name = AtdeccString{"AudioIO"};
         d.localized_description = NO_LOCALIZED;
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_UNIT, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_INPUT, .count = 2});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .count = 3});  // +CRF
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_JACK_INPUT, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_JACK_OUTPUT, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AVB_INTERFACE, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_SOURCE, .count = 2});  // INTERNAL + INPUT_STREAM
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_LOCALE, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STRINGS, .count = 1});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_INPUT, .count = 2});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_OUTPUT, .count = 2});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_CLUSTER, .count = 4});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_MAP, .count = 4});
-        (void)d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .count = 1});
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_UNIT, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_INPUT, .count = 2})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .count = 3})) && ok;  // +CRF
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_JACK_INPUT, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_JACK_OUTPUT, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AVB_INTERFACE, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_SOURCE, .count = 2})) && ok;  // INTERNAL + INPUT_STREAM
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_LOCALE, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STRINGS, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_INPUT, .count = 2})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_OUTPUT, .count = 2})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_CLUSTER, .count = 4})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_MAP, .count = 4})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .count = 1})) && ok;
         b.add(CFG, d);
     }
 
@@ -426,7 +352,7 @@ class AemEntityBlob
         d.number_of_stream_output_ports = 2;
         d.base_stream_output_port = 0;
         d.current_sampling_rate = sample_rate;
-        (void)d.push_sampling_rate(sample_rate);
+        ok = (d.push_sampling_rate(sample_rate)) && ok;
         b.add(CFG, d);
     }
 
@@ -440,7 +366,7 @@ class AemEntityBlob
         d.clock_domain_index = 0;
         d.stream_flags = STREAM_FLAG_CLASS_A;
         d.current_format = s.format;
-        (void)d.push_stream_format(s.format);
+        ok = (d.push_stream_format(s.format)) && ok;
         d.avb_interface_index = 0;
         b.add(CFG, d);
     }
@@ -453,7 +379,7 @@ class AemEntityBlob
         d.clock_domain_index = 0;
         d.stream_flags = STREAM_FLAG_CLASS_A;
         d.current_format = s.format;
-        (void)d.push_stream_format(s.format);
+        ok = (d.push_stream_format(s.format)) && ok;
         d.avb_interface_index = 0;
         b.add(CFG, d);
     }
@@ -471,7 +397,7 @@ class AemEntityBlob
         d.clock_domain_index = 0;
         d.stream_flags = STREAM_FLAG_CLASS_A;
         d.current_format = crf_audio_48k();
-        (void)d.push_stream_format(crf_audio_48k());
+        ok = (d.push_stream_format(crf_audio_48k())) && ok;
         d.avb_interface_index = 0;
         b.add(CFG, d);
     }
@@ -523,7 +449,7 @@ class AemEntityBlob
             m.mapping_stream_channel = ch;
             m.mapping_cluster_offset = 0;
             m.mapping_cluster_channel = ch;
-            (void)d.push_mapping(m);
+            ok = (d.push_mapping(m)) && ok;
         }
         b.add(CFG, d);
     }
@@ -538,7 +464,7 @@ class AemEntityBlob
     }
 
     // JACK_INPUT 0 + JACK_OUTPUT 0 — a single N-channel digital jack each side.
-    // Optional in 1722.1, but controllers (Hive) expect physical jacks to render
+    // Optional in 1722.1, but some controllers expect physical jacks to render
     // the routing UI; their absence reads as an incomplete model.
     {
         DescriptorJack d{};
@@ -587,8 +513,8 @@ class AemEntityBlob
         d.object_name = AtdeccString{"ClockDomain"};
         d.localized_description = NO_LOCALIZED;
         d.clock_source_index = 0;  // current = INTERNAL
-        (void)d.push_clock_source(0);
-        (void)d.push_clock_source(1);
+        ok = (d.push_clock_source(0)) && ok;
+        ok = (d.push_clock_source(1)) && ok;
         b.add(CFG, d);
     }
 
@@ -606,6 +532,9 @@ class AemEntityBlob
         b.add(CFG, d);
     }
 
+    if (!ok) {
+        return {};  // a descriptor push overflowed its inline capacity → malformed blob
+    }
     return b.build();
 }
 
@@ -650,6 +579,11 @@ int main(int argc, char** argv)
     auto const sample_rate = cfg.sample_rate;
     auto const blob =
         dual ? build_audio_model(cfg.name, channels, sample_rate) : build_bridge_model(cfg.name, channels, sample_rate);
+
+    if (blob.empty()) {
+        std::println(stderr, "error: descriptor model overflowed an inline buffer (a push failed); blob not generated");
+        return 1;
+    }
 
     // Round-trip validate before writing — fail loudly if the blob is malformed.
     auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{blob});

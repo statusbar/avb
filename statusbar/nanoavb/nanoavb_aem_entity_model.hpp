@@ -96,6 +96,30 @@ class AemEntityModel
     /// suitable for the response.
     [[nodiscard]] auto apply_set_name(std::span<uint8_t const> command_body) -> uint8_t;
 
+    /// Result of an AEM SET descriptor-value command: the AEM status + the number of
+    /// response-body bytes written (the echoed command).
+    struct SetValueResult
+    {
+        uint8_t status{};
+        size_t size{};
+    };
+
+    /// Apply an AEM SET descriptor-value command (the family: SET_CONTROL,
+    /// SET_STREAM_FORMAT, SET_SAMPLING_RATE, ...). @p command_body is
+    /// descriptor_type(2) + descriptor_index(2) + value; @p command_type is the
+    /// AEM_COMMAND_SET_* code. Resolves the descriptor's well-known symbol, dispatches
+    /// to handler.on_set_descriptor_value, and echoes the command into @p out as the
+    /// response body (AECP echoes the SET command).
+    [[nodiscard]] auto apply_set_descriptor_value(
+        uint16_t command_type, std::span<uint8_t const> command_body, std::span<uint8_t> out) -> SetValueResult;
+
+    /// Frame an AEM GET descriptor-value response (GET_CONTROL, GET_STREAM_FORMAT, ...).
+    /// @p command_body is descriptor_type(2) + descriptor_index(2). Writes type/index +
+    /// the handler's current value (on_get_descriptor_value) into @p out; returns the
+    /// response size, or 0 if no such descriptor. @p command_type is the AEM_COMMAND_GET_* code.
+    [[nodiscard]] auto get_descriptor_value_for_wire(
+        uint16_t command_type, std::span<uint8_t const> command_body, std::span<uint8_t> out) const -> size_t;
+
     /// True if a DescriptorStorage blob is attached.
     [[nodiscard]] auto has_static_store() const noexcept -> bool { return storage_.has_value(); }
 

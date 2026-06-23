@@ -160,6 +160,9 @@ class DescriptorStorage
         return failure(BufferError::invalid_offset);
     }
 
+    /// Forward lookup: the well-known symbol assigned to a given descriptor, or
+    /// failure if that descriptor has no symbol entry. The symbol decouples the
+    /// designer-chosen descriptor index from code that handles the descriptor.
     [[nodiscard]] auto get_symbol(uint16_t configuration, uint16_t type, uint16_t index) const noexcept -> StatusValue<uint32_t>
     {
         auto const count = static_cast<uint32_t>(header_.symbol_count);
@@ -172,6 +175,28 @@ class DescriptorStorage
             if (static_cast<uint16_t>(entry.configuration_index) == configuration &&
                 static_cast<uint16_t>(entry.descriptor_type) == type && static_cast<uint16_t>(entry.descriptor_index) == index) {
                 return success(static_cast<uint32_t>(entry.symbol));
+            }
+        }
+        return failure(BufferError::invalid_offset);
+    }
+
+    /// Reverse lookup: the descriptor (configuration/type/index) carrying a given
+    /// well-known @p symbol, or failure if no symbol entry matches. The returned
+    /// entry's fields are wire-typed (cast like get_symbol's callers). On duplicate
+    /// symbols (a designer error) the first match wins. This is the seam that lets
+    /// command-handling code reference a descriptor by stable symbol rather than by
+    /// the blob's (designer-chosen, volatile) descriptor index.
+    [[nodiscard]] auto find_by_symbol(uint32_t symbol) const noexcept -> StatusValue<DescriptorStorageSymbolEntry>
+    {
+        auto const count = static_cast<uint32_t>(header_.symbol_count);
+        auto const base = static_cast<uint32_t>(header_.symbol_offset);
+
+        for (uint32_t i = 0; i < count; ++i) {
+            DescriptorStorageSymbolEntry entry{};
+            span_load(entry, blob_.subspan(base + (i * DescriptorStorageSymbolEntry::LENGTH)));
+
+            if (static_cast<uint32_t>(entry.symbol) == symbol) {
+                return success(entry);
             }
         }
         return failure(BufferError::invalid_offset);

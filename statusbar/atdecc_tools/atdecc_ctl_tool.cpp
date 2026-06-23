@@ -16,9 +16,10 @@
 //   --command=set-clock-source --entity NAME --clock-source S [--clock-domain D]
 //   --command=get-clock-source --entity NAME             [--clock-domain D]
 //   --command=batch           --file ops.toml
-//   --command=supervise       --file ops.toml  [--interval-ms N] [--watch-ms N]
-//                             self-heal: reset stale streams (our local end's
-//                             FRAMES_RX/FRAMES_TX counter not advancing)
+//   --command=supervise       --file ops.toml  [--watch-ms N]
+//                             ensure each declared connection exists (idempotent:
+//                             connect only legs that aren't connected; never tear
+//                             down a live one). --watch-ms>0 repeats forever.
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc_tools/atdecc_controller_simple.hpp"
@@ -77,7 +78,7 @@ struct Config
     int64_t discover_ms{1500};
     int64_t clock_domain{0};
     int64_t clock_source{0};
-    int64_t interval_ms{700};  // supervise: gap between the two counter samples
+    int64_t interval_ms{700};  // deprecated/ignored (was the supervise counter-sample gap; supervise is now connection-state based)
     int64_t watch_ms{0};       // supervise: >0 => loop forever, sleeping this long between passes
     bool once{true};           // supervise: single pass (default); watch-ms>0 overrides
     bool trace{false};         // connect/disconnect: print a per-leg ACMP handshake verdict
@@ -114,8 +115,9 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add<int64_t>("discover-ms", "Discovery window in ms", 1500, [&](auto v) { config.discover_ms = v; });
     specs.add<int64_t>("clock-domain", "CLOCK_DOMAIN index (clock-source ops)", 0, [&](auto v) { config.clock_domain = v; });
     specs.add<int64_t>("clock-source", "CLOCK_SOURCE index (set-clock-source)", 0, [&](auto v) { config.clock_source = v; });
-    specs.add<int64_t>(
-        "interval-ms", "supervise: gap between the two counter samples (ms)", 700, [&](auto v) { config.interval_ms = v; });
+    specs.add<int64_t>("interval-ms", "deprecated/ignored (supervise is now connection-state based)", 700, [&](auto v) {
+        config.interval_ms = v;
+    });
     specs.add<int64_t>("watch-ms", "supervise: if >0, loop forever sleeping this long between passes (ms)", 0, [&](auto v) {
         config.watch_ms = v;
     });
@@ -365,49 +367,47 @@ auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, b
     return false;
 }
 
-// supervise: read one frame-movement counter off OUR local end of a leg.
-// Sends GET_COUNTERS for (target, lc) and pumps the reactor until the matching
-// CountersReadyEvent arrives (or the budget elapses). Returns the counter value
-// (or nullopt when the counter could not be read / isn't valid) — nullopt means
-// "unknown, leave as-is" to the caller.
-auto sample_counter(MessageReactor& reactor, ControllerSimple& ctrl, Eui64 const& target, atdecc_tools::LocalCounter const& lc)
-    -> std::optional<uint64_t>
+// supervise: is the listener leg connected to THIS talker? Queries ACMP
+// GET_RX_STATE (retried — a single datagram can drop) and returns true only on a
+// definitive "connected to this talker" reply. Returns false on "not connected"
+// OR no reply at all; the caller then (re)asserts the connection, which is
+// harmless because the listener treats a CONNECT_RX for an already-connected
+// stream as a no-op (idempotent). So a listener that doesn't answer GET_RX_STATE
+// (e.g. a Meyer Galaxy) still gets connected without churn.
+auto leg_connected(
+    MessageReactor& reactor,
+    ControllerSimple& ctrl,
+    Eui64 const& talker_eid,
+    uint16_t talker_uid,
+    Eui64 const& listener_eid,
+    uint16_t listener_uid) -> bool
 {
-    using atdecc_tools::ControllerAction;
-    using atdecc_tools::ControllerActionKind;
-    using atdecc_tools::CountersReadyEvent;
-
-    ControllerAction action{};
-    action.kind = ControllerActionKind::GetCounters;
-    action.request.talker_entity_id = target;
-    action.request.desc_type = lc.descriptor_type;
-    action.request.desc_index = lc.descriptor_index;
-
-    std::optional<uint64_t> result;
-    bool done = false;
-    auto const on_event = [&](auto const& ev) {
-        if (auto const* c = std::get_if<CountersReadyEvent>(&ev)) {
-            if (c->entity_id == target && c->descriptor_type == lc.descriptor_type && c->descriptor_index == lc.descriptor_index) {
-                if (((c->counters_valid >> lc.counter_bit) & 1U) != 0U) {
-                    result = c->counters[lc.counter_bit];
-                }
-                done = true;
-            }
-        }
-    };
-    // A single GET_COUNTERS datagram can be lost; re-issue across the budget.
+    bool got = false;
+    bool connected_here = false;
     constexpr int kAttempts = 3;
-    for (int attempt = 0; attempt < kAttempts && !done; ++attempt) {
-        ctrl.dispatch(action, elapsed_ns());
-        (void)pump(reactor, ctrl, 600, [&] { return done; }, on_event);
+    for (int attempt = 0; attempt < kAttempts && !got; ++attempt) {
+        ctrl.query_rx_state(listener_eid, listener_uid, elapsed_ns());
+        (void)pump(
+            reactor,
+            ctrl,
+            600,
+            [&] { return got; },
+            [&](auto const& ev) {
+                if (auto const* r = std::get_if<atdecc_tools::RxStateEvent>(&ev)) {
+                    if (r->listener_entity_id == listener_eid && r->listener_unique_id == listener_uid) {
+                        got = true;
+                        connected_here = r->connected && r->talker_entity_id == talker_eid && r->talker_unique_id == talker_uid;
+                    }
+                }
+            });
     }
-    return result;
+    return connected_here;
 }
 
-// supervise: do a clean teardown + reconnect of one stale leg.
-//   DISCONNECT_RX -> 100ms -> DISCONNECT_TX -> 100ms -> CONNECT_RX
-// The reactor is pumped between each step so the ACMP responses flow.
-void clean_reset_leg(
+// supervise: (re)assert one leg's connection with a single CONNECT_RX. Idempotent
+// at the listener, so calling it on a leg that is already up is a no-op there (no
+// teardown, no MSRP churn).
+void connect_leg(
     MessageReactor& reactor,
     ControllerSimple& ctrl,
     Eui64 const& talker_eid,
@@ -418,26 +418,13 @@ void clean_reset_leg(
     using atdecc_tools::ControllerAction;
     using atdecc_tools::ControllerActionKind;
 
-    auto const make = [&](ControllerActionKind kind) {
-        ControllerAction a{};
-        a.kind = kind;
-        a.request.talker_entity_id = talker_eid;
-        a.request.talker_unique_id = talker_uid;
-        a.request.listener_entity_id = listener_eid;
-        a.request.listener_unique_id = listener_uid;
-        return a;
-    };
-    auto const settle = [&] {
-        (void)pump(reactor, ctrl, 200, [] { return false; }, [](auto const&) {});
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        (void)pump(reactor, ctrl, 50, [] { return false; }, [](auto const&) {});
-    };
-
-    ctrl.dispatch(make(ControllerActionKind::DisconnectStream), elapsed_ns());  // DISCONNECT_RX
-    settle();
-    ctrl.dispatch(make(ControllerActionKind::DisconnectTxStream), elapsed_ns());  // DISCONNECT_TX
-    settle();
-    ctrl.dispatch(make(ControllerActionKind::ConnectStream), elapsed_ns());  // CONNECT_RX
+    ControllerAction a{};
+    a.kind = ControllerActionKind::ConnectStream;
+    a.request.talker_entity_id = talker_eid;
+    a.request.talker_unique_id = talker_uid;
+    a.request.listener_entity_id = listener_eid;
+    a.request.listener_unique_id = listener_uid;
+    ctrl.dispatch(a, elapsed_ns());
     (void)pump(reactor, ctrl, 500, [] { return false; }, [](auto const&) {});
 }
 
@@ -772,29 +759,20 @@ int main(int argc, char* argv[])
         return failures == 0 ? 0 : 1;
     }
 
-    // ----- supervise (self-heal stale streams) -----
-    // For each Connect op in the TOML, find whichever end is US (our entity's
-    // modified-EUI-64), sample its frame-movement counter twice ~interval-ms
-    // apart, and if it did not advance, do a clean teardown+reconnect:
-    //   DISCONNECT_RX -> 100ms -> DISCONNECT_TX -> 100ms -> CONNECT_RX.
-    // Legs neither of whose ends is us, and counters we can't read, are left
-    // untouched. With --watch-ms>0 the whole pass repeats forever.
+    // ----- supervise (ensure each declared connection exists) -----
+    // For each Connect op in the TOML, query the listener's ACMP GET_RX_STATE:
+    // if it is already connected to the named talker, leave it completely alone
+    // (no ACMP traffic at all); otherwise assert a single CONNECT_RX. This is
+    // purely idempotent — it NEVER tears down a live connection — so a periodic
+    // re-assert can't churn an established MSRP reservation. A listener that does
+    // not answer GET_RX_STATE is (re)asserted anyway, harmlessly, since CONNECT_RX
+    // is a no-op at an already-connected listener. With --watch-ms>0 the pass
+    // repeats forever.
     if (config.command == "supervise") {
         if (config.file.empty()) {
             std::println(stderr, "Error: --file is required for supervise");
             return 1;
         }
-        // Our audio entity's id is the NIC MAC as a modified EUI-64 -- NOT the
-        // controller id (which carries a tool-id byte). That is the id a leg's
-        // local end will match.
-        auto const our_mac = net::read_interface_mac(config.interface_name);
-        if (!our_mac) {
-            std::println(stderr, "Error: cannot read MAC of interface '{}'", config.interface_name);
-            return 1;
-        }
-        auto const our_eid = our_mac->to_modified_eui64();
-        std::println("supervise: our entity id = {}", ieee::to_string(our_eid).view());
-
         auto parsed = toml::parse_file(config.file);
         if (!parsed) {
             std::println(stderr, "Error: cannot parse '{}': {}", config.file, parsed.error().message());
@@ -810,48 +788,31 @@ int main(int argc, char* argv[])
         auto run_pass = [&]() {
             auto const pass_snap = ctrl->get_display_entities();
             int legs = 0;
-            int reset = 0;
+            int already = 0;
+            int asserted = 0;
             for (auto const& op : *ops) {
                 if (op.kind != OpKind::Connect) {
-                    continue;  // only stream connections are monitored
+                    continue;  // only stream connections are ensured
                 }
                 auto const tid = resolve_or_report(op.talker.name, pass_snap);
                 auto const lid = resolve_or_report(op.listener.name, pass_snap);
                 if (!tid || !lid) {
-                    continue;  // unresolved name -> can't measure
-                }
-                auto const lc = atdecc_tools::select_local_counter(our_eid, *tid, op.talker.unique_id, *lid, op.listener.unique_id);
-                if (!lc) {
-                    continue;  // neither end is us -> skip
+                    continue;  // unresolved name -> can't act
                 }
                 ++legs;
                 auto const label =
                     std::format("{}:{} -> {}:{}", op.talker.name, op.talker.unique_id, op.listener.name, op.listener.unique_id);
-                bool const we_are_listener = (lc->descriptor_type == atdecc::aem::DESCRIPTOR_STREAM_INPUT);
-                char const* counter_name = we_are_listener ? "FRAMES_RX" : "FRAMES_TX";
 
-                auto const s1 =
-                    sample_counter(reactor, *ctrl, lc->descriptor_type == atdecc::aem::DESCRIPTOR_STREAM_INPUT ? *lid : *tid, *lc);
-                if (!s1) {
-                    std::println("supervise: {} UNKNOWN ({} unreadable) -> leave as-is", label, counter_name);
+                if (leg_connected(reactor, *ctrl, *tid, op.talker.unique_id, *lid, op.listener.unique_id)) {
+                    std::println("supervise: {} CONNECTED -> leave as-is", label);
+                    ++already;
                     continue;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(config.interval_ms));
-                auto const s2 =
-                    sample_counter(reactor, *ctrl, lc->descriptor_type == atdecc::aem::DESCRIPTOR_STREAM_INPUT ? *lid : *tid, *lc);
-                if (!s2) {
-                    std::println("supervise: {} UNKNOWN ({} unreadable on 2nd sample) -> leave as-is", label, counter_name);
-                    continue;
-                }
-                if (atdecc_tools::is_stale(*s1, *s2)) {
-                    std::println("supervise: {} STALE ({} {}) -> clean reset", label, counter_name, *s2);
-                    clean_reset_leg(reactor, *ctrl, *tid, op.talker.unique_id, *lid, op.listener.unique_id);
-                    ++reset;
-                } else {
-                    std::println("supervise: {} LIVE ({} {} -> {})", label, counter_name, *s1, *s2);
-                }
+                std::println("supervise: {} not connected -> assert CONNECT_RX", label);
+                connect_leg(reactor, *ctrl, *tid, op.talker.unique_id, *lid, op.listener.unique_id);
+                ++asserted;
             }
-            std::println("supervise: pass done -- {} leg(s) measured, {} reset", legs, reset);
+            std::println("supervise: pass done -- {} leg(s): {} already connected, {} asserted", legs, already, asserted);
         };
 
         if (config.watch_ms > 0) {

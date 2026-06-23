@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 // Frequency-ratio estimators between the local PHC (switch gPTP time) and GPS
-// (CLOCK_REALTIME, disciplined to the site TM2000B by chrony). These track
+// (CLOCK_REALTIME, disciplined to the site GPS grandmaster by chrony). These track
 //   r = switch_rate / GPS_rate
 // from a stream of (PHC-GPS offset, elapsed-GPS-seconds) samples, for the
 // GPS-rate media-clock generator. See avb/docs/GPS_MEDIA_CLOCK.md.
@@ -150,8 +150,8 @@ class KalmanRatioTracker
         // outlier. The step floor sits well above any single read glitch, so a
         // momentary outlier is gated (not re-acquired); only a genuine ms+ step
         // re-acquires.
-        double max_freq_ppm = 1000.0;       // plausible |switch-GPS| freq bound
-        double step_floor_ns = 1'000'000.0; // 1 ms min step (+ max_freq*dt)
+        double max_freq_ppm = 1000.0;        // plausible |switch-GPS| freq bound
+        double step_floor_ns = 1'000'000.0;  // 1 ms min step (+ max_freq*dt)
     };
 
     KalmanRatioTracker()
@@ -218,12 +218,12 @@ class KalmanRatioTracker
         double const predicted_phase = x_[0] + (dt_s * x_[1]) + (0.5 * dt_s * dt_s * x_[2]);
         double const step_ns = step_floor_ns_ + (max_freq_ns_per_s_ * dt_s);
         if (std::abs(z - predicted_phase) > step_ns) {
-            base_ = offset_ns;       // re-base; relative coordinate restarts at 0
+            base_ = offset_ns;  // re-base; relative coordinate restarts at 0
             last_z_ = 0.0;
             x_ = {0.0, 0.0, 0.0};
             P_ = init_P();
-            n_ = 1;                  // re-seed the frequency on the next sample
-            return std::nan("");     // signal: re-based on a step (not an update)
+            n_ = 1;               // re-seed the frequency on the next sample
+            return std::nan("");  // signal: re-based on a step (not an update)
         }
         last_z_ = z;
         ++n_;

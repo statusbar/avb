@@ -8,6 +8,15 @@
 This analysis focuses on what IS implemented and identifies gaps within those implementations.
 It does not flag sub-protocols that were intentionally not implemented.
 
+> **Status update (2026-06-20):** this is a point-in-time snapshot from 2026-03-31.
+> Several High-severity (P0) gaps below have since been **resolved**; the original
+> entries are kept for history and annotated inline as `[RESOLVED 2026-06-20]`:
+> - AEM `cr` bit is now parsed — `command_code()` masks `0x3FFF` (`atdecc_aecp_aem.hpp`).
+> - ADP `available_index` is now zeroed on `ENTITY_DEPARTING` (`nanoavb_adp.cpp`).
+> - Listener SM enforces `listenerIsConnected` → `LISTENER_EXCLUSIVE` (`atdecc_acmp_listener_sm.cpp`).
+> - Unsolicited notification subsystem is implemented — register/deregister + dispatch
+>   (`nanoavb_entity.cpp`).
+
 ---
 
 ## Executive Summary
@@ -21,15 +30,15 @@ SRP integration hooks), the unsolicited notification subsystem, and the AEM `cr`
 ### By Severity
 
 **High (protocol correctness):**
-- AEM `cr` bit not parsed -- `command_type` mask is 0x7FFF instead of 0x3FFF
-- ADP `available_index` sent as current value on ENTITY_DEPARTING instead of zero
-- Listener SM missing `listenerIsConnected` check -- no LISTENER_EXCLUSIVE rejection
+- ~~AEM `cr` bit not parsed -- `command_type` mask is 0x7FFF instead of 0x3FFF~~ **[RESOLVED 2026-06-20]**
+- ~~ADP `available_index` sent as current value on ENTITY_DEPARTING instead of zero~~ **[RESOLVED 2026-06-20]**
+- ~~Listener SM missing `listenerIsConnected` check -- no LISTENER_EXCLUSIVE rejection~~ **[RESOLVED 2026-06-20]**
 - Listener SM missing retry on first TX timeout
 - ACQUIRE_ENTITY missing CONTROLLER_AVAILABLE handshake
 - LOCK_ENTITY missing timeout expiration
 
 **Medium (missing functionality within implemented features):**
-- No unsolicited notification subsystem (registration, dispatch)
+- ~~No unsolicited notification subsystem (registration, dispatch)~~ **[RESOLVED 2026-06-20]**
 - No IN_PROGRESS send/receive logic (constants defined but unused)
 - No acquired/locked authorization checks in ACMP state machines
 - ADP missing 8 entity capability flag constants (bits 6-13)
@@ -73,7 +82,7 @@ SRP integration hooks), the unsolicited notification subsystem, and the AEM `cr`
 | Advertise Interface SM: not implemented as separate per-interface SM | **Missing** |
 | Discovery SM: entirely absent (needed for controller/discovery functionality) | **Missing** |
 | Discovery Interface SM: entirely absent | **Missing** |
-| `available_index` on ENTITY_DEPARTING: sends current value instead of zero | **Divergent** |
+| `available_index` on ENTITY_DEPARTING: ~~sends current value instead of zero~~ now zeroed | **Fixed (2026-06-20)** |
 | `adp_adv_sm` state topology: Off/Advertising vs RST's Advertise/Waiting | **Divergent** |
 
 ---
@@ -104,7 +113,7 @@ This is a reasonable design choice for an audio-focused AVB entity.
 
 | Finding | Severity |
 |---------|----------|
-| `cr` bit in AemDu not parsed -- `command_code()` masks with 0x7FFF (15 bits) instead of 0x3FFF (14 bits) | **Missing** |
+| `cr` bit in AemDu: ~~`command_code()` masks with 0x7FFF (15 bits)~~ now masks 0x3FFF (14 bits) | **Fixed (2026-06-20)** |
 | AUTH_GET_NONCE (0x0067) and AUTH_ADD_KEY_NONCE (0x0068) command codes not defined | **Missing** |
 | SET_PTP_PORT_CURRENT_INTERVALS (0x005A) defined but RST says reserved | **Divergent** |
 | All 13 AEM status codes match RST exactly | OK |
@@ -140,8 +149,8 @@ This is a reasonable design choice for an audio-focused AVB entity.
 
 | Finding | Severity |
 |---------|----------|
-| Entire unsolicited notification subsystem missing (registration, dispatch, identification) | **Missing** |
-| REGISTER/DEREGISTER_UNSOLICITED_NOTIFICATION: command codes defined, no handler | **Missing** |
+| ~~Entire unsolicited notification subsystem missing (registration, dispatch, identification)~~ now implemented | **Fixed (2026-06-20)** |
+| ~~REGISTER/DEREGISTER_UNSOLICITED_NOTIFICATION: command codes defined, no handler~~ handlers added | **Fixed (2026-06-20)** |
 | No registered controller list maintained | **Missing** |
 | AemDu has `is_unsolicited()` / `set_unsolicited()` accessors -- wire format ready | OK |
 | No payload struct for REGISTER_UNSOLICITED_NOTIFICATION flags | **Missing** |
@@ -184,7 +193,7 @@ This is a reasonable design choice for an audio-focused AVB entity.
 | Finding | Severity |
 |---------|----------|
 | States and events: complete | OK |
-| `listenerIsConnected()` not implemented -- no LISTENER_EXCLUSIVE check on CONNECT_RX | **Missing** |
+| `listenerIsConnected()` ~~not implemented -- no LISTENER_EXCLUSIVE check on CONNECT_RX~~ now enforced | **Fixed (2026-06-20)** |
 | `listenerIsConnectedTo()` not implemented -- no reconnection handling (disconnect-before-reconnect) | **Missing** |
 | `listenerIsAcquiredOrLockedByOther()` not implemented -- no CONTROLLER_NOT_AUTHORIZED check | **Missing** |
 | No retry on first TX timeout (immediately sends LISTENER_TALKER_TIMEOUT) | **Incomplete** |

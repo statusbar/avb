@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 /// AEM entity-model validator — checks a crawled descriptor set against the
-/// compliance rules a reference controller (e.g. Hive) enforces, so model
+/// compliance rules a reference controller enforces, so model
 /// problems are visible without a GUI. Pure (no I/O), unit-testable.
 
 #include "statusbar/ieee/ieee.hpp"

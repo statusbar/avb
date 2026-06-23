@@ -139,13 +139,12 @@ struct GptpTimeBridge
         // catastrophic: NEW offset arriving bumped by step size while
         // OLD prev_a remains would have a reader computing a
         // translation off by exactly the step size.
-        rated_buffer_.publish(
-            RatedSnapshot{
-                .offset_ns = gptp - app,
-                .ppt = new_ppt,
-                .prev_gptp_ns = gptp,
-                .prev_app_ns = app,
-            });
+        rated_buffer_.publish(RatedSnapshot{
+            .offset_ns = gptp - app,
+            .ppt = new_ppt,
+            .prev_gptp_ns = gptp,
+            .prev_app_ns = app,
+        });
         // Solo-atomic mirror of offset for the unrated to_gptp /
         // from_gptp readers (single load is race-free).
         offset_ns_.store(gptp - app, std::memory_order_relaxed);
@@ -181,13 +180,12 @@ struct GptpTimeBridge
         }
         int64_t const app = get_app_time_ns();
         int64_t const new_ppt = static_cast<int64_t>((rate_ratio - 1.0) * 1e12);
-        rated_buffer_.publish(
-            RatedSnapshot{
-                .offset_ns = tx_master_ns - app,
-                .ppt = new_ppt,
-                .prev_gptp_ns = tx_master_ns,
-                .prev_app_ns = app,
-            });
+        rated_buffer_.publish(RatedSnapshot{
+            .offset_ns = tx_master_ns - app,
+            .ppt = new_ppt,
+            .prev_gptp_ns = tx_master_ns,
+            .prev_app_ns = app,
+        });
         // Solo-atomic mirrors for diagnostics + unrated to_gptp readers.
         offset_ns_.store(tx_master_ns - app, std::memory_order_relaxed);
         rate_offset_ppt_.store(new_ppt, std::memory_order_relaxed);
@@ -221,13 +219,12 @@ struct GptpTimeBridge
         // refresh_offset intentionally updates only the offset while
         // preserving the existing rate fit's anchor (prev_a/g, ppt).
         // Load the current snapshot, modify the offset, republish.
-        rated_buffer_.publish(
-            RatedSnapshot{
-                .offset_ns = gptp - app,
-                .ppt = rate_offset_ppt_.load(std::memory_order_relaxed),
-                .prev_gptp_ns = prev_gptp_ns_.load(std::memory_order_relaxed),
-                .prev_app_ns = prev_app_ns_.load(std::memory_order_relaxed),
-            });
+        rated_buffer_.publish(RatedSnapshot{
+            .offset_ns = gptp - app,
+            .ppt = rate_offset_ppt_.load(std::memory_order_relaxed),
+            .prev_gptp_ns = prev_gptp_ns_.load(std::memory_order_relaxed),
+            .prev_app_ns = prev_app_ns_.load(std::memory_order_relaxed),
+        });
         offset_ns_.store(gptp - app, std::memory_order_relaxed);
     }
 

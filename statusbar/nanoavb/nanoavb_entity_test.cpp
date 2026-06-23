@@ -5,6 +5,7 @@
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <array>
@@ -726,11 +727,14 @@ TEST(nanoavb_entity_commands, unsupported_command)
 //
 TEST(nanoavb_entity_stubs, set_control_not_implemented)
 {
+    // A model whose handler does not override the value hooks reports NOT_IMPLEMENTED
+    // for a well-formed SET_CONTROL (descriptor_type + descriptor_index header).
     auto model = create_test_model();
     AemCommandHandler handler{model};
 
     auto header = create_aem_header(AEM_COMMAND_SET_CONTROL);
-    auto result = make_test_result(handler, header, {});
+    std::array<uint8_t, 4> const cmd{0, 0, 0, 0};  // CONTROL (type 0... index 0), no value
+    auto result = make_test_result(handler, header, cmd);
 
     EXPECT_EQ(result.status, AEM_STATUS_NOT_IMPLEMENTED);
 }
@@ -741,7 +745,8 @@ TEST(nanoavb_entity_stubs, get_control_not_implemented)
     AemCommandHandler handler{model};
 
     auto header = create_aem_header(AEM_COMMAND_GET_CONTROL);
-    auto result = make_test_result(handler, header, {});
+    std::array<uint8_t, 4> const cmd{0, 0, 0, 0};
+    auto result = make_test_result(handler, header, cmd);
 
     EXPECT_EQ(result.status, AEM_STATUS_NOT_IMPLEMENTED);
 }
@@ -1100,9 +1105,9 @@ TEST(nanoavb_entity_lock_ctrl, release_lock_clears_state)
 TEST(nanoavb_entity_commands, get_stream_format_implemented)
 {
     // Regression: GET_STREAM_FORMAT (0x0009) must be implemented. When the entity
-    // answers NOT_IMPLEMENTED, controllers (e.g. the audio interface, Hive) cannot finish
+    // answers NOT_IMPLEMENTED, some controllers cannot finish
     // enumerating the stream's format and re-query the entity indefinitely
-    // (an ~80 s AECP storm observed on the wire from a the audio interface).
+    // (an ~80 s AECP storm observed on the wire from one such controller).
     auto model = create_test_model();  // has STREAM_INPUT[0]
     AemCommandHandler handler{model};
 
@@ -1110,9 +1115,9 @@ TEST(nanoavb_entity_commands, get_stream_format_implemented)
     std::array<uint8_t, 4> command_data = {0x00, 0x05, 0x00, 0x00};  // STREAM_INPUT[0]
     auto result = make_test_result(handler, header, command_data);
 
-    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);  // was NOT_IMPLEMENTED before the fix
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);                              // was NOT_IMPLEMENTED before the fix
     EXPECT_EQ(result.response_data().size(), AemStreamFormatPayload::LENGTH);  // 12
-    EXPECT_EQ(result.response_data()[1], 0x05);  // echoes descriptor_type = STREAM_INPUT
+    EXPECT_EQ(result.response_data()[1], 0x05);                                // echoes descriptor_type = STREAM_INPUT
 }
 
 TEST(nanoavb_entity_commands, get_sampling_rate_implemented)
@@ -1132,13 +1137,228 @@ TEST(nanoavb_entity_commands, get_sampling_rate_implemented)
     std::array<uint8_t, 4> command_data = {0x00, 0x02, 0x00, 0x00};  // AUDIO_UNIT[0]
     auto result = make_test_result(handler, header, command_data);
 
-    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);  // was NOT_IMPLEMENTED before the fix
+    EXPECT_EQ(result.status, AEM_STATUS_SUCCESS);                              // was NOT_IMPLEMENTED before the fix
     EXPECT_EQ(result.response_data().size(), AemSamplingRatePayload::LENGTH);  // 8
     auto const r = result.response_data();
     auto const sr = static_cast<uint32_t>(
-        (static_cast<uint32_t>(r[4]) << 24) | (static_cast<uint32_t>(r[5]) << 16) | (static_cast<uint32_t>(r[6]) << 8)
-        | static_cast<uint32_t>(r[7]));
+        (static_cast<uint32_t>(r[4]) << 24) | (static_cast<uint32_t>(r[5]) << 16) | (static_cast<uint32_t>(r[6]) << 8) |
+        static_cast<uint32_t>(r[7]));
     EXPECT_EQ(sr, 96000u);
+}
+
+//
+// Unsolicited notification fan-out (IEEE 1722.1 9.6) — a control change is
+// pushed to every registered controller, and the entity can change its own
+// controls via apply_local_descriptor_value().
+//
+
+namespace {
+
+/// Minimal handler that accepts every SET descriptor-value and records it, so the
+/// fan-out path (which only fires on AEM_STATUS_SUCCESS) can be exercised.
+class SetAcceptingHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorRef /*ref*/, uint32_t /*symbol*/, std::span<uint8_t const> value)
+        -> uint8_t override
+    {
+        last_command_type = command_type;
+        last_value.assign(value.begin(), value.end());
+        ++set_count;
+        return AEM_STATUS_SUCCESS;
+    }
+
+    uint16_t last_command_type{0};
+    std::vector<uint8_t> last_value;
+    int set_count{0};
+};
+
+/// One captured unsolicited/solicited response off the send_response callback.
+struct CapturedSend
+{
+    Eui48 dest{};
+    std::vector<uint8_t> bytes;
+};
+
+/// Build + inject a REGISTER_UNSOLICITED_NOTIFICATION from a controller identified
+/// by (controller_id, src_mac), so its MAC is recorded for later notifications.
+void register_controller(AemCommandHandler& handler, Eui64 const& entity_id, Eui64 const& controller_id, Eui48 const& src_mac)
+{
+    AemDu cmd{};
+    cmd.init_command(AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, AemDu::AEM_DATA_LENGTH);
+    cmd.target_entity_id = entity_id;
+    cmd.controller_entity_id = controller_id;
+    std::array<uint8_t, AemDu::LENGTH> packet{};
+    span_copy(make_span(packet), make_const_span(cmd));
+    (void)handler.process_packet(src_mac, packet, entity_id);
+}
+
+}  // namespace
+
+TEST(nanoavb_entity_unsolicited_notify, fan_out_to_all_registered_controllers)
+{
+    Eui64 const entity_id{0xAA, 0, 0, 0, 0, 0, 0, 0x01};
+    SetAcceptingHandler app_handler;
+    AemCommandHandler handler{app_handler};
+    handler.set_entity_id(entity_id);
+
+    std::vector<CapturedSend> sends;
+    handler.set_callbacks(AemCommandHandlerCallbacks{.send_response = [&](Eui48 const& dest, std::span<uint8_t const> resp) {
+        sends.push_back({dest, std::vector<uint8_t>(resp.begin(), resp.end())});
+        return true;
+    }});
+
+    Eui48 const mac_a{0x02, 0, 0, 0, 0, 0x0A};
+    Eui48 const mac_b{0x02, 0, 0, 0, 0, 0x0B};
+    register_controller(handler, entity_id, Eui64{0xC0, 0, 0, 0, 0, 0, 0, 0x0A}, mac_a);
+    register_controller(handler, entity_id, Eui64{0xC0, 0, 0, 0, 0, 0, 0, 0x0B}, mac_b);
+    EXPECT_EQ(handler.unsolicited_registration_count(), size_t{2});
+
+    sends.clear();
+    // SET_CONTROL body: descriptor_type(2)=CONTROL + descriptor_index(2)=0 + value.
+    std::array<uint8_t, 6> body{0x00, 0x1A, 0x00, 0x00, 0xDE, 0xAD};
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body), AEM_STATUS_SUCCESS);
+
+    // The handler applied the value once; both controllers were notified.
+    EXPECT_EQ(app_handler.set_count, 1);
+    EXPECT_EQ(sends.size(), size_t{2});
+
+    bool saw_a = false;
+    bool saw_b = false;
+    for (auto const& s : sends) {
+        AemDu hdr{};
+        span_copy(make_span(hdr), std::span<uint8_t const>(s.bytes).first(AemDu::LENGTH));
+        EXPECT_TRUE(hdr.is_response());
+        EXPECT_TRUE(hdr.is_unsolicited());
+        EXPECT_EQ(hdr.command_code(), AEM_COMMAND_SET_CONTROL);
+        EXPECT_EQ(hdr.target_entity_id, entity_id);
+        // Body (after the 24-byte AemDu header) echoes the SET payload.
+        EXPECT_TRUE(s.bytes.size() >= AemDu::LENGTH + body.size());
+        EXPECT_EQ(s.bytes[AemDu::LENGTH + 4], 0xDE);
+        EXPECT_EQ(s.bytes[AemDu::LENGTH + 5], 0xAD);
+        if (s.dest == mac_a) {
+            saw_a = true;
+        }
+        if (s.dest == mac_b) {
+            saw_b = true;
+        }
+    }
+    EXPECT_TRUE(saw_a);
+    EXPECT_TRUE(saw_b);
+}
+
+TEST(nanoavb_entity_unsolicited_notify, no_registrations_emits_nothing)
+{
+    Eui64 const entity_id{0xAA, 0, 0, 0, 0, 0, 0, 0x02};
+    SetAcceptingHandler app_handler;
+    AemCommandHandler handler{app_handler};
+    handler.set_entity_id(entity_id);
+
+    int sends = 0;
+    handler.set_callbacks(AemCommandHandlerCallbacks{.send_response = [&](Eui48 const&, std::span<uint8_t const>) {
+        ++sends;
+        return true;
+    }});
+
+    std::array<uint8_t, 6> body{0x00, 0x1A, 0x00, 0x00, 0x01, 0x02};
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(app_handler.set_count, 1);  // value applied
+    EXPECT_EQ(sends, 0);                  // but nobody to notify
+}
+
+TEST(nanoavb_entity_unsolicited_notify, controller_set_notifies_subscribers)
+{
+    Eui64 const entity_id{0xAA, 0, 0, 0, 0, 0, 0, 0x03};
+    SetAcceptingHandler app_handler;
+    AemCommandHandler handler{app_handler};
+
+    std::vector<CapturedSend> sends;
+    handler.set_callbacks(AemCommandHandlerCallbacks{.send_response = [&](Eui48 const& dest, std::span<uint8_t const> resp) {
+        sends.push_back({dest, std::vector<uint8_t>(resp.begin(), resp.end())});
+        return true;
+    }});
+
+    Eui48 const sub_mac{0x02, 0, 0, 0, 0, 0x0C};
+    register_controller(handler, entity_id, Eui64{0xC0, 0, 0, 0, 0, 0, 0, 0x0C}, sub_mac);
+
+    // A different controller now SETs a control via the wire.
+    sends.clear();
+    Eui48 const setter_mac{0x02, 0, 0, 0, 0, 0xFF};
+    AemDu cmd{};
+    cmd.init_command(AEM_COMMAND_SET_CONTROL, AemDu::AEM_DATA_LENGTH + 6);
+    cmd.target_entity_id = entity_id;
+    cmd.controller_entity_id = Eui64{0xC0, 0, 0, 0, 0, 0, 0, 0xFF};
+    std::array<uint8_t, AemDu::LENGTH + 6> packet{};
+    span_copy(make_span(packet).first(AemDu::LENGTH), make_const_span(cmd));
+    packet[AemDu::LENGTH + 1] = 0x1A;  // descriptor_type = CONTROL
+    packet[AemDu::LENGTH + 4] = 0xBE;
+    packet[AemDu::LENGTH + 5] = 0xEF;
+    EXPECT_TRUE(handler.process_packet(setter_mac, packet, entity_id));
+
+    // Expect a direct response to the setter AND an unsolicited notify to the subscriber.
+    bool direct_to_setter = false;
+    bool unsolicited_to_sub = false;
+    for (auto const& s : sends) {
+        AemDu hdr{};
+        span_copy(make_span(hdr), std::span<uint8_t const>(s.bytes).first(AemDu::LENGTH));
+        if (s.dest == setter_mac && !hdr.is_unsolicited()) {
+            direct_to_setter = true;
+        }
+        if (s.dest == sub_mac && hdr.is_unsolicited() && hdr.command_code() == AEM_COMMAND_SET_CONTROL) {
+            unsolicited_to_sub = true;
+        }
+    }
+    EXPECT_TRUE(direct_to_setter);
+    EXPECT_TRUE(unsolicited_to_sub);
+}
+
+TEST(nanoavb_entity_unsolicited_notify, identify_control_change_hits_identify_multicast)
+{
+    Eui64 const entity_id{0xAA, 0, 0, 0, 0, 0, 0, 0x04};
+    SetAcceptingHandler app_handler;
+    AemCommandHandler handler{app_handler};
+    handler.set_entity_id(entity_id);
+    handler.set_identify_control_index(3);  // CONTROL index 3 is the IDENTIFY control
+
+    std::vector<CapturedSend> sends;
+    handler.set_callbacks(AemCommandHandlerCallbacks{.send_response = [&](Eui48 const& dest, std::span<uint8_t const> resp) {
+        sends.push_back({dest, std::vector<uint8_t>(resp.begin(), resp.end())});
+        return true;
+    }});
+
+    // No registered controllers — but an IDENTIFY change still reaches the multicast.
+    // SET_CONTROL body: descriptor_type=CONTROL(0x001A), descriptor_index=3, value=0x01.
+    std::array<uint8_t, 5> body{0x00, 0x1A, 0x00, 0x03, 0x01};
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body), AEM_STATUS_SUCCESS);
+
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(sends[0].dest, atdecc::ATDECC_IDENTIFY_MULTICAST_MAC);
+    AemDu hdr{};
+    span_copy(make_span(hdr), std::span<uint8_t const>(sends[0].bytes).first(AemDu::LENGTH));
+    EXPECT_TRUE(hdr.is_unsolicited());
+    EXPECT_EQ(hdr.command_code(), AEM_COMMAND_SET_CONTROL);
+    EXPECT_EQ(hdr.target_entity_id, entity_id);
+}
+
+TEST(nanoavb_entity_unsolicited_notify, non_identify_control_skips_multicast)
+{
+    Eui64 const entity_id{0xAA, 0, 0, 0, 0, 0, 0, 0x05};
+    SetAcceptingHandler app_handler;
+    AemCommandHandler handler{app_handler};
+    handler.set_entity_id(entity_id);
+    handler.set_identify_control_index(3);
+
+    std::vector<CapturedSend> sends;
+    handler.set_callbacks(AemCommandHandlerCallbacks{.send_response = [&](Eui48 const& dest, std::span<uint8_t const> resp) {
+        sends.push_back({dest, std::vector<uint8_t>(resp.begin(), resp.end())});
+        return true;
+    }});
+
+    // A SET_CONTROL on a DIFFERENT control index (5) — not the identify control,
+    // and nobody registered — so nothing is emitted.
+    std::array<uint8_t, 5> body{0x00, 0x1A, 0x00, 0x05, 0x01};
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, body), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(sends.size(), size_t{0});
 }
 
 //

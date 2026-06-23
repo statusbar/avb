@@ -9,6 +9,7 @@
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/avtp/avtp.hpp"
+#include "statusbar/avtp/avtp_maap_handler.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
@@ -43,6 +44,7 @@ namespace statusbar::nanoavb {
 using ieee::protocols::ETHERTYPE_AVTP;
 using ieee::protocols::ETHERTYPE_MSRP;
 using ieee::protocols::ETHERTYPE_MVRP;
+using ieee::protocols::MAAP_MULTICAST_MAC;
 using ieee::protocols::MSRP_MULTICAST_MAC;
 using ieee::protocols::MVRP_MULTICAST_MAC;
 
@@ -173,6 +175,68 @@ class MsrpNetHandler : public net::Pollable
   private:
     net::RawnetContext context_{};
     MsrpHandler<>& handler_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+    std::array<uint8_t, 2048> payload_buf_{};
+};
+
+//
+// MAAP Network Handler
+//
+
+/// MAAP Network Handler — hosts a MaapHandler (avtp::MaapHandler) on the reactor.
+/// Opens an AVTP-ethertype socket joined to the MAAP multicast group, wires the
+/// MaapHandler's send callback to that socket, delivers received MAAP frames to
+/// it, and drives its probe/announce timers on tick(). This is the reactor
+/// slot-in for MAAP — construct one with a MaapHandler owned by the entity and
+/// add it to the reactor (opt-in; nothing adds it by default).
+///
+/// The MaapHandler must outlive this object: this handler wires the MaapHandler's
+/// send callback to capture `this`, and references the MaapHandler for receive/tick.
+///
+/// Threading: on_ready/tick run on the reactor poll thread. Must not block/throw.
+class MaapNetHandler : public net::Pollable
+{
+  public:
+    static constexpr int PROTOCOL_TICK_PERIOD_MS = 10;
+
+    /// @param interface_name The network interface name
+    /// @param handler Reference to the MAAP protocol handler (must outlive this)
+    MaapNetHandler(std::string_view interface_name, avtp::MaapHandler& handler)
+        : handler_{handler}
+    {
+        (void)context_.open(interface_name, ETHERTYPE_AVTP, &MAAP_MULTICAST_MAC);
+        // All MAAP PDUs go to the MAAP multicast group; route the handler's frames
+        // out through this socket.
+        handler_.set_send(
+            [this](std::span<uint8_t const> bytes) -> bool { return context_.send(&MAAP_MULTICAST_MAC, bytes).has_value(); });
+    }
+
+    /// Check if the handler is valid (socket opened successfully)
+    [[nodiscard]] auto valid() const noexcept -> bool { return context_.valid(); }
+
+    // -- Pollable interface --
+
+    [[nodiscard]] auto fd() const noexcept -> int override { return context_.fd(); }
+
+    void on_ready(int64_t now_ns) override
+    {
+        ieee::Eui48 src_mac{};
+        ieee::Eui48 dest_mac{};
+        while (true) {
+            auto result = context_.recv(&src_mac, &dest_mac, payload_buf_);
+            if (!result || *result <= 0) {
+                break;
+            }
+            handler_.receive(src_mac, {payload_buf_.data(), static_cast<size_t>(*result)}, now_ns);
+        }
+    }
+
+    void tick(int64_t now_ns) override { handler_.tick(now_ns); }
+
+    [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
+
+  private:
+    net::RawnetContext context_{};
+    avtp::MaapHandler& handler_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     std::array<uint8_t, 2048> payload_buf_{};
 };
 
@@ -352,12 +416,37 @@ struct NanoAvbComponents
         size_t talker_max_listeners,
         size_t listener_max_streams);
 
+    /// Symbol-aware construction: serve descriptors (and resolve their well-known
+    /// symbols) through a caller-owned @p handler — typically a DescriptorStorageHandler
+    /// backed by an .aem blob — instead of a parsed EntityModel. The handler MUST
+    /// outlive this object. The entity descriptor (entity_id + capabilities for ADP +
+    /// ACMP) is resolved from the handler at construction; the legacy `entity_model`
+    /// member stays empty/unused on this path.
+    NanoAvbComponents(
+        AemEntityHandler& handler,
+        AdpAdvertiserConfig adp_config,
+        size_t talker_max_streams,
+        size_t talker_max_listeners,
+        size_t listener_max_streams);
+
     NanoAvbComponents(NanoAvbComponents const&) = delete;
     auto operator=(NanoAvbComponents const&) -> NanoAvbComponents& = delete;
     NanoAvbComponents(NanoAvbComponents&&) = delete;
     auto operator=(NanoAvbComponents&&) -> NanoAvbComponents& = delete;
     ~NanoAvbComponents() = default;
 
+  private:
+    /// Delegated-to target for the symbol-aware ctor, with the entity descriptor
+    /// pre-resolved so ADP + ACMP read it without resolving from the handler thrice.
+    NanoAvbComponents(
+        AemEntityHandler& handler,
+        DescriptorEntity const& entity,
+        AdpAdvertiserConfig adp_config,
+        size_t talker_max_streams,
+        size_t talker_max_listeners,
+        size_t listener_max_streams);
+
+  public:
     // Declaration order matters: `entity_model` must precede the handlers that
     // reference it so it is fully constructed when they are wired.
     EntityModel entity_model;

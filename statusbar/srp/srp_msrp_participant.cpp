@@ -630,8 +630,8 @@ void MsrpParticipantT<Limits>::on_leaveall_timer(TimePoint now)
 
     // Suppress-LeaveAll workaround: re-arm the FSM (done above) but never
     // originate a LeaveAll and never drive our applicants into the leave path.
-    // We just keep re-asserting via the periodic timer -- the pre-006bf73 "sticky,
-    // never release" behaviour that a Luminex bridge needs for stable E->the DSP processor
+    // We just keep re-asserting via the periodic timer -- the earlier "sticky,
+    // never release" behaviour that an AVB bridge needs for stable downstream
     // forwarding. Consume the FSM's pending Tx so it does not get stuck Active,
     // but pass leave_all=false so the bit never reaches the wire.
     if (suppress_leaveall_) {
@@ -646,7 +646,7 @@ void MsrpParticipantT<Limits>::on_leaveall_timer(TimePoint now)
             // Deliberately DO NOT drive our own Registrars to Lv on our OWN
             // LeaveAll (the spec's In + TxLeaveAll -> Lv). That GC step assumes a
             // peer re-declares the attribute within LeaveTime; a non-compliant
-            // bridge (the the audio interface AVB switch re-declares only on ITS own ~12 s
+            // bridge (an AVB switch that re-declares only on ITS own ~12 s
             // LeaveAll, not in response to ours) does not, so we would age our own
             // ACTIVELY-SERVED registration to Mt every LeaveAll period -- closing
             // the talker gate (registrar not In) and freezing the stream. As an
@@ -836,8 +836,8 @@ void MsrpParticipantT<Limits>::receive_pdu(std::span<uint8_t const> pdu, TimePoi
     // LeaveAll declares our (now-leaving) attributes as Mt toward downstream
     // listeners on its own ~100 ms join timer, and a re-declare that lands just
     // after that window makes the listener see our talker momentarily disappear
-    // and tear down its reservation (observed E -> the DSP processor via a Luminex switch:
-    // the E->the DSP processor stream stopped being forwarded). Emitting our re-declarations
+    // and tear down its reservation (observed feeding a downstream listener through an
+    // AVB switch: the downstream stream stopped being forwarded). Emitting our re-declarations
     // immediately keeps our registration continuously visible to the bridge.
     if (rx_leaveall_seen_) {
         build_and_send_pdu(now);
@@ -1436,7 +1436,7 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
     // record, so the flag is always carried by a non-empty vector (with a
     // FirstValue). Emitting a standalone EMPTY LeaveAll vector (NumberOfValues=0)
     // for a type we have no records of -- e.g. TalkerFailed on a pure talker --
-    // is mis-parsed by some peers (the the audio interface AVB switch) AND tshark: they read a
+    // is mis-parsed by some peers (some AVB switches) AND tshark: they read a
     // FirstValue for the 0-value vector and consume the following Listener/Domain
     // messages' bytes, DESTROYING the rest of the PDU. A LeaveAll PDU must
     // re-declare every active attribute in the same packet (IEEE 802.1Q

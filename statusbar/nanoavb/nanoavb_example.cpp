@@ -676,11 +676,10 @@ std::unique_ptr<statusbar::nanoavb::NanoAvbComponents> create_nanoavb_components
 
     // Register VLAN with MVRP and set the MSRP SR-class domain.
     (void)components->mvrp_handler.register_vlan(2, statusbar::sm::Clock::now());
-    components->msrp_handler.set_domain(
-        DomainInfo{
-            .sr_class_id = 6,        // SR Class A
-            .sr_class_priority = 3,  // Priority 3
-            .sr_class_vid = 2});     // VLAN 2
+    components->msrp_handler.set_domain(DomainInfo{
+        .sr_class_id = 6,        // SR Class A
+        .sr_class_priority = 3,  // Priority 3
+        .sr_class_vid = 2});     // VLAN 2
 
     return components;
 }
@@ -926,30 +925,29 @@ auto main(int argc, char** argv) -> int
 
     // Wire up gPTP announce callback to notify supervised state machine
     auto original_gm_callback = net_handlers.gptp_handler().grandmaster_identity();
-    net_handlers.gptp_handler().set_callbacks(
-        statusbar::nanoavb::GptpAnnounceCallbacks{
-            .grandmaster_id_changed = [&components, &supervised](
-                                          int64_t now_ns,
-                                          statusbar::gptp::ClockIdentity const& grandmaster_id,
-                                          statusbar::gptp::AnnounceMessage const& announce) {
-                // Print notification
-                std::string gm_str;
-                statusbar::gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
-                std::print(
-                    "gPTP: Grandmaster changed to {} (priority1={}, priority2={}, steps={})\n",
-                    gm_str,
-                    announce.grandmaster_priority1.get(),
-                    announce.grandmaster_priority2.get(),
-                    announce.steps_removed.get());
+    net_handlers.gptp_handler().set_callbacks(statusbar::nanoavb::GptpAnnounceCallbacks{
+        .grandmaster_id_changed = [&components, &supervised](
+                                      int64_t now_ns,
+                                      statusbar::gptp::ClockIdentity const& grandmaster_id,
+                                      statusbar::gptp::AnnounceMessage const& announce) {
+            // Print notification
+            std::string gm_str;
+            statusbar::gptp::format_to(std::back_inserter(gm_str), grandmaster_id);
+            std::print(
+                "gPTP: Grandmaster changed to {} (priority1={}, priority2={}, steps={})\n",
+                gm_str,
+                announce.grandmaster_priority1.get(),
+                announce.grandmaster_priority2.get(),
+                announce.steps_removed.get());
 
-                // Update ADP advertiser with new grandmaster info
-                components.adp_advertiser.set_gptp_info(grandmaster_id, 0);
-                components.adp_advertiser.notify_entity_changed();
+            // Update ADP advertiser with new grandmaster info
+            components.adp_advertiser.set_gptp_info(grandmaster_id, 0);
+            components.adp_advertiser.notify_entity_changed();
 
-                // Notify state machine
-                auto const sm_now = TimePoint{std::chrono::nanoseconds{now_ns}};
-                supervised.on_gptp_announce(sm_now, true);
-            }});
+            // Notify state machine
+            auto const sm_now = TimePoint{std::chrono::nanoseconds{now_ns}};
+            supervised.on_gptp_announce(sm_now, true);
+        }});
 
     // Setup PTP application with automatic fallback to system clock if needed
     auto is_shutdown = [] { return statusbar::realtime::is_shutdown_requested(); };

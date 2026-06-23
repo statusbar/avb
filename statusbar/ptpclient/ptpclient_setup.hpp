@@ -8,10 +8,10 @@
 /// Provides diagnostic output and error handling for common setup tasks
 
 #include "statusbar/config/config.hpp"
-#include "statusbar/gptp/gptp_ntpshm.hpp"
 #include "statusbar/ptpclient/ptpclient_base.hpp"
 #include "statusbar/ptpclient/ptpclient_bridge.hpp"
 #include "statusbar/ptpclient/ptpclient_linuxptp.hpp"
+#include "statusbar/ptpclient/ptpclient_ntpshm.hpp"
 #include "statusbar/realtime/realtime.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/status/status.hpp"

@@ -48,6 +48,11 @@
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
 
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <utility>
+
 namespace statusbar::nanoavb {
 
 using atdecc::aem::DescriptorStorage;
@@ -97,9 +102,67 @@ class DescriptorStorageHandler : public AemEntityHandler
         : storage_{storage}
     {}
 
+    /// Expose the backing blob so the dispatch can resolve descriptor symbols.
+    [[nodiscard]] auto descriptor_storage() const noexcept -> DescriptorStorage const* override { return &storage_; }
+
     // ---- Top-level ------------------------------------------------------
 
-    auto on_get_entity(DescriptorRef ref, uint32_t /*symbol*/, DescriptorEntity& desc) -> bool override { return load(ref, desc); }
+    auto on_get_entity(DescriptorRef ref, uint32_t /*symbol*/, DescriptorEntity& desc) -> bool override
+    {
+        if (!load(ref, desc)) {
+            return false;
+        }
+        // Reflect the (runtime-changeable) managed entity name, if enabled.
+        if (manage_entity_name_) {
+            desc.entity_name = entity_name_;
+        }
+        return true;
+    }
+
+    // ---- Built-in entity name (every entity has exactly one) -------------
+    //
+    // Opt-in: call manage_entity_name(initial), and this handler then serves GET_NAME
+    // and SET_NAME for the ENTITY descriptor's entity_name (descriptor_index 0,
+    // name_index 0) AND reflects the current value in on_get_entity (so READ_DESCRIPTOR
+    // agrees). The name lives in memory -- a controller can change it and read it back,
+    // and it resets to the seed on restart. To make it survive a restart, set the change
+    // callback and persist there, then seed manage_entity_name() from that store at boot.
+
+    /// Enable built-in entity-name get/set, seeded with @p initial.
+    void manage_entity_name(AtdeccString initial) noexcept
+    {
+        entity_name_ = initial;
+        manage_entity_name_ = true;
+    }
+
+    /// The current entity name (meaningful once manage_entity_name() was called).
+    [[nodiscard]] auto entity_name() const noexcept -> AtdeccString const& { return entity_name_; }
+
+    /// Called when a controller's SET_NAME requests a new entity name. Return
+    /// AEM_STATUS_SUCCESS to accept (the in-memory name then updates; persist to
+    /// non-volatile storage here if you want it to survive a restart), or any other
+    /// AEM_STATUS_* to reject the change. Unset => accept (in-memory only).
+    void set_on_entity_name_changed(std::function<uint8_t(AtdeccString const&)> fn) { on_entity_name_changed_ = std::move(fn); }
+
+    auto on_get_name(NameRef ref, uint32_t /*symbol*/) const -> std::optional<AtdeccString> override
+    {
+        if (manages_entity_name_field(ref)) {
+            return entity_name_;
+        }
+        return std::nullopt;
+    }
+
+    auto on_set_name(NameRef ref, uint32_t /*symbol*/, AtdeccString const& name) -> uint8_t override
+    {
+        if (!manages_entity_name_field(ref)) {
+            return atdecc::AEM_STATUS_NOT_IMPLEMENTED;
+        }
+        uint8_t const status = on_entity_name_changed_ ? on_entity_name_changed_(name) : atdecc::AEM_STATUS_SUCCESS;
+        if (status == atdecc::AEM_STATUS_SUCCESS) {
+            entity_name_ = name;
+        }
+        return status;
+    }
 
     auto on_get_configuration(DescriptorRef ref, uint32_t /*symbol*/, DescriptorConfiguration& desc) -> bool override
     {
@@ -291,7 +354,18 @@ class DescriptorStorageHandler : public AemEntityHandler
         return true;
     }
 
+    /// True if @p ref names the entity's single entity_name (ENTITY descriptor,
+    /// descriptor_index 0, name_index 0) and built-in management is enabled.
+    [[nodiscard]] auto manages_entity_name_field(NameRef ref) const noexcept -> bool
+    {
+        return manage_entity_name_ && ref.descriptor.descriptor_type == atdecc::aem::DESCRIPTOR_ENTITY &&
+            ref.descriptor.descriptor_index == 0 && ref.name_index == 0;
+    }
+
     DescriptorStorage storage_;
+    AtdeccString entity_name_{};
+    bool manage_entity_name_{false};
+    std::function<uint8_t(AtdeccString const&)> on_entity_name_changed_{};
 };
 
 }  // namespace statusbar::nanoavb

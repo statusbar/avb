@@ -15,8 +15,8 @@
 #include <string>
 #include <vector>
 
-using statusbar::avb_entity::TxPcapRecorder;
 using statusbar::is_success;
+using statusbar::avb_entity::TxPcapRecorder;
 
 namespace {
 

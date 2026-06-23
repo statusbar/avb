@@ -62,45 +62,42 @@ static void record_backward(
     AddressTracker& trk, uint16_t seq_id, uint64_t time_us, uint64_t capture_start_us, char const* mode_name, uint64_t address)
 {
     double const time_s = static_cast<double>(time_us - capture_start_us) / 1e6;
-    trk.issues.push_back(
-        std::format(
-            "seq={} at {:.3f}s: {} backward 0x{:X} -> 0x{:X} (delta -{})",
-            seq_id,
-            time_s,
-            mode_name,
-            trk.last_address,
-            address,
-            trk.last_address - address));
+    trk.issues.push_back(std::format(
+        "seq={} at {:.3f}s: {} backward 0x{:X} -> 0x{:X} (delta -{})",
+        seq_id,
+        time_s,
+        mode_name,
+        trk.last_address,
+        address,
+        trk.last_address - address));
 }
 
 static void record_overlap(
     AddressTracker& trk, uint16_t seq_id, uint64_t time_us, uint64_t capture_start_us, char const* mode_name, uint64_t address)
 {
     double const time_s = static_cast<double>(time_us - capture_start_us) / 1e6;
-    trk.issues.push_back(
-        std::format(
-            "seq={} at {:.3f}s: {} overlap at 0x{:X} (expected 0x{:X}, overlap {} bytes)",
-            seq_id,
-            time_s,
-            mode_name,
-            address,
-            trk.expected_next,
-            trk.expected_next - address));
+    trk.issues.push_back(std::format(
+        "seq={} at {:.3f}s: {} overlap at 0x{:X} (expected 0x{:X}, overlap {} bytes)",
+        seq_id,
+        time_s,
+        mode_name,
+        address,
+        trk.expected_next,
+        trk.expected_next - address));
 }
 
 static void record_gap(
     AddressTracker& trk, uint16_t seq_id, uint64_t time_us, uint64_t capture_start_us, char const* mode_name, uint64_t address)
 {
     double const time_s = static_cast<double>(time_us - capture_start_us) / 1e6;
-    trk.issues.push_back(
-        std::format(
-            "seq={} at {:.3f}s: {} gap 0x{:X}..0x{:X} ({} bytes)",
-            seq_id,
-            time_s,
-            mode_name,
-            trk.expected_next,
-            address,
-            address - trk.expected_next));
+    trk.issues.push_back(std::format(
+        "seq={} at {:.3f}s: {} gap 0x{:X}..0x{:X} ({} bytes)",
+        seq_id,
+        time_s,
+        mode_name,
+        trk.expected_next,
+        address,
+        address - trk.expected_next));
 }
 
 void update_address_tracker(
@@ -340,12 +337,11 @@ void process_aa_response(ConversationStats& conv, AnalysisState& state, AecpAaDu
     }
 
     if (it->second.retransmit_count > 0) {
-        conv.retransmit_details.push_back(
-            RetransmitRecord{
-                .time_us = it->second.send_time_us,
-                .sequence_id = seq,
-                .retransmit_count = it->second.retransmit_count,
-                .response_time_us = rtt});
+        conv.retransmit_details.push_back(RetransmitRecord{
+            .time_us = it->second.send_time_us,
+            .sequence_id = seq,
+            .retransmit_count = it->second.retransmit_count,
+            .response_time_us = rtt});
     }
 
     state.pending.erase(it);

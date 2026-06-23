@@ -22,15 +22,15 @@ statusbar_add_module(
   nanoavb_components.cpp
   nanoavb_controller.cpp
   DEPS
-  statusbar-atdecc
-  statusbar-avtp
+  statusbar::atdecc
+  statusbar::avtp
   statusbar::buffer
   statusbar::container
-  statusbar-gptp
+  statusbar::gptp
   statusbar::ieee
   statusbar::net
   statusbar::sm
-  statusbar-srp
+  statusbar::srp
   statusbar::status
   statusbar::itc
   statusbar::tsn
@@ -42,6 +42,7 @@ statusbar_add_module(
   nanoavb_entity_model_test.cpp
   nanoavb_entity_test.cpp
   nanoavb_gptp_sm_test.cpp
+  nanoavb_msrp_sm_test.cpp
   nanoavb_sm_test.cpp
   nanoavb_srp_test.cpp
   nanoavb_controller_test.cpp

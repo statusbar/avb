@@ -9,12 +9,12 @@ statusbar_add_module(
   atdecc_controller_simple.cpp
   atdecc_aem_validate.cpp
   DEPS
-  statusbar-atdecc
-  statusbar-avtp
+  statusbar::atdecc
+  statusbar::avtp
   statusbar::buffer
   statusbar::config
   statusbar::ieee
-  statusbar-nanoavb
+  statusbar::nanoavb
   statusbar::net
   statusbar::status
   statusbar::toml

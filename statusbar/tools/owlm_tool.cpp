@@ -221,15 +221,19 @@ int run_normal(Config const& cli_const)
             if (cli.duration_s > 0.0) {
                 auto const dur_ns = static_cast<int64_t>(cli.duration_s * 1e9);
                 duration_watchdog = std::thread{[&stop, dur_ns]() {
-                    auto const deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds{dur_ns};
-                    while (!stop.stop_requested()) {
-                        if (std::chrono::steady_clock::now() >= deadline) {
-                            std::println(stderr, "[owlm] --duration-s deadline reached; initiating graceful shutdown");
-                            stop.request_stop();
-                            return;
+                    // Guard the thread entry: an exception escaping a std::thread
+                    // body (e.g. std::println on an I/O error) calls std::terminate.
+                    statusbar::run_guarded("owlm duration-watchdog", [&stop, dur_ns]() {
+                        auto const deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds{dur_ns};
+                        while (!stop.stop_requested()) {
+                            if (std::chrono::steady_clock::now() >= deadline) {
+                                std::println(stderr, "[owlm] --duration-s deadline reached; initiating graceful shutdown");
+                                stop.request_stop();
+                                return;
+                            }
+                            (void)stop.wait_for_stop(std::chrono::milliseconds(100));
                         }
-                        (void)stop.wait_for_stop(std::chrono::milliseconds(100));
-                    }
+                    });
                 }};
             }
 

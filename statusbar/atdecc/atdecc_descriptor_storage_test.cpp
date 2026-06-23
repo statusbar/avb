@@ -246,6 +246,46 @@ TEST(descriptor_storage_symbol, not_found)
     EXPECT_FALSE(sym.has_value());
 }
 
+TEST(descriptor_storage_symbol, find_by_symbol_found)
+{
+    // Reverse lookup: the symbol 0xDEADBEEF resolves back to (config 0, ENTITY, index 0).
+    auto blob = make_blob_with_symbol();
+    auto storage = DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+
+    auto loc = storage->find_by_symbol(0xDEADBEEFu);
+    EXPECT_TRUE(loc.has_value());
+    EXPECT_EQ(static_cast<uint16_t>(loc->configuration_index), 0u);
+    EXPECT_EQ(static_cast<uint16_t>(loc->descriptor_type), static_cast<uint16_t>(DESCRIPTOR_ENTITY));
+    EXPECT_EQ(static_cast<uint16_t>(loc->descriptor_index), 0u);
+    EXPECT_EQ(static_cast<uint32_t>(loc->symbol), 0xDEADBEEFu);
+}
+
+TEST(descriptor_storage_symbol, find_by_symbol_not_found)
+{
+    auto blob = make_blob_with_symbol();
+    auto storage = DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+
+    auto loc = storage->find_by_symbol(0x12345678u);  // no such symbol
+    EXPECT_FALSE(loc.has_value());
+}
+
+TEST(descriptor_storage_symbol, round_trip)
+{
+    // get_symbol and find_by_symbol are inverses for the same descriptor.
+    auto blob = make_blob_with_symbol();
+    auto storage = DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+
+    auto sym = storage->get_symbol(0, DESCRIPTOR_ENTITY, 0);
+    EXPECT_TRUE(sym.has_value());
+    auto loc = storage->find_by_symbol(*sym);
+    EXPECT_TRUE(loc.has_value());
+    EXPECT_EQ(static_cast<uint16_t>(loc->descriptor_type), static_cast<uint16_t>(DESCRIPTOR_ENTITY));
+    EXPECT_EQ(static_cast<uint16_t>(loc->descriptor_index), 0u);
+}
+
 //
 // wire_size() smoke tests for every descriptor type that has a
 // uncovered wire_size() (per `make coverage-uncovered-functions-report`).

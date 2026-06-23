@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 // gps_ratio_tracker: sample the local PHC (switch gPTP time) against GPS
-// (CLOCK_REALTIME, chrony-disciplined to the site TM2000B) and track
+// (CLOCK_REALTIME, chrony-disciplined to the site GPS grandmaster) and track
 // r = switch_rate / GPS_rate using the ptpclient frequency-ratio estimators.
 // Feeds the GPS-rate media-clock generator. See avb/docs/GPS_MEDIA_CLOCK.md.
 //

@@ -9,6 +9,7 @@
 /// Audio flows from listener through DSP biquad filters to talker.
 
 #include "statusbar/atdecc/atdecc.hpp"
+#include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/dsp/dsp.hpp"
 #include "statusbar/gptp/gptp.hpp"
@@ -153,13 +154,13 @@ class AvbEntityStereoIO
     [[nodiscard]] auto stop() -> Status;
 
     /// Check if entity is running
-    [[nodiscard]] auto is_running() const noexcept -> bool { return running_; }
+    [[nodiscard]] auto is_running() const noexcept -> bool { return host_.is_running(); }
 
     /// Check if entity has reached Ready state (gPTP locked, VLAN registered)
-    [[nodiscard]] auto is_ready() const noexcept -> bool;
+    [[nodiscard]] auto is_ready() const noexcept -> bool { return host_.is_ready(); }
 
     /// Get current supervisor state as string
-    [[nodiscard]] auto state_string() const -> std::string_view;
+    [[nodiscard]] auto state_string() const -> std::string_view { return host_.state_string(); }
 
     /// Print current state of all state machines
     auto print_state() const -> void;
@@ -191,11 +192,11 @@ class AvbEntityStereoIO
     auto set_audio_callback(AudioProcessCallback callback) -> void { audio_callback_ = std::move(callback); }
 
     /// Get access to NanoAVB components (for advanced use)
-    [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return components_; }
-    [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return components_; }
+    [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return host_.components(); }
+    [[nodiscard]] auto components() const -> nanoavb::NanoAvbComponents const& { return host_.components(); }
 
     /// Get access to network handlers (for advanced use)
-    [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return net_handlers_.get(); }
+    [[nodiscard]] auto net_handlers() -> nanoavb::NanoAvbNetHandlers* { return host_.net_handlers(); }
 
     /// Get the configuration
     [[nodiscard]] auto config() const noexcept -> AvbEntityStereoIOConfig const& { return config_; }
@@ -207,11 +208,14 @@ class AvbEntityStereoIO
     auto configure_filter(double freq_hz, double gain_db, double q) -> void;
 
   private:
-    /// Create the entity model with stereo I/O descriptors
+    /// Create the entity model with stereo I/O descriptors (hand-built in code -- the
+    /// canonical STATIC example; no AEM blob needed).
     [[nodiscard]] auto create_entity_model() const -> nanoavb::EntityModel;
 
-    /// Wire up state machine callbacks
-    auto wire_callbacks() -> void;
+    /// Attach this entity's stream-specific control-plane behavior to the host:
+    /// the single-stream MSRP advertise/withdraw + the ACMP talker connection log.
+    /// The host owns the generic SM wiring + lifecycle.
+    auto wire_stream_callbacks() -> void;
 
     /// Build the MSRP talker reservation (TSpec) for our stereo AM824 stream,
     /// sourcing stream id / destination / VLAN from the ACMP-configured talker
@@ -232,23 +236,11 @@ class AvbEntityStereoIO
     /// Custom audio callback (optional)
     AudioProcessCallback audio_callback_;
 
-    //
-    // State Machine Contexts (large structs grouped together)
-    //
-
-    nanoavb::gptp_sm::Context gptp_ctx_{};
-    nanoavb::msrp_talker_sm::Context msrp_talker_ctx_{};
-    nanoavb::msrp_listener_sm::Context msrp_listener_ctx_{};
-    nanoavb::mvrp_sm::Context mvrp_ctx_{};
-    nanoavb::supervisor_sm::Context supervisor_ctx_{};
-    nanoavb::talker_engine_sm::Context talker_engine_ctx_{};
-    nanoavb::listener_engine_sm::Context listener_engine_ctx_{};
-
-    /// NanoAVB components (entity model, ADP, ACMP, MVRP, MSRP handlers)
-    nanoavb::NanoAvbComponents components_;
-
-    /// Network handlers (created on start)
-    std::unique_ptr<nanoavb::NanoAvbNetHandlers> net_handlers_;
+    /// The reusable AVB control plane: state machines + NanoAvbComponents + net
+    /// handlers + lifecycle. This entity supplies only its single stereo stream +
+    /// DSP and attaches them via host_.components() + the typed hooks. Declared
+    /// after config_ (the model is built from config_ via create_entity_model()).
+    AvbEntityHost host_;
 
     //
     // DSP Processing
@@ -260,21 +252,6 @@ class AvbEntityStereoIO
 
     /// Audio processing buffer (interleaved stereo)
     std::array<float, SAMPLES_PER_PACKET * CHANNELS> audio_buffer_{};
-
-    /// Running state
-    bool running_{false};
-
-    //
-    // State Machines (supervisor and protocol coordinators)
-    //
-
-    nanoavb::supervisor_sm::Machine supervisor_{};
-    nanoavb::gptp_sm::Machine gptp_{};
-    nanoavb::mvrp_sm::Machine mvrp_{};
-    nanoavb::msrp_talker_sm::Machine msrp_talker_{};
-    nanoavb::msrp_listener_sm::Machine msrp_listener_{};
-    nanoavb::talker_engine_sm::Machine talker_engine_{};
-    nanoavb::listener_engine_sm::Machine listener_engine_{};
 
     //
     // Packet Handling

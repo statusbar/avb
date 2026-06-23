@@ -258,6 +258,41 @@ class AemCommandHandler
     /// Get the number of active unsolicited registrations
     [[nodiscard]] auto unsolicited_registration_count() const noexcept -> size_t;
 
+    /// Set our own entity_id, used as the target_entity_id of unsolicited
+    /// notifications. process_packet() also keeps this current; call this so
+    /// notifications emitted before any command is received carry the right id.
+    void set_entity_id(Eui64 id) noexcept { our_entity_id_ = id; }
+
+    /// Tell the handler which CONTROL descriptor index is the entity's IDENTIFY
+    /// control (IEEE 1722.1 7.3.5.2). When a SET_CONTROL changes that control, the
+    /// unsolicited notification is ALSO sent to ATDECC_IDENTIFY_MULTICAST_MAC so any
+    /// controller — even one not registered for unsolicited notifications — sees the
+    /// identify. Mirror this index into the ADPDU (identify_control_index +
+    /// AEM_IDENTIFY_CONTROL_INDEX_VALID). Unset => no identify multicast.
+    void set_identify_control_index(uint16_t index) noexcept
+    {
+        identify_control_index_ = index;
+        identify_control_index_valid_ = true;
+    }
+
+    /// Apply a descriptor-value change originated by the entity ITSELF (the
+    /// developer's code), as if a controller had sent the SET command, then
+    /// notify every registered controller via an unsolicited response. This is
+    /// how an entity with no physical controller (e.g. a software IDENTIFY
+    /// button) drives its own controls. @p command_type is the AEM_COMMAND_*
+    /// SET code (SET_CONTROL, SET_NAME, ...); @p command_body is the SET
+    /// command body (descriptor_type + descriptor_index + value). Returns the
+    /// AEM status from the handler's symbol-keyed set hook; notifications are
+    /// emitted only on AEM_STATUS_SUCCESS.
+    [[nodiscard]] auto apply_local_descriptor_value(uint16_t command_type, std::span<uint8_t const> command_body) -> uint8_t;
+
+    /// Emit an unsolicited AEM response (U-bit set) carrying @p command_type and
+    /// @p body to every registered controller (plus the IDENTIFY multicast when the
+    /// change targets the IDENTIFY control). Exposed so an entity can push a
+    /// notification it framed itself; apply_local_descriptor_value() is the usual
+    /// entry point. No-op if no send_response callback is wired.
+    void emit_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
+
     /// Periodic tick to check lock timeout and pending acquire timeout
     void tick(sm::TimePoint now) noexcept
     {
@@ -284,6 +319,18 @@ class AemCommandHandler
     /// Handle READ_DESCRIPTOR command.
     [[nodiscard]] auto handle_read_descriptor(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// Handle GET_NAME command (IEEE 1722.1 Clause 7.4.18). Parses the
+    /// descriptor_type/index/name_index/config header and routes through
+    /// AemEntityModel::get_name_for_wire -> the handler's symbol-keyed
+    /// on_get_name. NOT_IMPLEMENTED if the handler serves no name for the
+    /// requested (descriptor, name_index).
+    [[nodiscard]] auto handle_get_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// Handle SET_NAME command (IEEE 1722.1 Clause 7.4.17). Routes through
+    /// AemEntityModel::apply_set_name -> the handler's symbol-keyed
+    /// on_set_name, echoing the command as the response.
+    [[nodiscard]] auto handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
     /// Handle GET_STREAM_FORMAT — returns the STREAM descriptor's current_format.
     [[nodiscard]] auto handle_get_stream_format(
@@ -320,19 +367,17 @@ class AemCommandHandler
         return {.status = AEM_STATUS_SUCCESS, .size = 0};
     }
 
-    /// Handle SET_CONTROL command (stub).
-    [[nodiscard]] static auto handle_set_control(AemDu const& /*header*/, std::span<uint8_t const> /*command_data*/)
-        -> AemCommandResponse
-    {
-        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
-    }
+    /// Handle a SET descriptor-value command (SET_CONTROL, and the wider family).
+    /// Routes through AemEntityModel::apply_set_descriptor_value -> the handler's
+    /// symbol-keyed on_set_descriptor_value, echoing the command as the response.
+    [[nodiscard]] auto handle_set_descriptor_value(
+        uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
-    /// Handle GET_CONTROL command (stub).
-    [[nodiscard]] static auto handle_get_control(AemDu const& /*header*/, std::span<uint8_t const> /*command_data*/)
-        -> AemCommandResponse
-    {
-        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
-    }
+    /// Handle a GET descriptor-value command (GET_CONTROL, and the wider family).
+    /// Routes through AemEntityModel::get_descriptor_value_for_wire -> the handler's
+    /// symbol-keyed on_get_descriptor_value.
+    [[nodiscard]] auto handle_get_descriptor_value(
+        uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
     /// Handle GET_COUNTERS command (IEEE 1722.1 Clause 7.4.42): read the target
     /// descriptor's counters from the get_counters callback and emit an
@@ -354,6 +399,15 @@ class AemCommandHandler
 
     /// Handle DEREGISTER_UNSOLICITED_NOTIFICATION command (no body).
     [[nodiscard]] auto handle_deregister_unsolicited(AemDu const& header) -> AemCommandResponse;
+
+    /// Frame one unsolicited AEM response (U-bit set) for @p command_type / @p body,
+    /// addressed to @p controller_id, and send it to @p dest_mac via the callback.
+    void send_unsolicited_to(
+        Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t command_type, std::span<uint8_t const> body);
+
+    /// True if (@p command_type, @p body) is a SET_CONTROL targeting the configured
+    /// IDENTIFY control — i.e. the change must also go to the IDENTIFY multicast.
+    [[nodiscard]] auto targets_identify_control(uint16_t command_type, std::span<uint8_t const> body) const noexcept -> bool;
 
     /// Build and send AECP AEM response.
     /// @param dest_mac Destination MAC address for the response
@@ -426,8 +480,24 @@ class AemCommandHandler
     struct UnsolicitedRegistration
     {
         Eui64 controller_entity_id{};
+        Eui48 controller_mac{};  ///< Source MAC of the REGISTER command, for unicast notifications
     };
     SlotTable<UnsolicitedRegistration, MAX_UNSOLICITED_REGISTRATIONS> unsolicited_registrations_{};
+
+    // Our own entity_id, needed as the target_entity_id of unsolicited
+    // notifications. Stashed by process_packet (always current) and settable
+    // directly via set_entity_id() for notifications emitted before any command
+    // has been received (e.g. an IDENTIFY button press at startup).
+    Eui64 our_entity_id_{};
+
+    // Monotonic sequence_id for unsolicited notifications (IEEE 1722.1 9.2.1.2.4);
+    // increments once per emitted notification.
+    uint16_t unsolicited_sequence_id_{0};
+
+    // The CONTROL descriptor index of the entity's IDENTIFY control, if it has one.
+    // When valid, a SET_CONTROL on this index also notifies the IDENTIFY multicast.
+    uint16_t identify_control_index_{0};
+    bool identify_control_index_valid_{false};
 };
 
 }  // namespace statusbar::nanoavb

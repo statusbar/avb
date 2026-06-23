@@ -73,7 +73,7 @@ class AudioIngest
     /// GPS-TAI target (from the gPTP->GPS-TAI translator). The header design assumes
     /// the source's frame rate is exactly `sample_rate_hz` in GPS-TAI; that holds
     /// only when the source media clock is GPS-locked. A source slaved to the local
-    /// gPTP (e.g. a the audio interface loopback following the switch GM, not a GPS CRF) runs tens
+    /// gPTP (e.g. an audio-interface loopback following the switch GM, not a GPS CRF) runs tens
     /// to hundreds of ppm off GPS, so the pure frame-counted `running_tai` slides
     /// out of the far egress window (observed: +172 ppm -> +500 ms over an hour).
     /// `discipline` applies a first-order slew — a small fraction of the (target -

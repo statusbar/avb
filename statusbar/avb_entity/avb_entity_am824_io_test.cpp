@@ -5,17 +5,24 @@
 
 #include "statusbar/avb_entity/avb_entity_am824_io.hpp"
 
+#include "statusbar/atdecc/atdecc_aecp_aem.hpp"
+#include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
+#include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/nanoavb/nanoavb_entity.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -51,6 +58,24 @@ auto make_config_with_blob(std::vector<uint8_t> blob) -> AvbEntityAm824IOConfig
     config.entity_model_id = Eui64{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77};
     config.descriptor_storage_blob = std::move(blob);
     return config;
+}
+
+/// Read the entity's ENTITY descriptor through the served (symbol-aware) path, so the
+/// handler's runtime patches (entity_id / name) are reflected. (The raw blob is
+/// unpatched, so a READ_DESCRIPTOR round-trip is the way to observe the served result.)
+auto served_entity(AvbEntityAm824IO& entity) -> atdecc::aem::DescriptorEntity
+{
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_READ_DESCRIPTOR, 12);
+    std::array<uint8_t, 8> const cmd{0, 0, 0, 0, 0, 0, 0, 0};  // config 0, ENTITY (type 0), index 0
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> buf{};
+    auto const resp = entity.components().aem_handler.handle_command(header, cmd, buf);
+    atdecc::aem::DescriptorEntity desc{};
+    constexpr size_t hdr = atdecc::aem::AemReadDescriptorResponsePayload::LENGTH;
+    if (resp.status == atdecc::AEM_STATUS_SUCCESS && resp.size > hdr) {
+        span_load_padded(desc, std::span<uint8_t const>{buf.data() + hdr, resp.size - hdr});
+    }
+    return desc;
 }
 
 }  // namespace
@@ -90,31 +115,39 @@ TEST(am824_io_channels, extracts_8_channels)
 
 TEST(am824_io_model, descriptor_counts)
 {
+    // The symbol-aware entity serves descriptors straight from the .aem blob, so
+    // verify the fixture's shape via the DescriptorStorage (the source of truth).
     auto blob = load_file(simple2_bin_path());
-    auto config = make_config_with_blob(std::move(blob));
-    auto result = AvbEntityAm824IO::create(std::move(config));
-    EXPECT_TRUE(result.has_value());
-    auto const& model = (*result)->components().entity_model;
-    EXPECT_EQ(model.configuration_count(), 1);
-    EXPECT_EQ(model.stream_input_count(), 1);
-    EXPECT_EQ(model.stream_output_count(), 1);
-    EXPECT_EQ(model.avb_interface_count(), 1);
-    EXPECT_EQ(model.clock_source_count(), 1);
-    EXPECT_EQ(model.clock_domain_count(), 1);
-    EXPECT_EQ(model.audio_cluster_count(), 2);
-    EXPECT_EQ(model.audio_map_count(), 2);
+    auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+    auto const count = [&](uint16_t type) -> size_t {
+        size_t n = 0;
+        while (storage->get_descriptor(0, type, static_cast<uint16_t>(n)).has_value()) {
+            ++n;
+        }
+        return n;
+    };
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_CONFIGURATION), 1u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 1u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 1u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AVB_INTERFACE), 1u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_CLOCK_SOURCE), 1u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN), 1u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 2u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_MAP), 2u);
 }
 
 TEST(am824_io_model, entity_id_overridden)
 {
     auto blob = load_file(simple2_bin_path());
     auto config = make_config_with_blob(std::move(blob));
-    config.entity_id = Eui64{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11};
+    auto const wanted = Eui64{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11};
+    config.entity_id = wanted;
     config.entity_name = "Test Entity";
     auto result = AvbEntityAm824IO::create(std::move(config));
     EXPECT_TRUE(result.has_value());
-    auto const& desc = (*result)->components().entity_model.get_entity();
-    EXPECT_EQ(desc.entity_id, (Eui64{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11}));
+    // on_get_entity patches entity_id from config; read it via the served path.
+    EXPECT_EQ(served_entity(**result).entity_id, wanted);
 }
 
 TEST(am824_io_state, initial_state)
@@ -288,7 +321,8 @@ TEST(am824_io_components, components_mutable_access)
     EXPECT_TRUE(result.has_value());
 
     auto& components = (*result)->components();
-    EXPECT_EQ(components.entity_model.stream_input_count(), 1);
+    // Mutable access: the ctor configured talker stream 0 on the ACMP talker.
+    EXPECT_TRUE(components.acmp_talker.get_stream(0) != nullptr);
 }
 
 TEST(am824_io_components, net_handlers_null_before_start)
@@ -372,34 +406,37 @@ TEST(am824_io_model, entity_name_set_in_model)
     config.entity_name = "Named AM824";
     auto result = AvbEntityAm824IO::create(std::move(config));
     EXPECT_TRUE(result.has_value());
-
-    auto const& desc = (*result)->components().entity_model.get_entity();
-    // The entity name should have been set from config
+    // The config entity_id + name are served via on_get_entity (the served path).
+    auto const desc = served_entity(**result);
     EXPECT_EQ(desc.entity_id, (Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}));
+    EXPECT_EQ(std::string{desc.entity_name.as_string_view()}, std::string{"Named AM824"});
 }
 
 TEST(am824_io_model, clock_source_and_domain)
 {
+    // Served straight from the blob -> verify the fixture via DescriptorStorage.
     auto blob = load_file(simple2_bin_path());
-    auto config = make_config_with_blob(std::move(blob));
-    auto result = AvbEntityAm824IO::create(std::move(config));
-    EXPECT_TRUE(result.has_value());
-
-    auto const& model = (*result)->components().entity_model;
-    EXPECT_EQ(model.clock_source_count(), 1);
-    EXPECT_EQ(model.clock_domain_count(), 1);
+    auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+    EXPECT_TRUE(storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, 0).has_value());
+    EXPECT_TRUE(storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, 0).has_value());
+    EXPECT_FALSE(storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, 1).has_value());
 }
 
 TEST(am824_io_model, audio_clusters_and_maps)
 {
     auto blob = load_file(simple2_bin_path());
-    auto config = make_config_with_blob(std::move(blob));
-    auto result = AvbEntityAm824IO::create(std::move(config));
-    EXPECT_TRUE(result.has_value());
-
-    auto const& model = (*result)->components().entity_model;
-    EXPECT_EQ(model.audio_cluster_count(), 2);
-    EXPECT_EQ(model.audio_map_count(), 2);
+    auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+    auto const count = [&](uint16_t type) -> size_t {
+        size_t n = 0;
+        while (storage->get_descriptor(0, type, static_cast<uint16_t>(n)).has_value()) {
+            ++n;
+        }
+        return n;
+    };
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 2u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_MAP), 2u);
 }
 
 //

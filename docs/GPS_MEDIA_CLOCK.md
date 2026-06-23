@@ -10,12 +10,12 @@ internet with `UDPTUN` (see [`UDPTUN.md`](UDPTUN.md), owlm).
 
 ## Problem
 
-A GPS time server (TimeMachines **TM2000B**) is a ~microsecond-class PTP
+A GPS time server is a ~microsecond-class PTP
 grandmaster — **±500 ns jitter** with intermittent ±500–700 ns spikes (its own
 datasheet/accuracy report; see [`LINUXPTP.md`](LINUXPTP.md) "Grandmaster sync
 quality"). Relaying it through a switch boundary clock and recovering a **media
 clock** from it directly gives ~700–800 ns of wander at endpoints — enough for a
-the DSP processor to flag "AVB sync" yellow and produce audible 1-sample slips
+DSP processor to flag "AVB sync" yellow and produce audible 1-sample slips
 ("snats"). A **free-running AVB switch** as gPTP GM, by contrast, gives ~20–30 ns
 locally — but is not frequency-locked to GPS, so two sites' free-running switches
 drift relative to each other (±ppm) and can't stay sample-correlated over a WAN.
@@ -47,7 +47,7 @@ Two intentionally-decoupled clocks on each Pi5 (supersedes the old
 | Clock | Disciplined by | Equals | Jitter | Used for |
 |-------|----------------|--------|--------|----------|
 | **PHC** (`/dev/ptp0`) | `ptp4l` (L2 gPTP slave to local switch, HW timestamps) | local switch time (free-runs vs GPS) | ~30 ns | AVTP `avtp_timestamp` / AM824 CIP SYT |
-| **CLOCK_REALTIME** | `chronyd` ← TM2000B NTP (GPS, Stratum-1) | GPS time | ~tens of µs phase, sub-ppb freq | GPS time-of-day for the WAN tunnel; frequency reference |
+| **CLOCK_REALTIME** | `chronyd` ← GPS grandmaster NTP (GPS, Stratum-1) | GPS time | ~tens of µs phase, sub-ppb freq | GPS time-of-day for the WAN tunnel; frequency reference |
 
 - **Stop `phc2sys`** (and `systemd-timesyncd`) — it previously forced
   CLOCK_REALTIME to follow the PHC. The two clocks are now different on purpose.
@@ -108,7 +108,7 @@ follows it. Do not cache the delta and walk away.
 
 1. **GPS path is passive w.r.t. the PHC.** chronyd owns CLOCK_REALTIME; ptp4l owns
    the PHC. Never let two loops steer the same clock.
-2. **Robust long servo.** The TM2000B throws ±500–700 ns spikes — use
+2. **Robust long servo.** The GPS grandmaster throws ±500–700 ns spikes — use
    median/Huber/step-rejection so a spike doesn't bias the frequency. chronyd already
    does outlier rejection; a custom servo must too.
 3. **Media-clock generator** = produce at GPS rate, stamp avtp/SYT in PHC time. `r`
@@ -121,7 +121,7 @@ follows it. Do not cache the delta and walk away.
 
 - **1PPS hardware frequency reference.** The GPS module's **1PPS is ±20 ns** (25×
   cleaner than its ±500 ns PTP). Feeding 1PPS to a Pi5 GPIO (Linux PPS API), or using
-  a **TM2500C** (10 MHz / 1PPS outputs), gives a far better frequency input and
+  a dedicated 10 MHz / 1PPS GPS reference, gives a far better frequency input and
   converges in seconds. Costs a wire; the UDP/NTP path works without it.
 - **Pi5 as the GPS-disciplined gPTP GM** (instead of free-running switch): if the
   Pi5's long-servo-smoothed GPS clock *is* the LAN gPTP GM, the avtp timebase becomes
@@ -145,7 +145,7 @@ by definition — and emit `r`, offset, `freq_uncertainty_ppb`, and (Kalman) dri
 | method | sliding-window OLS slope | recursive clock filter |
 | thermal-ramp lag | window/2 (~7.5 min @ 15 min) | **zero** (drift state absorbs it) |
 | acquisition | needs the full window | **~5 s** (large initial P) |
-| outlier rejection | none | innovation gate (drops TM2000B ±500 ns spikes) |
+| outlier rejection | none | innovation gate (drops GPS grandmaster ±500 ns spikes) |
 | uncertainty out | slope variance | covariance (both fill `freq_uncertainty_ppb`) |
 | GPS holdover | freezes last window avg | **coasts on freq + drift** |
 | code | ~80 lines | ~120 lines; scalar measurement ⇒ no matrix inversion |
@@ -171,16 +171,16 @@ the `robust_noisy_startup` regression test.
 `phc2sys` removed, PHC on a clean free-running local switch GM, CLOCK_REALTIME
 GPS-disciplined by chrony, all on `linuxptp4avb 0.3.2`:
 
-| Node | Site | PHC (local gPTP GM) | CLOCK_REALTIME (chrony ← TM2000B NTP) |
+| Node | Site | PHC (local gPTP GM) | CLOCK_REALTIME (chrony ← GPS grandmaster NTP) |
 |------|------|---------------------|----------------------------------------|
-| jdk01a | Campbell | the audio interface switch, ~20–30 ns | `192.168.1.90` |
-| jdk01d | Campbell | the audio interface switch, ~20–30 ns | `192.168.1.90` |
-| jdk01b | Saratoga | the audio interface, ~30 ns | `192.168.1.20` |
-| jdk01e | LA | Luminex, ~18 ns | `192.168.1.20` (see note) |
+| jdk01a | Campbell | AVB switch, ~20–30 ns | `192.168.1.90` |
+| jdk01d | Campbell | AVB switch, ~20–30 ns | `192.168.1.90` |
+| jdk01b | Saratoga | AVB switch, ~30 ns | `192.168.1.20` |
+| jdk01e | LA | AVB switch, ~18 ns | `192.168.1.20` (see note) |
 
-- Per-site TM2000B reconfigured off L2 802.1AS (UDP 1588 / NTP), so the local
+- Per-site GPS grandmaster reconfigured off L2 802.1AS (UDP 1588 / NTP), so the local
   switch free-runs as gPTP GM and ptp4l slaves the PHC to it (clean ~20–30 ns).
-- **LA note:** that TM2000B refused to leave its static `192.168.1.20` (DHCP and a
+- **LA note:** that GPS grandmaster refused to leave its static `192.168.1.20` (DHCP and a
   `192.168.4.x` static both failed to apply), so jdk01e reaches it **cross-subnet
   over the shared L2** via a persistent secondary address `192.168.1.250/24`
   (systemd unit `avb-la-secondary-ip.service`). Functional and reboot-persistent;
@@ -190,9 +190,9 @@ GPS-disciplined by chrony, all on `linuxptp4avb 0.3.2`:
 
 ### the DSP processor listener: GET_STREAM_INFO compliance fix
 
-While running the jdk01e → the DSP processor 440 Hz AAF talker test, the the DSP processor would
+While running the jdk01e → the DSP processor 440 Hz AAF talker test, the DSP processor would
 ACMP-connect (FAST_CONNECT, a saved connection) and then immediately self-
-disconnect. A `pcap` of the AECP exchange showed the the DSP processor querying
+disconnect. A `pcap` of the AECP exchange showed the DSP processor querying
 `GET_STREAM_INFO (0x000f)` on our talker's `STREAM_OUTPUT` right before the
 `Disconnect TX` — and our entity answering `status=1 (NOT_IMPLEMENTED)`. A Milan
 listener queries `GET_STREAM_INFO` to verify the talker's stream identity/format
@@ -208,7 +208,7 @@ Unit-tested in `nanoavb_entity_test`; deployed to jdk01e (transient unit
 
 ### the DSP processor talker -> jdk01e listener: ACMP connect + the multicast-join gap
 
-Connecting jdk01e's AAF *listener* sink to the the DSP processor's *talker* (the direction
+Connecting jdk01e's AAF *listener* sink to the DSP processor's *talker* (the direction
 that streams cleanly) is a controller-issued CONNECT_RX:
 
 ```
@@ -217,9 +217,9 @@ statusbar-acmp-controller --interface=eth0 --action=CONNECT \
   --listener-entity-id=70:b3:d5:ed:cf:00:00:02 --listener-uid=1
 ```
 
-jdk01e's listener then sends CONNECT_TX to the the DSP processor, declares MSRP Listener
-Ready, and the the DSP processor streams. jdk01e's AAF sink (`STREAM_INPUT[1]`, format
-`02 07 02 20 02 00 c0 00`) is byte-identical to the the DSP processor's talker outputs
+jdk01e's listener then sends CONNECT_TX to the DSP processor, declares MSRP Listener
+Ready, and the DSP processor streams. jdk01e's AAF sink (`STREAM_INPUT[1]`, format
+`02 07 02 20 02 00 c0 00`) is byte-identical to the DSP processor's talker outputs
 [0,1,2,3,7,8,9,10]. **Verified glitchless: AAF `rx_bad=0` over 2.6M packets /
 31.6M samples.**
 
@@ -252,15 +252,15 @@ entire media clock from `avtp_timestamp` (its CIP SYT is a constant placeholder)
 so the talker's ~±20–80 ns wake jitter became audible warble. After the fix,
 jdk01a's outgoing `avtp_timestamp` deltas are exactly **166669 ns (±1 ns)** (vs
 ±20–40 ns before), with GPS-rate pacing visible as a DBC histogram of mostly 12
-with some 11/13. Through the the audio interface **digital** passthrough the round-trip is
+with some 11/13. Through the audio interface **digital** passthrough the round-trip is
 **+51.8 dB SNR** — pristine to the 24-bit floor, no drops, no wander. (The earlier
-**analog** loopback wander was the the audio interface's own D/A→A/D converter clock, not our
+**analog** loopback wander was the audio interface's own D/A→A/D converter clock, not our
 timestamps.) Decoders for these captures live in
 [`pcap-analysis/`](pcap-analysis/).
 
 Sequencing the clean GM also matters: lock every endpoint to the local gPTP
 grandmaster (a switch free-running as GM is clean ~4–20 ns; a GPS unit relayed
 *through* a boundary-clock switch injects ~650–800 ns of correction jitter — take
-the TM2000B off 802.1AS, domain≠0 / priority 255, so the switch is GM).
+the GPS grandmaster off 802.1AS, domain≠0 / priority 255, so the switch is GM).
 
 - Next: GPS-anchored UDPTUN inter-site playout (consume the same `r`).

@@ -301,8 +301,8 @@ struct LocalCounter
 /// of these are observable, which is what lets us pinpoint where one stalled.
 struct HandshakeLegs
 {
-    bool relay_seen{false};                  ///< listener forwarded the *_TX_COMMAND to the talker
-    std::optional<uint8_t> talker_status{};  ///< talker's *_TX_RESPONSE status (nullopt = never answered)
+    bool relay_seen{false};                    ///< listener forwarded the *_TX_COMMAND to the talker
+    std::optional<uint8_t> talker_status{};    ///< talker's *_TX_RESPONSE status (nullopt = never answered)
     std::optional<uint8_t> listener_status{};  ///< listener's *_RX_RESPONSE status (nullopt = never answered)
 };
 

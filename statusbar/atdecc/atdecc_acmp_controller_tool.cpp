@@ -51,7 +51,7 @@ struct Config
     bool do_connect{true};
     // Full ACMP message type to send. RX-side (CONNECT_RX/DISCONNECT_RX) goes to
     // the listener (normal path); TX-side (CONNECT_TX/DISCONNECT_TX) goes DIRECTLY
-    // to the talker's ACMP SM -- used to force-reset a wedged talker (e.g. a the DSP processor
+    // to the talker's ACMP SM -- used to force-reset a wedged talker (e.g. a DSP processor
     // that stopped advertising its stream after the listener restarted).
     uint8_t message_type{ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND};
     Eui64 talker_entity_id{};

@@ -261,9 +261,8 @@ auto PtpTimeBridge::prepare_sleep(int64_t ptp_deadline_ns) noexcept -> StatusVal
     auto const mono_slope = FixedPointSlope::from_double(mr.rate);
     int64_t const mono_deadline = monotonic_to_ptp_precise(raw_deadline, mono_slope, mr.offset_ns);
 
-    return success(
-        SleepPlan{
-            .raw_deadline_ns = raw_deadline, .mono_deadline_ns = mono_deadline, .mono_per_raw_slope = mr.rate, .before = before});
+    return success(SleepPlan{
+        .raw_deadline_ns = raw_deadline, .mono_deadline_ns = mono_deadline, .mono_per_raw_slope = mr.rate, .before = before});
 }
 
 auto PtpTimeBridge::finalize_wake(int64_t wake_raw, TimeMapping const& before) noexcept -> StatusValue<int64_t>

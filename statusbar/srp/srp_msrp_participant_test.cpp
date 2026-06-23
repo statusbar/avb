@@ -424,7 +424,7 @@ TEST(msrp_participant, leaveall_pdu_redeclares_listener_and_omits_recordless_tal
 {
     // Regression: build_and_send_pdu attached the LeaveAll flag to EVERY attribute
     // type, so a type with no records (TalkerFailed on a pure talker) emitted a
-    // standalone empty LeaveAll vector. Mis-parsing peers (the the audio interface AVB switch,
+    // standalone empty LeaveAll vector. Mis-parsing peers (some AVB switches,
     // tshark) read a FirstValue for that 0-value vector and consumed the bytes of
     // the following Listener/Domain messages -- DESTROYING the re-declarations in
     // the same PDU. Losing the Domain re-declaration makes a bridge fail the
@@ -464,8 +464,8 @@ TEST(msrp_participant, received_leaveall_triggers_immediate_redeclare)
     // A received LeaveAll must make us re-declare SYNCHRONOUSLY in receive_pdu, not
     // wait the ~100 ms JoinTime. A bridge that issued the LeaveAll declares our
     // (leaving) attributes as Mt toward downstream listeners on its own ~100 ms
-    // join timer; a re-declare landing just after that lets the listener (a the DSP processor
-    // the DSP processor via a Luminex switch) see our talker blink out and drop the reservation,
+    // join timer; a re-declare landing just after that lets the listener (a DSP
+    // processor reached through an AVB switch) see our talker blink out and drop the reservation,
     // stopping E->the DSP processor forwarding. So delivering a peer LeaveAll must immediately
     // produce a re-declaration on our TX with NO intervening tick.
     MsrpParticipant a{test_msrp_config(), 0xa001};
@@ -513,7 +513,7 @@ TEST(msrp_participant, registered_listener_redeclared_only_when_sticky_enabled)
     // (cfea332) that registered Listener is NEVER re-emitted -- strict end-station
     // behaviour. With the workaround enabled it IS re-emitted on every
     // periodic/LeaveAll pass (the echo that keeps a bridge forwarding our stream
-    // to a the DSP processor). The Talker type is unaffected either way (no two-source
+    // to a downstream listener). The Talker type is unaffected either way (no two-source
     // conflict allowed). This test exercises both flag states.
     auto listener_echoed = [](bool sticky) -> bool {
         MsrpParticipant a{test_msrp_config(), 0xa001};
@@ -564,8 +564,8 @@ TEST(msrp_participant, suppress_leaveall_never_originates_leaveall)
     // Suppress-LeaveAll workaround (set_suppress_leaveall). By default the periodic
     // LeaveAll timer puts a LeaveAll on the wire (regression-tested elsewhere).
     // With the workaround enabled we must NEVER originate a LeaveAll -- we just
-    // keep re-asserting via the periodic timer (the pre-006bf73 sticky behaviour a
-    // Luminex bridge needs). We still re-declare our own talker continuously.
+    // keep re-asserting via the periodic timer (the earlier sticky behaviour an
+    // AVB bridge needs). We still re-declare our own talker continuously.
     auto run = [](bool suppress) -> std::pair<bool, bool> {  // {saw_leaveall, saw_own_talker}
         MsrpParticipant a{test_msrp_config(), 0xa001};
         a.set_suppress_leaveall(suppress);
@@ -663,7 +663,7 @@ TEST(msrp_participant, own_leaveall_does_not_drop_listener_reservation)
     // A's OWN periodic LeaveAll must NOT garbage-collect its registrar for a
     // peer-declared Listener it is actively serving. Driving the registrar to Lv
     // on our own TxLeaveAll (the spec's In + TxLeaveAll -> Lv) assumes the peer
-    // re-declares within LeaveTime; a non-compliant bridge (the the audio interface AVB switch
+    // re-declares within LeaveTime; a non-compliant bridge (an AVB switch that
     // re-declares only on ITS own LeaveAll, not in response to ours) does not, so
     // we would age the registration In -> Lv -> Mt every LeaveAll period and close
     // the talker gate -- freezing the stream. Only a RECEIVED LeaveAll/Leave

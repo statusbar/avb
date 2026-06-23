@@ -7,7 +7,7 @@ statusbar_add_module(
   SOURCES
   avtp_audio_stream_decoder.cpp
   DEPS
-  statusbar-avtp
+  statusbar::avtp
   statusbar::buffer
   statusbar::tsn
   TESTS
