@@ -12,7 +12,6 @@ namespace statusbar::nanoavb::supervisor_sm {
 
 void init_iface(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&init_iface>;
     if (ctx.callbacks.init_iface) {
         ctx.callbacks.init_iface(ctx, time);
     }
@@ -20,7 +19,6 @@ void init_iface(Context& ctx, TimePoint time)
 
 void start_protocols(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&start_protocols>;
     if (ctx.callbacks.start_protocols) {
         ctx.callbacks.start_protocols(ctx, time);
     }
@@ -28,7 +26,6 @@ void start_protocols(Context& ctx, TimePoint time)
 
 void enter_ready(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&enter_ready>;
     if (ctx.callbacks.enter_ready) {
         ctx.callbacks.enter_ready(ctx, time);
     }
@@ -36,7 +33,6 @@ void enter_ready(Context& ctx, TimePoint time)
 
 void degrade_stop_streams(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&degrade_stop_streams>;
     if (ctx.callbacks.degrade_stop_streams) {
         ctx.callbacks.degrade_stop_streams(ctx, time);
     }
@@ -44,7 +40,6 @@ void degrade_stop_streams(Context& ctx, TimePoint time)
 
 void stop_all(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&stop_all>;
     if (ctx.callbacks.stop_all) {
         ctx.callbacks.stop_all(ctx, time);
     }
@@ -52,7 +47,6 @@ void stop_all(Context& ctx, TimePoint time)
 
 void timeout_gptp(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&timeout_gptp>;
     if (ctx.callbacks.timeout_gptp) {
         ctx.callbacks.timeout_gptp(ctx, time);
     }

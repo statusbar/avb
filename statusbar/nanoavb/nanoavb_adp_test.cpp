@@ -4,6 +4,7 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/nanoavb/nanoavb_sm_test_support.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn.hpp"
@@ -592,17 +593,17 @@ namespace adp_adv = statusbar::nanoavb::adp_adv_sm;
 
 TEST(nanoavb_adp_adv_sm, uct_to_off_calls_init)
 {
-    adp_adv::Machine machine;
+    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
     adp_adv::Context ctx;
     machine.handle_event(ctx, adp_adv::Def::Event::UCT, TimePoint{});
     EXPECT_EQ(machine.current_state(), adp_adv::Def::State::Off);
-    EXPECT_EQ(ctx.last_action, "init");
+    EXPECT_EQ(machine.last_action, "init");
     EXPECT_FALSE(ctx.enabled);
 }
 
 TEST(nanoavb_adp_adv_sm, enable_calls_start_adp)
 {
-    adp_adv::Machine machine;
+    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
     adp_adv::Context ctx;
     bool called = false;
     ctx.callbacks.start_adp = [&](adp_adv::Context&, TimePoint) { called = true; };
@@ -615,7 +616,7 @@ TEST(nanoavb_adp_adv_sm, enable_calls_start_adp)
 
 TEST(nanoavb_adp_adv_sm, disable_calls_stop_adp)
 {
-    adp_adv::Machine machine;
+    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
     adp_adv::Context ctx;
     bool called = false;
     ctx.callbacks.start_adp = [](adp_adv::Context&, TimePoint) {};
@@ -630,7 +631,7 @@ TEST(nanoavb_adp_adv_sm, disable_calls_stop_adp)
 
 TEST(nanoavb_adp_adv_sm, tick_calls_maybe_announce)
 {
-    adp_adv::Machine machine;
+    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
     adp_adv::Context ctx;
     bool called = false;
     ctx.callbacks.start_adp = [](adp_adv::Context&, TimePoint) {};
@@ -644,7 +645,7 @@ TEST(nanoavb_adp_adv_sm, tick_calls_maybe_announce)
 
 TEST(nanoavb_adp_adv_sm, error_calls_stop_adp)
 {
-    adp_adv::Machine machine;
+    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
     adp_adv::Context ctx;
     bool called = false;
     ctx.callbacks.start_adp = [](adp_adv::Context&, TimePoint) {};
@@ -658,7 +659,7 @@ TEST(nanoavb_adp_adv_sm, error_calls_stop_adp)
 
 TEST(nanoavb_adp_adv_sm, full_cycle)
 {
-    adp_adv::Machine machine;
+    sm_test::Observed<adp_adv::Def, adp_adv::table> machine;
     adp_adv::Context ctx;
     int starts = 0, stops = 0;
     ctx.callbacks.start_adp = [&](adp_adv::Context&, TimePoint) { ++starts; };

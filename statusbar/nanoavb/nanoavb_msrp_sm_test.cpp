@@ -9,9 +9,11 @@
 
 #include "statusbar/nanoavb/nanoavb_msrp_listener_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_msrp_talker_sm.hpp"
+#include "statusbar/nanoavb/nanoavb_sm_test_support.hpp"
 #include "statusbar/test/test.hpp"
 
 using TimePoint = statusbar::sm::TimePoint;
+namespace sm_test = statusbar::nanoavb::sm_test;
 
 namespace listener = statusbar::nanoavb::msrp_listener_sm;
 namespace talker = statusbar::nanoavb::msrp_talker_sm;
@@ -59,13 +61,13 @@ void wire(talker::Context& ctx, Calls& c)
 
 TEST(nanoavb_msrp_listener_sm, initial_state_is_start)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     EXPECT_EQ(machine.current_state(), listener::Def::State::Start);
 }
 
 TEST(nanoavb_msrp_listener_sm, uct_advances_start_to_idle)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     Calls c{};
     wire(ctx, c);
@@ -75,14 +77,14 @@ TEST(nanoavb_msrp_listener_sm, uct_advances_start_to_idle)
 
     EXPECT_EQ(machine.current_state(), listener::Def::State::Idle);
     EXPECT_EQ(c.init, 1);
-    EXPECT_EQ(ctx.last_action, "init");
+    EXPECT_EQ(machine.last_action, "init");
     EXPECT_FALSE(ctx.reserved);
     EXPECT_FALSE(ctx.failed);
 }
 
 TEST(nanoavb_msrp_listener_sm, join_then_ready_declares_and_reserves)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     Calls c{};
     wire(ctx, c);
@@ -91,7 +93,7 @@ TEST(nanoavb_msrp_listener_sm, join_then_ready_declares_and_reserves)
     machine.handle_event(ctx, listener::Def::Event::StartJoin, TimePoint{});
     EXPECT_EQ(machine.current_state(), listener::Def::State::Joining);
     EXPECT_EQ(c.declare, 1);  // ListenerReady declared
-    EXPECT_EQ(ctx.last_action, "msrp_listener_ready");
+    EXPECT_EQ(machine.last_action, "msrp_listener_ready");
 
     machine.handle_event(ctx, listener::Def::Event::Ready, TimePoint{});
     EXPECT_EQ(machine.current_state(), listener::Def::State::Ready);
@@ -102,7 +104,7 @@ TEST(nanoavb_msrp_listener_sm, join_then_ready_declares_and_reserves)
 
 TEST(nanoavb_msrp_listener_sm, joining_failed_sets_failed_flag)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     Calls c{};
     wire(ctx, c);
@@ -119,7 +121,7 @@ TEST(nanoavb_msrp_listener_sm, joining_failed_sets_failed_flag)
 
 TEST(nanoavb_msrp_listener_sm, ready_lost_re_declares)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     Calls c{};
     wire(ctx, c);
@@ -136,7 +138,7 @@ TEST(nanoavb_msrp_listener_sm, ready_lost_re_declares)
 
 TEST(nanoavb_msrp_listener_sm, ready_stopjoin_leaves_to_idle)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     Calls c{};
     wire(ctx, c);
@@ -157,7 +159,7 @@ TEST(nanoavb_msrp_listener_sm, ready_stopjoin_leaves_to_idle)
 
 TEST(nanoavb_msrp_listener_sm, failed_can_stopjoin_to_leaving)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     Calls c{};
     wire(ctx, c);
@@ -173,7 +175,7 @@ TEST(nanoavb_msrp_listener_sm, failed_can_stopjoin_to_leaving)
 
 TEST(nanoavb_msrp_listener_sm, undefined_transition_is_ignored)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     Calls c{};
     wire(ctx, c);
@@ -193,13 +195,13 @@ TEST(nanoavb_msrp_listener_sm, undefined_transition_is_ignored)
 
 TEST(nanoavb_msrp_talker_sm, initial_state_is_start)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     EXPECT_EQ(machine.current_state(), talker::Def::State::Start);
 }
 
 TEST(nanoavb_msrp_talker_sm, advertise_then_ready_declares_and_reserves)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     Calls c{};
     wire(ctx, c);
@@ -211,7 +213,7 @@ TEST(nanoavb_msrp_talker_sm, advertise_then_ready_declares_and_reserves)
     machine.handle_event(ctx, talker::Def::Event::StartAdvertise, TimePoint{});
     EXPECT_EQ(machine.current_state(), talker::Def::State::Advertising);
     EXPECT_EQ(c.declare, 1);  // TalkerAdvertise declared
-    EXPECT_EQ(ctx.last_action, "msrp_talker_advertise");
+    EXPECT_EQ(machine.last_action, "msrp_talker_advertise");
 
     machine.handle_event(ctx, talker::Def::Event::Ready, TimePoint{});
     EXPECT_EQ(machine.current_state(), talker::Def::State::Ready);
@@ -221,7 +223,7 @@ TEST(nanoavb_msrp_talker_sm, advertise_then_ready_declares_and_reserves)
 
 TEST(nanoavb_msrp_talker_sm, advertising_failed_sets_failed_flag)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     Calls c{};
     wire(ctx, c);
@@ -238,7 +240,7 @@ TEST(nanoavb_msrp_talker_sm, advertising_failed_sets_failed_flag)
 
 TEST(nanoavb_msrp_talker_sm, ready_lost_re_declares)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     Calls c{};
     wire(ctx, c);
@@ -254,7 +256,7 @@ TEST(nanoavb_msrp_talker_sm, ready_lost_re_declares)
 
 TEST(nanoavb_msrp_talker_sm, ready_stopadvertise_withdraws_to_idle)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     Calls c{};
     wire(ctx, c);
@@ -275,7 +277,7 @@ TEST(nanoavb_msrp_talker_sm, ready_stopadvertise_withdraws_to_idle)
 
 TEST(nanoavb_msrp_talker_sm, undefined_transition_is_ignored)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     Calls c{};
     wire(ctx, c);

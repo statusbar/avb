@@ -29,7 +29,6 @@ struct Context
 {
     Callbacks callbacks{};
     bool enabled{false};
-    std::string_view last_action{};
 };
 
 struct Def
@@ -55,27 +54,23 @@ struct Def
 
 inline void init(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&init>;
     ctx.enabled = false;
 }
 
 inline void start_adp(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&start_adp>;
     ctx.enabled = true; /* adp_start() */
     ctx.callbacks.start_adp(ctx, time);
 }
 
 inline void stop_adp(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&stop_adp>;
     ctx.enabled = false; /* adp_stop() */
     ctx.callbacks.stop_adp(ctx, time);
 }
 
 inline void maybe_announce(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&maybe_announce>; /* periodic */
     ctx.callbacks.maybe_announce(ctx, time);
 }
 

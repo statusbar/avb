@@ -35,7 +35,6 @@ struct Context
     bool gptp_locked{false};
 
     // diagnostics
-    std::string_view last_action{};
 };
 
 // Lifecycle model: ADP/AECP/ACMP are independent and run from link-up

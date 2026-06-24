@@ -12,7 +12,6 @@ namespace statusbar::nanoavb::msrp_talker_sm {
 
 void init(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&init>;
     ctx.reserved = false;
     ctx.failed = false;
     ctx.callbacks.init(ctx, time);
@@ -20,7 +19,6 @@ void init(Context& ctx, TimePoint time)
 
 void mark_ready(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&mark_ready>;
     ctx.reserved = true;
     ctx.failed = false;
     ctx.callbacks.mark_ready(ctx, time);
@@ -28,7 +26,6 @@ void mark_ready(Context& ctx, TimePoint time)
 
 void mark_failed(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&mark_failed>;
     ctx.reserved = false;
     ctx.failed = true;
     ctx.callbacks.mark_failed(ctx, time);
@@ -36,14 +33,12 @@ void mark_failed(Context& ctx, TimePoint time)
 
 void msrp_talker_withdraw(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&msrp_talker_withdraw>; /* withdraw talker attr */
     ctx.reserved = false;
     ctx.callbacks.msrp_talker_withdraw(ctx, time);
 }
 
 void mark_idle(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&mark_idle>;
     ctx.reserved = false;
     ctx.failed = false;
     ctx.callbacks.mark_idle(ctx, time);

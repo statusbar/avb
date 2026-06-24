@@ -30,7 +30,6 @@ struct Context
     Callbacks callbacks{};
     bool as_capable{false};
     bool time_locked{false};
-    std::string_view last_action{};
 };
 
 struct Def
@@ -57,7 +56,6 @@ struct Def
 
 inline void init(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&init>;
     ctx.callbacks.init(ctx, time);
 }
 

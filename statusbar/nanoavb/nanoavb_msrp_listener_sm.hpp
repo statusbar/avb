@@ -32,7 +32,6 @@ struct Context
     Callbacks callbacks;
     bool reserved{false};
     bool failed{false};
-    std::string_view last_action;
 };
 
 struct Def
@@ -65,7 +64,6 @@ void init(Context& ctx, TimePoint time);
 
 inline void msrp_listener_ready(Context& ctx, TimePoint time)
 {
-    ctx.last_action = function_name<&msrp_listener_ready>; /* register ListenerReady */
     ctx.callbacks.msrp_listener_ready(ctx, time);
 }
 

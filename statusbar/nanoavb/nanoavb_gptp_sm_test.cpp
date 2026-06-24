@@ -3,6 +3,7 @@
 
 #include "statusbar/nanoavb/nanoavb_gptp_sm.hpp"
 
+#include "statusbar/nanoavb/nanoavb_sm_test_support.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -10,6 +11,7 @@
 #include <string>
 
 using TimePoint = statusbar::sm::TimePoint;
+namespace sm_test = statusbar::nanoavb::sm_test;
 
 namespace gptp = statusbar::nanoavb::gptp_sm;
 
@@ -30,7 +32,7 @@ static auto make_ctx() -> gptp::Context
 
 TEST(nanoavb_gptp_sm, initial_state)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Start);
 }
 
@@ -40,7 +42,7 @@ TEST(nanoavb_gptp_sm, initial_state)
 
 TEST(nanoavb_gptp_sm, uct_to_unlocked)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
     bool init_called = false;
     ctx.callbacks.init = [&](gptp::Context&, TimePoint) { init_called = true; };
@@ -49,7 +51,7 @@ TEST(nanoavb_gptp_sm, uct_to_unlocked)
 
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Unlocked);
     EXPECT_TRUE(init_called);
-    EXPECT_EQ(ctx.last_action, "init");
+    EXPECT_EQ(machine.last_action, "init");
 }
 
 //
@@ -58,7 +60,7 @@ TEST(nanoavb_gptp_sm, uct_to_unlocked)
 
 TEST(nanoavb_gptp_sm, as_capable_up_to_acquiring)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
     bool servo_called = false;
     ctx.callbacks.start_servo = [&](gptp::Context&, TimePoint) { servo_called = true; };
@@ -70,7 +72,7 @@ TEST(nanoavb_gptp_sm, as_capable_up_to_acquiring)
 
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Acquiring);
     EXPECT_TRUE(servo_called);
-    EXPECT_EQ(ctx.last_action, "start_servo");
+    EXPECT_EQ(machine.last_action, "start_servo");
     EXPECT_FALSE(ctx.time_locked);
 }
 
@@ -80,7 +82,7 @@ TEST(nanoavb_gptp_sm, as_capable_up_to_acquiring)
 
 TEST(nanoavb_gptp_sm, locked_stable_to_locked)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
     bool locked_called = false;
     ctx.callbacks.report_locked = [&](gptp::Context&, TimePoint) { locked_called = true; };
@@ -93,7 +95,7 @@ TEST(nanoavb_gptp_sm, locked_stable_to_locked)
 
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Locked);
     EXPECT_TRUE(locked_called);
-    EXPECT_EQ(ctx.last_action, "report_locked");
+    EXPECT_EQ(machine.last_action, "report_locked");
     EXPECT_TRUE(ctx.time_locked);
 }
 
@@ -103,7 +105,7 @@ TEST(nanoavb_gptp_sm, locked_stable_to_locked)
 
 TEST(nanoavb_gptp_sm, as_capable_down_from_acquiring)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
     bool unlocked_called = false;
     ctx.callbacks.report_unlocked = [&](gptp::Context&, TimePoint) { unlocked_called = true; };
@@ -116,7 +118,7 @@ TEST(nanoavb_gptp_sm, as_capable_down_from_acquiring)
 
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Unlocked);
     EXPECT_TRUE(unlocked_called);
-    EXPECT_EQ(ctx.last_action, "report_unlocked");
+    EXPECT_EQ(machine.last_action, "report_unlocked");
     EXPECT_FALSE(ctx.time_locked);
 }
 
@@ -126,7 +128,7 @@ TEST(nanoavb_gptp_sm, as_capable_down_from_acquiring)
 
 TEST(nanoavb_gptp_sm, as_capable_down_from_locked)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
     bool unlocked_called = false;
     ctx.callbacks.report_unlocked = [&](gptp::Context&, TimePoint) { unlocked_called = true; };
@@ -142,7 +144,7 @@ TEST(nanoavb_gptp_sm, as_capable_down_from_locked)
 
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Unlocked);
     EXPECT_TRUE(unlocked_called);
-    EXPECT_EQ(ctx.last_action, "report_unlocked");
+    EXPECT_EQ(machine.last_action, "report_unlocked");
     EXPECT_FALSE(ctx.time_locked);
 }
 
@@ -152,7 +154,7 @@ TEST(nanoavb_gptp_sm, as_capable_down_from_locked)
 
 TEST(nanoavb_gptp_sm, lock_lost_to_acquiring)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
     int servo_count = 0;
     ctx.callbacks.start_servo = [&](gptp::Context&, TimePoint) { ++servo_count; };
@@ -168,7 +170,7 @@ TEST(nanoavb_gptp_sm, lock_lost_to_acquiring)
 
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Acquiring);
     EXPECT_EQ(servo_count, 2);
-    EXPECT_EQ(ctx.last_action, "start_servo");
+    EXPECT_EQ(machine.last_action, "start_servo");
     EXPECT_FALSE(ctx.time_locked);
 }
 
@@ -178,7 +180,7 @@ TEST(nanoavb_gptp_sm, lock_lost_to_acquiring)
 
 TEST(nanoavb_gptp_sm, full_lock_cycle)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
 
     // Start -> Unlocked (UCT)
@@ -217,70 +219,70 @@ TEST(nanoavb_gptp_sm, full_lock_cycle)
 
 TEST(nanoavb_gptp_sm, unexpected_event_in_unlocked)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
 
     machine.handle_event(ctx, gptp::Def::Event::UCT, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Unlocked);
-    ctx.last_action = "";
+    machine.last_action = "";
 
     // LockedStable is not valid in Unlocked
     machine.handle_event(ctx, gptp::Def::Event::LockedStable, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Unlocked);
-    EXPECT_EQ(ctx.last_action, "");
+    EXPECT_EQ(machine.last_action, "");
 
     // LockLost is not valid in Unlocked
     machine.handle_event(ctx, gptp::Def::Event::LockLost, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Unlocked);
-    EXPECT_EQ(ctx.last_action, "");
+    EXPECT_EQ(machine.last_action, "");
 
     // AsCapableDown is not valid in Unlocked
     machine.handle_event(ctx, gptp::Def::Event::AsCapableDown, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Unlocked);
-    EXPECT_EQ(ctx.last_action, "");
+    EXPECT_EQ(machine.last_action, "");
 }
 
 TEST(nanoavb_gptp_sm, unexpected_event_in_acquiring)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
 
     machine.handle_event(ctx, gptp::Def::Event::UCT, TimePoint{});
     machine.handle_event(ctx, gptp::Def::Event::AsCapableUp, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Acquiring);
-    ctx.last_action = "";
+    machine.last_action = "";
 
     // AsCapableUp is not valid in Acquiring (already acquiring)
     machine.handle_event(ctx, gptp::Def::Event::AsCapableUp, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Acquiring);
-    EXPECT_EQ(ctx.last_action, "");
+    EXPECT_EQ(machine.last_action, "");
 
     // LockLost is not valid in Acquiring
     machine.handle_event(ctx, gptp::Def::Event::LockLost, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Acquiring);
-    EXPECT_EQ(ctx.last_action, "");
+    EXPECT_EQ(machine.last_action, "");
 }
 
 TEST(nanoavb_gptp_sm, unexpected_event_in_locked)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
 
     machine.handle_event(ctx, gptp::Def::Event::UCT, TimePoint{});
     machine.handle_event(ctx, gptp::Def::Event::AsCapableUp, TimePoint{});
     machine.handle_event(ctx, gptp::Def::Event::LockedStable, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Locked);
-    ctx.last_action = "";
+    machine.last_action = "";
 
     // AsCapableUp is not valid in Locked
     machine.handle_event(ctx, gptp::Def::Event::AsCapableUp, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Locked);
-    EXPECT_EQ(ctx.last_action, "");
+    EXPECT_EQ(machine.last_action, "");
 
     // LockedStable is not valid in Locked (already locked)
     machine.handle_event(ctx, gptp::Def::Event::LockedStable, TimePoint{});
     EXPECT_EQ(machine.current_state(), gptp::Def::State::Locked);
-    EXPECT_EQ(ctx.last_action, "");
+    EXPECT_EQ(machine.last_action, "");
 }
 
 //
@@ -289,7 +291,7 @@ TEST(nanoavb_gptp_sm, unexpected_event_in_locked)
 
 TEST(nanoavb_gptp_sm, repeated_lock_lost)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
     int servo_count = 0;
     ctx.callbacks.start_servo = [&](gptp::Context&, TimePoint) { ++servo_count; };
@@ -377,7 +379,7 @@ TEST(nanoavb_gptp_sm, table_all_transitions_valid)
 
 TEST(nanoavb_gptp_sm, reset_returns_to_start)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
 
     machine.handle_event(ctx, gptp::Def::Event::UCT, TimePoint{});
@@ -394,7 +396,7 @@ TEST(nanoavb_gptp_sm, reset_returns_to_start)
 
 TEST(nanoavb_gptp_sm, context_time_locked_tracks_state)
 {
-    gptp::Machine machine;
+    sm_test::Observed<gptp::Def, gptp::table> machine;
     auto ctx = make_ctx();
 
     EXPECT_FALSE(ctx.time_locked);

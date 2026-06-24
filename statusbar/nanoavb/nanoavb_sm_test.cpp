@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/nanoavb/nanoavb_sm_test_support.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -11,6 +12,7 @@
 #include <string>
 
 using TimePoint = statusbar::sm::TimePoint;
+namespace sm_test = statusbar::nanoavb::sm_test;
 
 //
 // Supervisor State Machine Tests
@@ -19,7 +21,7 @@ namespace supervisor = statusbar::nanoavb::supervisor_sm;
 
 TEST(nanoavb_supervisor_sm, initial_state)
 {
-    supervisor::Machine machine;
+    sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
 
     // Initial state is Start
@@ -28,7 +30,7 @@ TEST(nanoavb_supervisor_sm, initial_state)
 
 TEST(nanoavb_supervisor_sm, uct_to_down)
 {
-    supervisor::Machine machine;
+    sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
     bool init_called = false;
     ctx.callbacks.init_iface = [&](supervisor::Context&, TimePoint) { init_called = true; };
@@ -38,12 +40,12 @@ TEST(nanoavb_supervisor_sm, uct_to_down)
 
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Down);
     EXPECT_TRUE(init_called);
-    EXPECT_EQ(ctx.last_action, "init_iface");
+    EXPECT_EQ(machine.last_action, "init_iface");
 }
 
 TEST(nanoavb_supervisor_sm, link_up_to_init)
 {
-    supervisor::Machine machine;
+    sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
     bool start_called = false;
     ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
@@ -58,12 +60,12 @@ TEST(nanoavb_supervisor_sm, link_up_to_init)
 
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Init);
     EXPECT_TRUE(start_called);
-    EXPECT_EQ(ctx.last_action, "start_protocols");
+    EXPECT_EQ(machine.last_action, "start_protocols");
 }
 
 TEST(nanoavb_supervisor_sm, gptp_locked_to_ready)
 {
-    supervisor::Machine machine;
+    sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
     bool ready_called = false;
     ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
@@ -77,12 +79,12 @@ TEST(nanoavb_supervisor_sm, gptp_locked_to_ready)
 
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Ready);
     EXPECT_TRUE(ready_called);
-    EXPECT_EQ(ctx.last_action, "enter_ready");
+    EXPECT_EQ(machine.last_action, "enter_ready");
 }
 
 TEST(nanoavb_supervisor_sm, gptp_lost_then_relock_is_dynamic)
 {
-    supervisor::Machine machine;
+    sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
     int ready_count = 0;
     int degrade_count = 0;
@@ -99,7 +101,7 @@ TEST(nanoavb_supervisor_sm, gptp_lost_then_relock_is_dynamic)
     // gPTP lost -> Degraded (tear down SRP + streams)
     machine.handle_event(ctx, supervisor::Def::Event::GptpLost, TimePoint{});
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Degraded);
-    EXPECT_EQ(ctx.last_action, "degrade_stop_streams");
+    EXPECT_EQ(machine.last_action, "degrade_stop_streams");
 
     // gPTP re-locked -> Ready again (dynamic)
     machine.handle_event(ctx, supervisor::Def::Event::GptpLocked, TimePoint{});
@@ -111,7 +113,7 @@ TEST(nanoavb_supervisor_sm, gptp_lost_then_relock_is_dynamic)
 
 TEST(nanoavb_supervisor_sm, timeout_in_init_goes_to_down)
 {
-    supervisor::Machine machine;
+    sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
     bool timeout_gptp_called = false;
     bool stop_all_called = false;
@@ -131,12 +133,12 @@ TEST(nanoavb_supervisor_sm, timeout_in_init_goes_to_down)
     EXPECT_EQ(machine.current_state(), supervisor::Def::State::Down);
     EXPECT_TRUE(timeout_gptp_called);
     EXPECT_TRUE(stop_all_called);
-    EXPECT_EQ(ctx.last_action, "timeout_gptp");
+    EXPECT_EQ(machine.last_action, "timeout_gptp");
 }
 
 TEST(nanoavb_supervisor_sm, link_down_from_any_state_to_down)
 {
-    supervisor::Machine machine;
+    sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
     int stop_count = 0;
     ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
@@ -159,7 +161,7 @@ TEST(nanoavb_supervisor_sm, link_down_from_any_state_to_down)
 TEST(nanoavb_supervisor_sm, null_callbacks_no_crash)
 {
     // All callbacks left as empty std::function — must not throw bad_function_call
-    supervisor::Machine machine;
+    sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
 
     // UCT -> Down (calls init_iface with null callback)
@@ -177,7 +179,7 @@ TEST(nanoavb_supervisor_sm, null_callbacks_no_crash)
 
 TEST(nanoavb_supervisor_sm, gptp_lost_null_callbacks)
 {
-    supervisor::Machine machine;
+    sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
 
     // Only set the callbacks needed to reach Ready; leave degrade_stop_streams null.
@@ -202,7 +204,7 @@ namespace listener = statusbar::nanoavb::listener_engine_sm;
 
 TEST(nanoavb_listener_sm, initial_state)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
 
     EXPECT_EQ(machine.current_state(), listener::Def::State::Start);
@@ -210,7 +212,7 @@ TEST(nanoavb_listener_sm, initial_state)
 
 TEST(nanoavb_listener_sm, uct_to_off)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     bool init_called = false;
     ctx.callbacks.init = [&](listener::Context&, TimePoint) { init_called = true; };
@@ -219,12 +221,12 @@ TEST(nanoavb_listener_sm, uct_to_off)
 
     EXPECT_EQ(machine.current_state(), listener::Def::State::Off);
     EXPECT_TRUE(init_called);
-    EXPECT_EQ(ctx.last_action, "init");
+    EXPECT_EQ(machine.last_action, "init");
 }
 
 TEST(nanoavb_listener_sm, gate_listen_to_listening)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     bool filter_called = false;
     ctx.callbacks.init = [](listener::Context&, TimePoint) {};
@@ -235,12 +237,12 @@ TEST(nanoavb_listener_sm, gate_listen_to_listening)
 
     EXPECT_EQ(machine.current_state(), listener::Def::State::Listening);
     EXPECT_TRUE(filter_called);
-    EXPECT_EQ(ctx.last_action, "enable_rx_filter");
+    EXPECT_EQ(machine.last_action, "enable_rx_filter");
 }
 
 TEST(nanoavb_listener_sm, gate_stop_from_listening_to_off)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     bool stop_called = false;
     ctx.callbacks.init = [](listener::Context&, TimePoint) {};
@@ -257,12 +259,12 @@ TEST(nanoavb_listener_sm, gate_stop_from_listening_to_off)
 
     EXPECT_EQ(machine.current_state(), listener::Def::State::Off);
     EXPECT_TRUE(stop_called);
-    EXPECT_EQ(ctx.last_action, "stop_all");
+    EXPECT_EQ(machine.last_action, "stop_all");
 }
 
 TEST(nanoavb_listener_sm, gate_stop_from_syncing_to_off)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     bool stop_called = false;
     ctx.callbacks.init = [](listener::Context&, TimePoint) {};
@@ -281,12 +283,12 @@ TEST(nanoavb_listener_sm, gate_stop_from_syncing_to_off)
 
     EXPECT_EQ(machine.current_state(), listener::Def::State::Off);
     EXPECT_TRUE(stop_called);
-    EXPECT_EQ(ctx.last_action, "stop_all");
+    EXPECT_EQ(machine.last_action, "stop_all");
 }
 
 TEST(nanoavb_listener_sm, packet_gap_in_syncing_resyncs)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     int resync_count = 0;
     ctx.callbacks.init = [](listener::Context&, TimePoint) {};
@@ -305,12 +307,12 @@ TEST(nanoavb_listener_sm, packet_gap_in_syncing_resyncs)
 
     EXPECT_EQ(machine.current_state(), listener::Def::State::Syncing);
     EXPECT_EQ(resync_count, 1);
-    EXPECT_EQ(ctx.last_action, "resync");
+    EXPECT_EQ(machine.last_action, "resync");
 }
 
 TEST(nanoavb_listener_sm, packet_gap_in_muted_resyncs)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     int resync_count = 0;
     ctx.callbacks.init = [](listener::Context&, TimePoint) {};
@@ -333,12 +335,12 @@ TEST(nanoavb_listener_sm, packet_gap_in_muted_resyncs)
 
     EXPECT_EQ(machine.current_state(), listener::Def::State::Syncing);
     EXPECT_EQ(resync_count, 1);
-    EXPECT_EQ(ctx.last_action, "resync");
+    EXPECT_EQ(machine.last_action, "resync");
 }
 
 TEST(nanoavb_listener_sm, full_playback_cycle)
 {
-    listener::Machine machine;
+    sm_test::Observed<listener::Def, listener::table> machine;
     listener::Context ctx;
     ctx.callbacks.init = [](listener::Context&, TimePoint) {};
     ctx.callbacks.enable_rx_filter = [](listener::Context&, TimePoint) {};
@@ -382,7 +384,7 @@ TEST(nanoavb_acmp_listener_sm, link_down_while_disconnecting)
     // Regression test for issue 57d859f: Disconnecting state has no LinkDown
     // handler, causing the SM to get stuck if link goes down while waiting
     // for DisconnectOk.
-    acmp_listener::Machine machine;
+    sm_test::Observed<acmp_listener::Def, acmp_listener::table> machine;
     acmp_listener::Context ctx;
     ctx.callbacks.init = [](acmp_listener::Context&, TimePoint) {};
     ctx.callbacks.send_connect_tx = [](acmp_listener::Context&, TimePoint) {};
@@ -413,7 +415,7 @@ namespace mvrp = statusbar::nanoavb::mvrp_sm;
 
 TEST(nanoavb_mvrp_sm, initial_state)
 {
-    mvrp::Machine machine;
+    sm_test::Observed<mvrp::Def, mvrp::table> machine;
     mvrp::Context ctx;
 
     EXPECT_EQ(machine.current_state(), mvrp::Def::State::Start);
@@ -421,7 +423,7 @@ TEST(nanoavb_mvrp_sm, initial_state)
 
 TEST(nanoavb_mvrp_sm, uct_to_not_joined)
 {
-    mvrp::Machine machine;
+    sm_test::Observed<mvrp::Def, mvrp::table> machine;
     mvrp::Context ctx;
     bool init_called = false;
     ctx.callbacks.init = [&](mvrp::Context&, TimePoint) { init_called = true; };
@@ -431,12 +433,12 @@ TEST(nanoavb_mvrp_sm, uct_to_not_joined)
     EXPECT_EQ(machine.current_state(), mvrp::Def::State::NotJoined);
     EXPECT_TRUE(init_called);
     EXPECT_FALSE(ctx.joined);
-    EXPECT_EQ(ctx.last_action, "init");
+    EXPECT_EQ(machine.last_action, "init");
 }
 
 TEST(nanoavb_mvrp_sm, acquire_to_joining)
 {
-    mvrp::Machine machine;
+    sm_test::Observed<mvrp::Def, mvrp::table> machine;
     mvrp::Context ctx;
     bool join_called = false;
     ctx.callbacks.init = [](mvrp::Context&, TimePoint) {};
@@ -447,12 +449,12 @@ TEST(nanoavb_mvrp_sm, acquire_to_joining)
 
     EXPECT_EQ(machine.current_state(), mvrp::Def::State::Joining);
     EXPECT_TRUE(join_called);
-    EXPECT_EQ(ctx.last_action, "send_join");
+    EXPECT_EQ(machine.last_action, "send_join");
 }
 
 TEST(nanoavb_mvrp_sm, join_ok_to_joined)
 {
-    mvrp::Machine machine;
+    sm_test::Observed<mvrp::Def, mvrp::table> machine;
     mvrp::Context ctx;
     bool mark_joined_called = false;
     ctx.callbacks.init = [](mvrp::Context&, TimePoint) {};
@@ -466,12 +468,12 @@ TEST(nanoavb_mvrp_sm, join_ok_to_joined)
     EXPECT_EQ(machine.current_state(), mvrp::Def::State::Joined);
     EXPECT_TRUE(mark_joined_called);
     EXPECT_TRUE(ctx.joined);
-    EXPECT_EQ(ctx.last_action, "mark_joined");
+    EXPECT_EQ(machine.last_action, "mark_joined");
 }
 
 TEST(nanoavb_mvrp_sm, join_fail_to_error)
 {
-    mvrp::Machine machine;
+    sm_test::Observed<mvrp::Def, mvrp::table> machine;
     mvrp::Context ctx;
     bool mark_error_called = false;
     ctx.callbacks.init = [](mvrp::Context&, TimePoint) {};
@@ -485,12 +487,12 @@ TEST(nanoavb_mvrp_sm, join_fail_to_error)
     EXPECT_EQ(machine.current_state(), mvrp::Def::State::Error);
     EXPECT_TRUE(mark_error_called);
     EXPECT_FALSE(ctx.joined);
-    EXPECT_EQ(ctx.last_action, "mark_error");
+    EXPECT_EQ(machine.last_action, "mark_error");
 }
 
 TEST(nanoavb_mvrp_sm, leave_fail_to_error)
 {
-    mvrp::Machine machine;
+    sm_test::Observed<mvrp::Def, mvrp::table> machine;
     mvrp::Context ctx;
     bool mark_error_called = false;
     ctx.callbacks.init = [](mvrp::Context&, TimePoint) {};
@@ -511,12 +513,12 @@ TEST(nanoavb_mvrp_sm, leave_fail_to_error)
     EXPECT_EQ(machine.current_state(), mvrp::Def::State::Error);
     EXPECT_TRUE(mark_error_called);
     EXPECT_FALSE(ctx.joined);
-    EXPECT_EQ(ctx.last_action, "mark_error");
+    EXPECT_EQ(machine.last_action, "mark_error");
 }
 
 TEST(nanoavb_mvrp_sm, reset_from_error_to_not_joined)
 {
-    mvrp::Machine machine;
+    sm_test::Observed<mvrp::Def, mvrp::table> machine;
     mvrp::Context ctx;
     bool reset_called = false;
     ctx.callbacks.init = [](mvrp::Context&, TimePoint) {};
@@ -537,12 +539,12 @@ TEST(nanoavb_mvrp_sm, reset_from_error_to_not_joined)
     EXPECT_TRUE(reset_called);
     EXPECT_FALSE(ctx.joined);
     EXPECT_EQ(ctx.refcount, 0U);
-    EXPECT_EQ(ctx.last_action, "reset");
+    EXPECT_EQ(machine.last_action, "reset");
 }
 
 TEST(nanoavb_mvrp_sm, full_join_leave_cycle)
 {
-    mvrp::Machine machine;
+    sm_test::Observed<mvrp::Def, mvrp::table> machine;
     mvrp::Context ctx;
     ctx.callbacks.init = [](mvrp::Context&, TimePoint) {};
     ctx.callbacks.send_join = [](mvrp::Context&, TimePoint) {};
@@ -576,26 +578,26 @@ TEST(nanoavb_mvrp_sm, full_join_leave_cycle)
 // Supervisor SM — degrade_stop_streams direct tests
 // ===========================================================================
 
-TEST(nanoavb_supervisor_degrade, degrade_stop_streams_sets_last_action)
+TEST(nanoavb_supervisor_degrade, degrade_stop_streams_invokes_callback)
 {
     supervisor::Context ctx;
     bool called = false;
     ctx.callbacks.degrade_stop_streams = [&](supervisor::Context&, TimePoint) { called = true; };
     statusbar::nanoavb::supervisor_sm::degrade_stop_streams(ctx, TimePoint{});
-    EXPECT_EQ(ctx.last_action, "degrade_stop_streams");
     EXPECT_TRUE(called);
 }
 
 TEST(nanoavb_supervisor_degrade, null_callback_no_crash)
 {
     supervisor::Context ctx;
+    // No callback installed: the action must guard against the empty callback
+    // and return without crashing.
     statusbar::nanoavb::supervisor_sm::degrade_stop_streams(ctx, TimePoint{});
-    EXPECT_EQ(ctx.last_action, "degrade_stop_streams");
 }
 
 TEST(nanoavb_supervisor_degrade, gptp_lost_ready_triggers_degrade)
 {
-    supervisor::Machine machine;
+    sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
     bool called = false;
     ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
@@ -613,7 +615,7 @@ TEST(nanoavb_supervisor_degrade, gptp_lost_ready_triggers_degrade)
 
 TEST(nanoavb_supervisor_degrade, degraded_recovers_on_gptp_lock)
 {
-    supervisor::Machine machine;
+    sm_test::Observed<supervisor::Def, supervisor::table> machine;
     supervisor::Context ctx;
     ctx.callbacks.init_iface = [](supervisor::Context&, TimePoint) {};
     ctx.callbacks.start_protocols = [](supervisor::Context&, TimePoint) {};
@@ -639,38 +641,38 @@ namespace talker = statusbar::nanoavb::talker_engine_sm;
 
 TEST(nanoavb_talker_engine_sm, initial_state)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     EXPECT_EQ(machine.current_state(), talker::Def::State::Start);
 }
 
 TEST(nanoavb_talker_engine_sm, uct_to_off)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     bool called = false;
     ctx.callbacks.init = [&](talker::Context&, TimePoint) { called = true; };
     machine.handle_event(ctx, talker::Def::Event::UCT, TimePoint{});
     EXPECT_EQ(machine.current_state(), talker::Def::State::Off);
     EXPECT_TRUE(called);
-    EXPECT_EQ(ctx.last_action, "init");
+    EXPECT_EQ(machine.last_action, "init");
 }
 
 TEST(nanoavb_talker_engine_sm, audio_ready_to_priming)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     ctx.callbacks.init = [](talker::Context&, TimePoint) {};
     ctx.callbacks.start_audio_source = [](talker::Context&, TimePoint) {};
     machine.handle_event(ctx, talker::Def::Event::UCT, TimePoint{});
     machine.handle_event(ctx, talker::Def::Event::AudioReady, TimePoint{});
     EXPECT_EQ(machine.current_state(), talker::Def::State::Priming);
-    EXPECT_EQ(ctx.last_action, "start_audio_source");
+    EXPECT_EQ(machine.last_action, "start_audio_source");
 }
 
 TEST(nanoavb_talker_engine_sm, primed_to_armed)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     ctx.callbacks.init = [](talker::Context&, TimePoint) {};
     ctx.callbacks.start_audio_source = [](talker::Context&, TimePoint) {};
@@ -679,12 +681,12 @@ TEST(nanoavb_talker_engine_sm, primed_to_armed)
     machine.handle_event(ctx, talker::Def::Event::AudioReady, TimePoint{});
     machine.handle_event(ctx, talker::Def::Event::Primed, TimePoint{});
     EXPECT_EQ(machine.current_state(), talker::Def::State::Armed);
-    EXPECT_EQ(ctx.last_action, "arm_stream");
+    EXPECT_EQ(machine.last_action, "arm_stream");
 }
 
 TEST(nanoavb_talker_engine_sm, gate_go_to_running)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     ctx.callbacks.init = [](talker::Context&, TimePoint) {};
     ctx.callbacks.start_audio_source = [](talker::Context&, TimePoint) {};
@@ -695,12 +697,12 @@ TEST(nanoavb_talker_engine_sm, gate_go_to_running)
     machine.handle_event(ctx, talker::Def::Event::Primed, TimePoint{});
     machine.handle_event(ctx, talker::Def::Event::GateGo, TimePoint{});
     EXPECT_EQ(machine.current_state(), talker::Def::State::Running);
-    EXPECT_EQ(ctx.last_action, "start_tx");
+    EXPECT_EQ(machine.last_action, "start_tx");
 }
 
 TEST(nanoavb_talker_engine_sm, gate_stop_from_running)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     ctx.callbacks.init = [](talker::Context&, TimePoint) {};
     ctx.callbacks.start_audio_source = [](talker::Context&, TimePoint) {};
@@ -713,12 +715,12 @@ TEST(nanoavb_talker_engine_sm, gate_stop_from_running)
     machine.handle_event(ctx, talker::Def::Event::GateGo, TimePoint{});
     machine.handle_event(ctx, talker::Def::Event::GateStop, TimePoint{});
     EXPECT_EQ(machine.current_state(), talker::Def::State::Armed);
-    EXPECT_EQ(ctx.last_action, "stop_tx");
+    EXPECT_EQ(machine.last_action, "stop_tx");
 }
 
 TEST(nanoavb_talker_engine_sm, underrun_to_muted)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     ctx.callbacks.init = [](talker::Context&, TimePoint) {};
     ctx.callbacks.start_audio_source = [](talker::Context&, TimePoint) {};
@@ -731,12 +733,12 @@ TEST(nanoavb_talker_engine_sm, underrun_to_muted)
     machine.handle_event(ctx, talker::Def::Event::GateGo, TimePoint{});
     machine.handle_event(ctx, talker::Def::Event::Underrun, TimePoint{});
     EXPECT_EQ(machine.current_state(), talker::Def::State::Muted);
-    EXPECT_EQ(ctx.last_action, "mute_tx");
+    EXPECT_EQ(machine.last_action, "mute_tx");
 }
 
 TEST(nanoavb_talker_engine_sm, recovered_from_muted)
 {
-    talker::Machine machine;
+    sm_test::Observed<talker::Def, talker::table> machine;
     talker::Context ctx;
     ctx.callbacks.init = [](talker::Context&, TimePoint) {};
     ctx.callbacks.start_audio_source = [](talker::Context&, TimePoint) {};
@@ -751,7 +753,7 @@ TEST(nanoavb_talker_engine_sm, recovered_from_muted)
     machine.handle_event(ctx, talker::Def::Event::Underrun, TimePoint{});
     machine.handle_event(ctx, talker::Def::Event::Recovered, TimePoint{});
     EXPECT_EQ(machine.current_state(), talker::Def::State::Running);
-    EXPECT_EQ(ctx.last_action, "unmute_tx");
+    EXPECT_EQ(machine.last_action, "unmute_tx");
 }
 
 TEST(nanoavb_talker_engine_sm, fatal_from_each_state)
