@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 #include "statusbar/nanoavb/nanoavb.hpp"
-#include "statusbar/nanoavb/nanoavb_sm_test_support.hpp"
 #include "statusbar/sm/sm.hpp"
+#include "statusbar/sm/sm_test_support.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <chrono>
@@ -12,7 +12,7 @@
 #include <string>
 
 using TimePoint = statusbar::sm::TimePoint;
-namespace sm_test = statusbar::nanoavb::sm_test;
+namespace sm_test = statusbar::sm::test;
 
 //
 // Supervisor State Machine Tests

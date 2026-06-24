@@ -4,8 +4,8 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
-#include "statusbar/nanoavb/nanoavb_sm_test_support.hpp"
 #include "statusbar/sm/sm.hpp"
+#include "statusbar/sm/sm_test_support.hpp"
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
@@ -23,6 +23,7 @@ using statusbar::ieee::Eui48;
 using statusbar::ieee::Eui64;
 using statusbar::tsn::ClockIdentity;
 namespace sm = statusbar::sm;
+namespace sm_test = statusbar::sm::test;
 using TimePoint = statusbar::sm::TimePoint;
 
 // Use fully-qualified namespace aliases for capability flags

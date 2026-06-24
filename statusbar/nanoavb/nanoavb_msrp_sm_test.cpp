@@ -9,11 +9,11 @@
 
 #include "statusbar/nanoavb/nanoavb_msrp_listener_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_msrp_talker_sm.hpp"
-#include "statusbar/nanoavb/nanoavb_sm_test_support.hpp"
+#include "statusbar/sm/sm_test_support.hpp"
 #include "statusbar/test/test.hpp"
 
 using TimePoint = statusbar::sm::TimePoint;
-namespace sm_test = statusbar::nanoavb::sm_test;
+namespace sm_test = statusbar::sm::test;
 
 namespace listener = statusbar::nanoavb::msrp_listener_sm;
 namespace talker = statusbar::nanoavb::msrp_talker_sm;
