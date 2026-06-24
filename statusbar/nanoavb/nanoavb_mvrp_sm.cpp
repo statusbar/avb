@@ -12,28 +12,28 @@ namespace statusbar::nanoavb::mvrp_sm {
 
 void init(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "init";
+    ctx.last_action = function_name<&init>;
     ctx.joined = false;
     ctx.callbacks.init(ctx, time);
 }
 
 void mark_joined(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "mark_joined";
+    ctx.last_action = function_name<&mark_joined>;
     ctx.joined = true;
     ctx.callbacks.mark_joined(ctx, time);
 }
 
 void mark_left(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "mark_left";
+    ctx.last_action = function_name<&mark_left>;
     ctx.joined = false;
     ctx.callbacks.mark_left(ctx, time);
 }
 
 void mark_error(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "mark_error";
+    ctx.last_action = function_name<&mark_error>;
     ctx.joined = false;
     if (ctx.callbacks.mark_error) {
         ctx.callbacks.mark_error(ctx, time);
@@ -42,7 +42,7 @@ void mark_error(Context& ctx, TimePoint time)
 
 void reset(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "reset";
+    ctx.last_action = function_name<&reset>;
     ctx.joined = false;
     ctx.refcount = 0;
     ctx.callbacks.reset(ctx, time);

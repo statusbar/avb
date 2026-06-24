@@ -65,7 +65,7 @@ void init(Context& ctx, TimePoint time);
 
 inline void msrp_talker_advertise(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "msrp_talker_advertise"; /* register TalkerAdvertise */
+    ctx.last_action = function_name<&msrp_talker_advertise>; /* register TalkerAdvertise */
     ctx.callbacks.msrp_talker_advertise(ctx, time);
 }
 

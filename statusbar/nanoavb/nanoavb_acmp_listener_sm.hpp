@@ -63,7 +63,7 @@ void init(Context& ctx, TimePoint time);
 
 inline void send_connect_tx(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "send_connect_tx"; /* acmp_connect_tx() */
+    ctx.last_action = function_name<&send_connect_tx>; /* acmp_connect_tx() */
     ctx.callbacks.send_connect_tx(ctx, time);
 }
 
@@ -72,7 +72,7 @@ void mark_failed(Context& ctx, TimePoint time);
 
 inline void send_disconnect_tx(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "send_disconnect_tx"; /* acmp_disconnect_tx() */
+    ctx.last_action = function_name<&send_disconnect_tx>; /* acmp_disconnect_tx() */
     ctx.callbacks.send_disconnect_tx(ctx, time);
 }
 

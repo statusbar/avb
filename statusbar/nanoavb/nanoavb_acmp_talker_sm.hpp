@@ -59,7 +59,7 @@ void add_listener(Context& ctx, TimePoint time);
 
 inline void reject_connect(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "reject_connect";
+    ctx.last_action = function_name<&reject_connect>;
     ctx.callbacks.reject_connect(ctx, time);
 }
 

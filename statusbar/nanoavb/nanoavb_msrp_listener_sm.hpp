@@ -65,7 +65,7 @@ void init(Context& ctx, TimePoint time);
 
 inline void msrp_listener_ready(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "msrp_listener_ready"; /* register ListenerReady */
+    ctx.last_action = function_name<&msrp_listener_ready>; /* register ListenerReady */
     ctx.callbacks.msrp_listener_ready(ctx, time);
 }
 

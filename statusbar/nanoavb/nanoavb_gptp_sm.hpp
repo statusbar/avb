@@ -57,7 +57,7 @@ struct Def
 
 inline void init(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "init";
+    ctx.last_action = function_name<&init>;
     ctx.callbacks.init(ctx, time);
 }
 

@@ -65,49 +65,49 @@ struct Def
 
 inline void init(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "init";
+    ctx.last_action = function_name<&init>;
     ctx.callbacks.init(ctx, time);
 }
 
 inline void enable_rx_filter(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "enable_rx_filter"; /* program filters */
+    ctx.last_action = function_name<&enable_rx_filter>; /* program filters */
     ctx.callbacks.enable_rx_filter(ctx, time);
 }
 
 inline void start_sync(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "start_sync"; /* begin dejitter fill */
+    ctx.last_action = function_name<&start_sync>; /* begin dejitter fill */
     ctx.callbacks.start_sync(ctx, time);
 }
 
 inline void start_audio_sink(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "start_audio_sink"; /* open output */
+    ctx.last_action = function_name<&start_audio_sink>; /* open output */
     ctx.callbacks.start_audio_sink(ctx, time);
 }
 
 inline void stop_all(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "stop_all"; /* stop rx + sink */
+    ctx.last_action = function_name<&stop_all>; /* stop rx + sink */
     ctx.callbacks.stop_all(ctx, time);
 }
 
 inline void resync(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "resync"; /* drop buffer, reacquire */
+    ctx.last_action = function_name<&resync>; /* drop buffer, reacquire */
     ctx.callbacks.resync(ctx, time);
 }
 
 inline void mute_out(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "mute_out";
+    ctx.last_action = function_name<&mute_out>;
     ctx.callbacks.mute_out(ctx, time);
 }
 
 inline void unmute_out(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "unmute_out";
+    ctx.last_action = function_name<&unmute_out>;
     ctx.callbacks.unmute_out(ctx, time);
 }
 

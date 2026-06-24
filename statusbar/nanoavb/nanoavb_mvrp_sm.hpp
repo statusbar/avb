@@ -68,13 +68,13 @@ void init(Context& ctx, TimePoint time);
 
 inline void send_join(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "send_join"; /* mvrp_join(ctx.vid) */
+    ctx.last_action = function_name<&send_join>; /* mvrp_join(ctx.vid) */
     ctx.callbacks.send_join(ctx, time);
 }
 
 inline void send_leave(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "send_leave"; /* mvrp_leave(ctx.vid) */
+    ctx.last_action = function_name<&send_leave>; /* mvrp_leave(ctx.vid) */
     ctx.callbacks.send_leave(ctx, time);
 }
 

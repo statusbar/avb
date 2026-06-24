@@ -66,49 +66,49 @@ struct Def
 
 inline void init(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "init";
+    ctx.last_action = function_name<&init>;
     ctx.callbacks.init(ctx, time);
 }
 
 inline void start_audio_source(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "start_audio_source"; /* open codec/stream */
+    ctx.last_action = function_name<&start_audio_source>; /* open codec/stream */
     ctx.callbacks.start_audio_source(ctx, time);
 }
 
 inline void arm_stream(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "arm_stream"; /* lock format, init seq */
+    ctx.last_action = function_name<&arm_stream>; /* lock format, init seq */
     ctx.callbacks.arm_stream(ctx, time);
 }
 
 inline void start_tx(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "start_tx"; /* enable 1722 AAF TX */
+    ctx.last_action = function_name<&start_tx>; /* enable 1722 AAF TX */
     ctx.callbacks.start_tx(ctx, time);
 }
 
 inline void stop_tx(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "stop_tx"; /* disable TX */
+    ctx.last_action = function_name<&stop_tx>; /* disable TX */
     ctx.callbacks.stop_tx(ctx, time);
 }
 
 inline void mute_tx(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "mute_tx"; /* silence packets or stop */
+    ctx.last_action = function_name<&mute_tx>; /* silence packets or stop */
     ctx.callbacks.mute_tx(ctx, time);
 }
 
 inline void unmute_tx(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "unmute_tx";
+    ctx.last_action = function_name<&unmute_tx>;
     ctx.callbacks.unmute_tx(ctx, time);
 }
 
 inline void stop_all(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "stop_all"; /* close audio + tx */
+    ctx.last_action = function_name<&stop_all>; /* close audio + tx */
     ctx.callbacks.stop_all(ctx, time);
 }
 
