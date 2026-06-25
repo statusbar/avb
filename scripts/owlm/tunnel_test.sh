@@ -15,7 +15,10 @@
 # Usage:
 #   tunnel_test.sh [options] DURATION NODE_A NODE_B [-- EXTRA_ENTITY_ARGS...]
 #
-#   DURATION   capture window in seconds (the test runs this long, then we grab)
+#   DURATION   steady-state measurement window in seconds. The entity actually
+#              runs for STARTUP_GRACE + SETTLE + DURATION; the startup+settle
+#              prefix is captured but trimmed from the analysis so the reported
+#              latency/loss reflect steady state, not connect-time transients.
 #   NODE_A     ssh host for node A   (e.g. jdk01a)
 #   NODE_B     ssh host for node B   (e.g. jdk01b-tunnel)
 #   EXTRA...   any extra args appended to the entity cmdline on BOTH nodes
@@ -27,6 +30,9 @@
 #   -c PATH    entity config toml on the nodes         (default /etc/statusbar-avb/entity.toml)
 #   -A CMD     command to run ON node A after launch   (e.g. ACMP connect; optional)
 #   -B CMD     command to run ON node B after launch   (optional)
+#   -g SEC     post-connect settle seconds            (default 15) — quiet period
+#              after the hooks so the connect-induced talker re-advertise / seq
+#              reset lands in the trimmed prefix, not the measured window.
 #   -k         keep manual run / do NOT restart the systemd entity afterwards
 #
 # Env:
@@ -52,19 +58,24 @@ HOOK_B=""
 KEEP=0
 BIN="/usr/local/bin/statusbar-avb-audio-io"
 STARTUP_GRACE=12      # seconds to wait for gPTP lock + tunnel hole-punch
+SETTLE=15             # seconds to let streams settle AFTER the connect hooks,
+                      # before the measured window — the ACMP/MSRP connect makes
+                      # the talker re-advertise and reset its sequence counter,
+                      # so this prefix is captured but trimmed from the analysis.
 END_SLACK=20          # seconds of slack added after the window before collecting
 
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo ">> $*" >&2; }
 
 # ---- arg parsing ----------------------------------------------------------
-while getopts ":w:o:c:A:B:k" opt; do
+while getopts ":w:o:c:A:B:g:k" opt; do
   case "$opt" in
     w) WCL_MS="$OPTARG" ;;
     o) OUTDIR="$OPTARG" ;;
     c) CONFIG="$OPTARG" ;;
     A) HOOK_A="$OPTARG" ;;
     B) HOOK_B="$OPTARG" ;;
+    g) SETTLE="$OPTARG" ;;
     k) KEEP=1 ;;
     \?) die "unknown option -$OPTARG" ;;
     :) die "option -$OPTARG needs an argument" ;;
@@ -77,6 +88,12 @@ DURATION="$1"; NODE_A="$2"; NODE_B="$3"; shift 3
 [ "${1:-}" = "--" ] && shift || true
 EXTRA=("$@")
 [[ "$DURATION" =~ ^[0-9]+$ ]] || die "DURATION must be an integer number of seconds"
+[[ "$SETTLE" =~ ^[0-9]+$ ]] || die "settle (-g) must be an integer number of seconds"
+
+# Entity runs long enough to give DURATION of steady data after startup+settle;
+# the startup+settle prefix is trimmed from the analysis (both ends, symmetric).
+RUN_SECS=$(( STARTUP_GRACE + SETTLE + DURATION ))
+TRIM=$(( STARTUP_GRACE + SETTLE ))
 
 # ---- paths ----------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,8 +106,9 @@ TAG="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$OUTDIR"
 
 # colbin sizing: 48 B/row * ~2.2k pkt/s ~= 0.1 MB/s; redundancy doubles it.
-# Use 0.25 MB/s + 32 MB headroom so a redundant run is covered too.
-MAX_MB=$(( (DURATION * 25 / 100) + 32 ))
+# Use 0.25 MB/s + 32 MB headroom so a redundant run is covered too. Size for
+# the full RUN_SECS (startup+settle+duration), not just the measured window.
+MAX_MB=$(( (RUN_SECS * 25 / 100) + 32 ))
 
 REMOTE_COLBIN_A="/var/tmp/${TAG}-A.colbin"
 REMOTE_COLBIN_B="/var/tmp/${TAG}-B.colbin"
@@ -100,7 +118,7 @@ REMOTE_LOG_B="/var/tmp/${TAG}-B.log"
 # bracket-trick pattern: matches the running entity but NOT this pgrep itself.
 ALIVE_PAT='[s]tatusbar-avb-audio-io --config-load'
 
-log "tag=$TAG  duration=${DURATION}s  wcl=${WCL_MS}ms  colbin_max=${MAX_MB}MB"
+log "tag=$TAG  duration=${DURATION}s (run=${RUN_SECS}s, grace=${STARTUP_GRACE}s settle=${SETTLE}s trim=${TRIM}s)  wcl=${WCL_MS}ms  colbin_max=${MAX_MB}MB"
 log "node A=$NODE_A  node B=$NODE_B"
 [ ${#EXTRA[@]} -gt 0 ] && log "extra entity args: ${EXTRA[*]}"
 log "output -> $OUTDIR"
@@ -112,7 +130,7 @@ launch_node() {
   local was
   was="$(ssh -o ConnectTimeout=10 "$host" 'systemctl is-active statusbar-avb-entity 2>/dev/null || true')"
   ssh -o ConnectTimeout=10 "$host" "sudo systemctl stop statusbar-avb-entity 2>/dev/null || true; sleep 1; \
-    sudo bash -c 'setsid timeout --signal=INT ${DURATION} ${BIN} \
+    sudo bash -c 'setsid timeout --signal=INT ${RUN_SECS} ${BIN} \
       --config-load=${CONFIG} \
       --udptun.egress_colbin=${colbin} --udptun.egress_colbin_max_mb=${MAX_MB} \
       ${EXTRA[*]:-} </dev/null >${logf} 2>&1 &'" >&2
@@ -147,10 +165,20 @@ if [ "${RXA:-0}" -lt 10 ] || [ "${RXB:-0}" -lt 10 ]; then
   die "unidirectional tunnel; nothing captured"
 fi
 
+# ---- post-connect settle --------------------------------------------------
+# The connect hooks make the talker re-advertise and reset its sequence
+# counter ~immediately. Let that finish during the settle so the steady-state
+# measured window is clean; the settle (+ startup grace) is trimmed from the
+# analysis below, and the discontinuity filter catches any reset that slips in.
+if [ "$SETTLE" -gt 0 ]; then
+  log "settling ${SETTLE}s post-connect before the ${DURATION}s measured window..."
+  sleep "$SETTLE"
+fi
+
 # ---- wait out the window --------------------------------------------------
-REMAIN=$(( START_EPOCH + DURATION + END_SLACK - $(date +%s) ))
+REMAIN=$(( START_EPOCH + RUN_SECS + END_SLACK - $(date +%s) ))
 [ "$REMAIN" -gt 0 ] || REMAIN=0
-log "capturing for the rest of the ${DURATION}s window (~${REMAIN}s remaining)..."
+log "measuring for ~${DURATION}s (~${REMAIN}s until collect)..."
 sleep "$REMAIN"
 
 # confirm both processes have exited (timeout enforces the stop)
@@ -204,9 +232,11 @@ log "analysis python: $PY"
 # ---- analyze --------------------------------------------------------------
 CA="$OUTDIR/${NODE_A}.colbin"; CB="$OUTDIR/${NODE_B}.colbin"
 SA="$OUTDIR/${NODE_A}-summary.parquet"; SB="$OUTDIR/${NODE_B}-summary.parquet"
-log "summarize..."
-"$PY" "$ANALYZE" summarize "$CA" -o "$SA" --worst-case-latency-ms "$WCL_MS"
-"$PY" "$ANALYZE" summarize "$CB" -o "$SB" --worst-case-latency-ms "$WCL_MS"
+# --trim-seconds drops the startup+settle prefix (and an equal tail) so the
+# latency/loss summary reflects steady state, not the connect-time transient.
+log "summarize (trim ${TRIM}s/end)..."
+"$PY" "$ANALYZE" summarize "$CA" -o "$SA" --worst-case-latency-ms "$WCL_MS" --trim-seconds "$TRIM"
+"$PY" "$ANALYZE" summarize "$CB" -o "$SB" --worst-case-latency-ms "$WCL_MS" --trim-seconds "$TRIM"
 log "join..."
 "$PY" "$ANALYZE" join "$SA" "$SB" | tee "$OUTDIR/join.txt"
 log "plot..."
@@ -221,7 +251,8 @@ log "gaps..."
 {
   echo "tag=$TAG"
   echo "started_utc=$(date -u -r "$START_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "duration_s=$DURATION  wcl_ms=$WCL_MS  colbin_max_mb=$MAX_MB"
+  echo "duration_s=$DURATION  run_s=$RUN_SECS  startup_grace_s=$STARTUP_GRACE  settle_s=$SETTLE  trim_s=$TRIM"
+  echo "wcl_ms=$WCL_MS  colbin_max_mb=$MAX_MB"
   echo "node_a=$NODE_A (rx = peer->A)   node_b=$NODE_B (rx = A->peer)"
   echo "config=$CONFIG"
   echo "extra_args=${EXTRA[*]:-}"
