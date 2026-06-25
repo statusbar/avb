@@ -831,6 +831,44 @@ def _merge_partials(partials: list[_PartialResult]) -> _PartialResult:
     return out
 
 
+def _discontinuity_unseen_mask(rx_at_seq: np.ndarray, seen: np.ndarray) -> np.ndarray:
+    """Mask (over a sender's per-seq span) of never-seen sequences that
+    belong to a *sequence discontinuity* — a talker stream restart, seq
+    reset, or wrap — rather than a genuine reception gap.
+
+    For one well-behaved stream, receive time is monotonic non-decreasing
+    with sequence number, so a maximal run of never-seen sequences bounded
+    by two seen packets is a real outage only when the bounding packets are
+    in time order (rx of the seq *after* the hole > rx of the seq
+    *before* it). When they are out of order — the higher-seq bounding
+    packet arrived no later than the lower-seq one — the missing range is
+    an artifact of a non-monotonic sequence stream (e.g. a restart whose
+    new sequence numbers overlap the old), not lost audio. Counting it
+    yields phantom drops spanning much of the capture, often with a
+    *negative* outage duration. Such runs are masked here so they don't
+    inflate true_loss or surface as bogus drop bursts.
+
+    Edge runs (no bounding seen packet on one side, i.e. the capture
+    started or ended mid-hole) cannot be judged and are left unmasked, so
+    genuine capture-edge loss is still reported (as `bounded=False`)."""
+    span = rx_at_seq.size
+    mask = np.zeros(span, dtype=bool)
+    unseen = ~seen
+    if span == 0 or not unseen.any():
+        return mask
+    padded = np.concatenate(([0], unseen.astype(np.int8), [0]))
+    edges = np.diff(padded)
+    starts = np.where(edges == 1)[0]
+    ends = np.where(edges == -1)[0] - 1
+    for a, b in zip(starts, ends):
+        before, after = int(a) - 1, int(b) + 1
+        if before < 0 or after >= span:
+            continue  # edge run: no bounding packet to test time order
+        if rx_at_seq[after] <= rx_at_seq[before]:
+            mask[int(a) : int(b) + 1] = True
+    return mask
+
+
 def _derive_recovered_true_loss(
     merged: _PartialResult,
     scan: _ScanMeta,
@@ -897,6 +935,11 @@ def _derive_recovered_true_loss(
         if not seen.any():
             continue
 
+        # Mask never-seen runs that are sequence discontinuities (talker
+        # restart / reset), not real loss — computed from the raw rx times
+        # before the interpolation below overwrites the unseen entries.
+        discontinuity = _discontinuity_unseen_mask(rx_at_seq, seen)
+
         primary_in_time = primary_minlat <= wcl_ns
         redundant_in_time = redundant_minlat <= wcl_ns
 
@@ -913,7 +956,7 @@ def _derive_recovered_true_loss(
             ).astype(np.int64)
 
         recovered = ~primary_in_time & redundant_in_time
-        true_loss = ~primary_in_time & ~redundant_in_time
+        true_loss = ~primary_in_time & ~redundant_in_time & ~discontinuity
         for mask, target in (
             (recovered, recovered_count),
             (true_loss, true_loss_count),
@@ -2244,6 +2287,7 @@ def _derive_gaps(
     arrays mirrors `_derive_recovered_true_loss`."""
     int64_max = np.iinfo(np.int64).max
     records: list[dict] = []
+    n_discontinuities = 0
 
     for pid, (min_seq, max_seq) in pair_seq_ranges.items():
         span = max_seq - min_seq + 1
@@ -2298,6 +2342,15 @@ def _derive_gaps(
                 int(rx_at_seq[first_good_off]) if first_good_off is not None else None
             )
             bounded = last_good_rx is not None and first_good_rx is not None
+            # Sequence discontinuity (talker restart / reset): a bounded run
+            # whose good packets are out of time order -- the higher-seq one
+            # arrived no later than the lower-seq one. Not a real outage
+            # (would otherwise report a phantom burst, often with negative
+            # duration). Skip it; surface the count instead of silently
+            # dropping it.
+            if bounded and first_good_rx <= last_good_rx:
+                n_discontinuities += 1
+                continue
             outage_ns = (first_good_rx - last_good_rx) if bounded else None
             est_dropped_ns = count * nominal if nominal is not None else None
             rep_rx = last_good_rx if last_good_rx is not None else first_good_rx
@@ -2325,7 +2378,7 @@ def _derive_gaps(
                     "_rep_rx": rep_rx,
                 }
             )
-    return records
+    return records, n_discontinuities
 
 
 # `start_t_ns` + `duration_ns` are the canonical pair consumed by the
@@ -2471,8 +2524,12 @@ def compute_gaps(
     for pid, seqs in merged.pair_first_seqs.items():
         if seqs.size > 0:
             full_pair_seq_ranges[pid] = (int(seqs.min()), int(seqs.max()))
-    records = _derive_gaps(merged, full_pair_seq_ranges, wcl_ns, min_dropped)
-    return _gaps_to_df(records)
+    records, n_discontinuities = _derive_gaps(
+        merged, full_pair_seq_ranges, wcl_ns, min_dropped
+    )
+    df = _gaps_to_df(records)
+    df.attrs["n_discontinuities"] = n_discontinuities
+    return df
 
 
 def cmd_gaps(args: argparse.Namespace) -> int:
@@ -2485,11 +2542,19 @@ def cmd_gaps(args: argparse.Namespace) -> int:
     )
     gaps.to_csv(args.output, index=False)
 
+    n_disc = int(gaps.attrs.get("n_discontinuities", 0))
+    disc_str = (
+        f" ({n_disc} sequence discontinuit{'y' if n_disc == 1 else 'ies'} "
+        f"skipped — talker restart/reset, not loss)"
+        if n_disc
+        else ""
+    )
+
     n = len(gaps)
     if n == 0:
         print(
             f"wrote {args.output} (0 gap bursts; no true-loss within "
-            f"WCL {args.worst_case_latency_ms:g} ms)"
+            f"WCL {args.worst_case_latency_ms:g} ms){disc_str}"
         )
         return 0
     total_dropped = int(gaps["dropped_count"].sum())
@@ -2506,7 +2571,7 @@ def cmd_gaps(args: argparse.Namespace) -> int:
         worst_str = ""
     print(
         f"wrote {args.output} ({n} gap burst(s) across {n_senders} sender(s); "
-        f"{total_dropped} packet(s) dropped{worst_str})"
+        f"{total_dropped} packet(s) dropped{worst_str}){disc_str}"
     )
 
     if args.preview > 0:
@@ -3106,6 +3171,31 @@ def run_tests() -> int:
             not burst_b.empty
             and int(burst_b.iloc[0]["dropped_count"]) == 1
             and abs(float(burst_b.iloc[0]["duration_ms"]) - 2000.0) < 1e-6,
+        )
+
+        # gaps: a sequence discontinuity (talker restart / reset) must NOT
+        # be reported as a giant phantom drop burst. Here seq jumps 2 -> 1000
+        # but the higher-seq bounding packet (seq 1000 @ 3s) arrived BEFORE
+        # the lower-seq one (seq 2 @ 5s), so the missing 3..999 range is out
+        # of time order: not real loss. It must be skipped and counted as a
+        # discontinuity, leaving zero drop bursts.
+        disc_rows = [
+            "rx_gptp_ns,presentation_time_ns,latency_ns,sender_eui64,"
+            "sequence,interval_us,role"
+        ]
+        for seq, rx in [(1, 1), (2, 5), (1000, 3), (1001, 6)]:
+            disc_rows.append(
+                _owlm_row(
+                    rx * 1_000_000_000, seq, prim_sender, "remote_primary", in_time_ns
+                )
+            )
+        disc_in = Path(td) / "test_disc.csv"
+        disc_in.write_text("\n".join(disc_rows) + "\n")
+        ddf = compute_gaps(disc_in, wcl_ms=25.0, chunksize=1_000_000, n_workers=1)
+        expect("gaps: sequence discontinuity yields no drop bursts", len(ddf) == 0)
+        expect(
+            "gaps: discontinuity is counted, not silently dropped",
+            int(ddf.attrs.get("n_discontinuities", 0)) == 1,
         )
 
         # Synthetic .colbin: hand-build a tiny file matching the C++
