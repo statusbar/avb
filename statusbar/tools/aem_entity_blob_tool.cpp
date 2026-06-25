@@ -538,6 +538,199 @@ using statusbar::tools::AemEntityBlob;
     return b.build();
 }
 
+// --------------------------------------------------------------------------
+// Tone-generator model: talker-only, three stream OUTPUTS, no inputs.
+//   stream 0 = AM824 (IEC 61883-6), stream 1 = AAF (32-bit PCM), both N-ch;
+//   stream 2 = CRF (Milan 48 kHz media clock). No STREAM_INPUT / listener.
+// Consumed by AvbEntityToneGenerator. The entity derives its channel count
+// from AUDIO_CLUSTER 0 (here the first OUTPUT cluster).
+// --------------------------------------------------------------------------
+[[nodiscard]] auto build_tone_generator_model(std::string_view name, uint16_t channels, uint32_t sample_rate)
+    -> std::vector<uint8_t>
+{
+    AemEntityBlob b;
+    bool ok = true;  // accumulates every descriptor push; a false means inline overflow
+    constexpr uint16_t CFG = 0;
+
+    struct StreamSpec
+    {
+        uint16_t index;
+        ieee::Eui64 format;
+        char const* name;
+    };
+    std::array<StreamSpec, 2> const audio_streams{
+        {{.index = 0, .format = am824_8ch_96k(), .name = "StreamOutputAM824"},
+         {.index = 1, .format = aaf_8ch_96k_32bit(), .name = "StreamOutputAAF"}}};
+
+    // ENTITY — three talker sources (AM824, AAF, CRF), no listener sinks.
+    {
+        DescriptorEntity d{};
+        d.entity_name = AtdeccString{std::string{name}.c_str()};
+        d.entity_capabilities = CAP_AEM | CAP_CLASS_A | CAP_GPTP;
+        d.talker_stream_sources = 3;  // AM824, AAF, CRF (media clock)
+        d.talker_capabilities = TALKER_IMPLEMENTED | TALKER_AUDIO_SOURCE | TALKER_MEDIA_CLOCK_SOURCE;
+        d.listener_stream_sinks = 0;
+        d.listener_capabilities = 0;
+        d.configurations_count = 1;
+        d.current_configuration = 0;
+        b.add(CFG, d);
+    }
+
+    // CONFIGURATION — counts for the talker-only tone-generator model.
+    {
+        DescriptorConfiguration d{};
+        d.object_name = AtdeccString{"ToneGen"};
+        d.localized_description = NO_LOCALIZED;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_UNIT, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .count = 3})) && ok;  // AM824 + AAF + CRF
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AVB_INTERFACE, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_SOURCE, .count = 1})) && ok;  // INTERNAL only
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_LOCALE, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STRINGS, .count = 1})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_STREAM_PORT_OUTPUT, .count = 2})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_CLUSTER, .count = 2})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_AUDIO_MAP, .count = 2})) && ok;
+        ok = (d.push_descriptor_count({.descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .count = 1})) && ok;
+        b.add(CFG, d);
+    }
+
+    // AUDIO_UNIT — no stream-input ports; two stream-output ports (AM824, AAF).
+    {
+        DescriptorAudioUnit d{};
+        d.object_name = AtdeccString{"AudioUnit"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_domain_index = 0;
+        d.number_of_stream_input_ports = 0;
+        d.base_stream_input_port = 0;
+        d.number_of_stream_output_ports = 2;
+        d.base_stream_output_port = 0;
+        d.current_sampling_rate = sample_rate;
+        ok = (d.push_sampling_rate(sample_rate)) && ok;
+        b.add(CFG, d);
+    }
+
+    // STREAM_OUTPUT 0 = AM824, 1 = AAF (carry the 8 tone channels).
+    for (auto const& s : audio_streams) {
+        DescriptorStream d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        d.descriptor_index = s.index;
+        d.object_name = AtdeccString{s.name};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_domain_index = 0;
+        d.stream_flags = STREAM_FLAG_CLASS_A;
+        d.current_format = s.format;
+        ok = (d.push_stream_format(s.format)) && ok;
+        d.avb_interface_index = 0;
+        b.add(CFG, d);
+    }
+
+    // STREAM_OUTPUT 2 — CRF media-clock stream (no audio → no port/cluster/map).
+    {
+        DescriptorStream d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
+        d.descriptor_index = 2;
+        d.object_name = AtdeccString{"StreamOutputCRF"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_domain_index = 0;
+        d.stream_flags = STREAM_FLAG_CLASS_A;
+        d.current_format = crf_audio_48k();
+        ok = (d.push_stream_format(crf_audio_48k())) && ok;
+        d.avb_interface_index = 0;
+        b.add(CFG, d);
+    }
+
+    // STREAM_PORT_OUTPUT 0→cluster0/map0 (AM824), 1→cluster1/map1 (AAF).
+    for (uint16_t idx : {uint16_t{0}, uint16_t{1}}) {
+        DescriptorStreamPort d{};
+        d.descriptor_type = DESCRIPTOR_STREAM_PORT_OUTPUT;
+        d.descriptor_index = idx;
+        d.clock_domain_index = 0;
+        d.number_of_clusters = 1;
+        d.base_cluster = idx;
+        d.number_of_maps = 1;
+        d.base_map = idx;
+        b.add(CFG, d);
+    }
+
+    // AUDIO_CLUSTER 0/1 — one N-channel MBLA cluster per output port.
+    // AvbEntityToneGenerator derives its channel count from AUDIO_CLUSTER 0.
+    for (uint16_t idx : {uint16_t{0}, uint16_t{1}}) {
+        DescriptorAudioCluster d{};
+        d.descriptor_index = idx;
+        d.object_name = AtdeccString{"OutputCluster"};
+        d.localized_description = NO_LOCALIZED;
+        d.channel_count = channels;
+        d.format = AUDIO_CLUSTER_FORMAT_MBLA;
+        b.add(CFG, d);
+    }
+
+    // AUDIO_MAP 0/1 — identity map stream ch i → cluster ch i.
+    for (uint16_t idx : {uint16_t{0}, uint16_t{1}}) {
+        DescriptorAudioMap d{};
+        d.descriptor_index = idx;
+        for (uint16_t ch = 0; ch < channels; ++ch) {
+            AudioMapping m{};
+            m.mapping_stream_index = 0;
+            m.mapping_stream_channel = ch;
+            m.mapping_cluster_offset = 0;
+            m.mapping_cluster_channel = ch;
+            ok = (d.push_mapping(m)) && ok;
+        }
+        b.add(CFG, d);
+    }
+
+    // AVB_INTERFACE.
+    {
+        DescriptorAvbInterface d{};
+        d.object_name = AtdeccString{"eth0"};
+        d.localized_description = NO_LOCALIZED;
+        d.interface_flags = AVB_INTERFACE_FLAG_GPTP_SUPPORTED;
+        b.add(CFG, d);
+    }
+
+    // CLOCK_SOURCE 0 — INTERNAL (gPTP-derived): the tone generator is the
+    // media-clock leader; there is no input stream to lock to.
+    {
+        DescriptorClockSource d{};
+        d.descriptor_index = 0;
+        d.object_name = AtdeccString{"Internal"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_source_type = CLOCK_SOURCE_TYPE_INTERNAL;
+        d.clock_source_location_type = DESCRIPTOR_AUDIO_UNIT;
+        d.clock_source_location_index = 0;
+        b.add(CFG, d);
+    }
+
+    // CLOCK_DOMAIN — one source (INTERNAL), selected.
+    {
+        DescriptorClockDomain d{};
+        d.object_name = AtdeccString{"ClockDomain"};
+        d.localized_description = NO_LOCALIZED;
+        d.clock_source_index = 0;
+        ok = (d.push_clock_source(0)) && ok;
+        b.add(CFG, d);
+    }
+
+    // LOCALE + STRINGS.
+    {
+        DescriptorLocale d{};
+        d.locale_identifier = AtdeccString{"en"};
+        d.number_of_strings = 1;
+        d.base_strings = 0;
+        b.add(CFG, d);
+    }
+    {
+        DescriptorStrings d{};
+        d.string_0 = AtdeccString{std::string{name}.c_str()};
+        b.add(CFG, d);
+    }
+
+    if (!ok) {
+        return {};  // a descriptor push overflowed its inline capacity → malformed blob
+    }
+    return b.build();
+}
+
 struct Config
 {
     std::string out = "entity.bin";
@@ -545,6 +738,7 @@ struct Config
     uint16_t channels = 8;
     uint32_t sample_rate = 96000;
     bool dual = false;
+    bool tone = false;
 };
 
 auto build_arg_specs(Config& c) -> args::ArgumentSpecs
@@ -558,6 +752,10 @@ auto build_arg_specs(Config& c) -> args::ArgumentSpecs
         "dual", "Emit a dual-format model: 2 stream inputs + 3 stream outputs (stream 0 AM824, 1 AAF, 2 CRF)", [&](auto v) {
             c.dual = v;
         });
+    specs.add_flag(
+        "tone",
+        "Emit a talker-only tone-generator model: 0 stream inputs + 3 stream outputs (stream 0 AM824, 1 AAF, 2 CRF)",
+        [&](auto v) { c.tone = v; });
     return specs;
 }
 
@@ -575,10 +773,16 @@ int main(int argc, char** argv)
 
     auto const out = cfg.out;
     auto const dual = cfg.dual;
+    auto const tone = cfg.tone;
     auto const channels = cfg.channels;
     auto const sample_rate = cfg.sample_rate;
-    auto const blob =
-        dual ? build_audio_model(cfg.name, channels, sample_rate) : build_bridge_model(cfg.name, channels, sample_rate);
+    if (dual && tone) {
+        std::println(stderr, "error: --dual and --tone are mutually exclusive");
+        return 1;
+    }
+    auto const blob = tone  ? build_tone_generator_model(cfg.name, channels, sample_rate)
+                      : dual ? build_audio_model(cfg.name, channels, sample_rate)
+                             : build_bridge_model(cfg.name, channels, sample_rate);
 
     if (blob.empty()) {
         std::println(stderr, "error: descriptor model overflowed an inline buffer (a push failed); blob not generated");
@@ -598,7 +802,15 @@ int main(int argc, char** argv)
         return 1;
     }
     f.write(reinterpret_cast<char const*>(blob.data()), static_cast<std::streamsize>(blob.size()));
-    if (dual) {
+    if (tone) {
+        std::println(
+            "wrote {} ({} bytes): {}-ch tone-generator @ {} Hz — 0 listeners + 3 talkers "
+            "(stream 0 AM824, stream 1 AAF int32, stream 2 CRF media clock)",
+            out,
+            blob.size(),
+            channels,
+            sample_rate);
+    } else if (dual) {
         std::println(
             "wrote {} ({} bytes): {}-ch dual-format @ {} Hz — 2 listeners + 3 talkers "
             "(stream 0 AM824, stream 1 AAF int32, stream 2 CRF media clock)",

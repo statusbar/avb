@@ -72,6 +72,23 @@ install(
   DESTINATION "${CMAKE_INSTALL_DATADIR}/statusbar-avb"
   COMPONENT runtime)
 
+# Ship the talker-only tone-generator blob (3 stream outputs, no inputs).
+# Consumed by the avb_entity_tone_generator tool; installed alongside the
+# audio-io blob as entity_tone.bin.
+set(STATUSBAR_AVB_TONE_BLOB "${CMAKE_CURRENT_BINARY_DIR}/entity_tone.bin")
+add_custom_command(
+  OUTPUT "${STATUSBAR_AVB_TONE_BLOB}"
+  COMMAND aem_entity_blob_tool --tone --channels 8 --sample-rate 96000 --name
+          "Statusbar Tone Generator" --out "${STATUSBAR_AVB_TONE_BLOB}"
+  DEPENDS aem_entity_blob_tool
+  COMMENT "Generating tone-generator AEM descriptor blob entity_tone.bin"
+  VERBATIM)
+add_custom_target(statusbar_avb_tone_blob ALL DEPENDS "${STATUSBAR_AVB_TONE_BLOB}")
+install(
+  FILES "${STATUSBAR_AVB_TONE_BLOB}"
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/statusbar-avb"
+  COMPONENT runtime)
+
 # --- L2 ADPDU send probe (Linux: AF_PACKET, diagnoses PACKET_QDISC_BYPASS) ---
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
