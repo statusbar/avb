@@ -200,7 +200,6 @@ Callbacks are invoked synchronously during state machine transitions:
 // Inside supervisor state machine:
 inline void enter_ready(Context& ctx, TimePoint time)
 {
-    ctx.last_action = "enter_ready";
     // Callback runs in reactor thread
     ctx.callbacks.enter_ready(ctx, time);
 }
