@@ -8,6 +8,7 @@ statusbar_add_module(
   avb_entity_stereo_io.cpp
   avb_entity_am824_io.cpp
   avb_entity_audio_io.cpp
+  avb_entity_tone_generator.cpp
   avb_entity_host.cpp
   avb_entity_stream_counters.cpp
   avb_entity_listener_streams.cpp
@@ -37,6 +38,7 @@ statusbar_add_module(
   avb_entity_stereo_io_test.cpp
   avb_entity_am824_io_test.cpp
   avb_entity_audio_io_test.cpp
+  avb_entity_tone_generator_test.cpp
   avb_entity_stream_counters_test.cpp
   avb_entity_media_rate_test.cpp
   avb_entity_udptun_egress_test.cpp
@@ -74,4 +76,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                         PROPERTIES OUTPUT_NAME statusbar-avb-audio-io)
   set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                       avb_entity_audio_io_tool)
+
+  add_executable(avb_entity_tone_generator_tool avb_entity_tone_generator_tool.cpp)
+  target_link_libraries(avb_entity_tone_generator_tool PRIVATE statusbar)
+  # Default --descriptor-storage to the tone blob shipped by the package
+  # (generated in statusbar/tools/CMakeLists.txt).
+  target_compile_definitions(
+    avb_entity_tone_generator_tool
+    PRIVATE
+      STATUSBAR_AVB_DEFAULT_TONE_BLOB="${CMAKE_INSTALL_FULL_DATADIR}/statusbar-avb/entity_tone.bin"
+  )
+  set_target_properties(avb_entity_tone_generator_tool
+                        PROPERTIES OUTPUT_NAME statusbar-avb-tone-generator)
+  set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
+                                      avb_entity_tone_generator_tool)
 endif()
