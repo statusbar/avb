@@ -89,6 +89,23 @@ install(
   DESTINATION "${CMAKE_INSTALL_DATADIR}/statusbar-avb"
   COMPONENT runtime)
 
+# AAF-only tone-generator blob (single 8-ch AAF stream output, no AM824/CRF).
+# Consumed by the tone-generator tool with --streams=aaf.
+set(STATUSBAR_AVB_TONE_AAF_BLOB "${CMAKE_CURRENT_BINARY_DIR}/entity_tone_aaf.bin")
+add_custom_command(
+  OUTPUT "${STATUSBAR_AVB_TONE_AAF_BLOB}"
+  COMMAND aem_entity_blob_tool --tone-aaf --channels 8 --sample-rate 96000 --name
+          "Statusbar Tone Generator" --out "${STATUSBAR_AVB_TONE_AAF_BLOB}"
+  DEPENDS aem_entity_blob_tool
+  COMMENT "Generating AAF-only tone-generator AEM descriptor blob entity_tone_aaf.bin"
+  VERBATIM)
+add_custom_target(statusbar_avb_tone_aaf_blob ALL
+                  DEPENDS "${STATUSBAR_AVB_TONE_AAF_BLOB}")
+install(
+  FILES "${STATUSBAR_AVB_TONE_AAF_BLOB}"
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/statusbar-avb"
+  COMPONENT runtime)
+
 # --- L2 ADPDU send probe (Linux: AF_PACKET, diagnoses PACKET_QDISC_BYPASS) ---
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

@@ -168,7 +168,7 @@ auto stream_id_for(ieee::Eui48 const& base_mac, uint16_t index) -> ieee::Eui64
 //
 
 auto AvbEntityToneGenerator::create(
-    AvbEntityAudioIOConfig config, uint8_t base_midi_note, std::pmr::memory_resource* memory_resource)
+    AvbEntityAudioIOConfig config, uint8_t base_midi_note, StreamSet streams, std::pmr::memory_resource* memory_resource)
     -> StatusValue<std::unique_ptr<AvbEntityToneGenerator>>
 {
     auto storage_result = DescriptorStorage::create(std::span<uint8_t const>{config.descriptor_storage_blob});
@@ -182,7 +182,7 @@ auto AvbEntityToneGenerator::create(
 
     std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
     auto entity = std::make_unique<AvbEntityToneGenerator>(
-        AvbEntityToneGenerator::CreateKey{}, std::move(config), std::move(handler), channels, base_midi_note, mr);
+        AvbEntityToneGenerator::CreateKey{}, std::move(config), std::move(handler), channels, base_midi_note, streams, mr);
     return success(std::move(entity));
 }
 
@@ -196,10 +196,14 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
     std::unique_ptr<nanoavb::AemEntityHandler> handler,
     size_t channels,
     uint8_t base_midi_note,
+    StreamSet streams,
     std::pmr::memory_resource* memory_resource)
     : config_{std::move(config)}
-    // 3 talker streams (AM824, AAF, CRF), 4 max listeners each, 0 listener streams.
-    , host_{std::move(handler), make_adp_config(), 3, 4, 0}
+    // Talker streams: 3 (AM824, AAF, CRF) for All, 1 (AAF) for AafOnly. 4 max
+    // listeners each, 0 listener streams (talker-only).
+    , host_{std::move(handler), make_adp_config(), (streams == StreamSet::AafOnly ? size_t{1} : size_t{3}), 4, 0}
+    , aaf_only_{streams == StreamSet::AafOnly}
+    , aaf_idx_{streams == StreamSet::AafOnly ? uint16_t{0} : AAF_STREAM_INDEX}
     , channels_{channels}
     , mem_resource_{memory_resource}
     , audio_buffer_((SAMPLES_PER_PACKET + 1) * channels, 0.0F, mem_resource_)  // +1: gPTP pacing may emit nominal+1
@@ -229,12 +233,18 @@ AvbEntityToneGenerator::AvbEntityToneGenerator(
         span_copy(stream_base_mac.span(), config_.entity_id.span().first(6));
     }
 
-    (void)host_.components().acmp_talker.configure_stream(
-        AM824_STREAM_INDEX, stream_id_for(stream_base_mac, AM824_STREAM_INDEX), config_.am824_talker_dest_mac);
-    (void)host_.components().acmp_talker.configure_stream(
-        AAF_STREAM_INDEX, stream_id_for(stream_base_mac, AAF_STREAM_INDEX), config_.aaf_talker_dest_mac);
-    (void)host_.components().acmp_talker.configure_stream(
-        CRF_STREAM_INDEX, stream_id_for(stream_base_mac, CRF_STREAM_INDEX), config_.crf_talker_dest_mac);
+    if (aaf_only_) {
+        // Single AAF stream at index 0.
+        (void)host_.components().acmp_talker.configure_stream(
+            aaf_idx_, stream_id_for(stream_base_mac, aaf_idx_), config_.aaf_talker_dest_mac);
+    } else {
+        (void)host_.components().acmp_talker.configure_stream(
+            AM824_STREAM_INDEX, stream_id_for(stream_base_mac, AM824_STREAM_INDEX), config_.am824_talker_dest_mac);
+        (void)host_.components().acmp_talker.configure_stream(
+            AAF_STREAM_INDEX, stream_id_for(stream_base_mac, AAF_STREAM_INDEX), config_.aaf_talker_dest_mac);
+        (void)host_.components().acmp_talker.configure_stream(
+            CRF_STREAM_INDEX, stream_id_for(stream_base_mac, CRF_STREAM_INDEX), config_.crf_talker_dest_mac);
+    }
 
     (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, sm::Clock::now());
     host_.components().msrp_handler.set_domain(
@@ -263,7 +273,7 @@ void AvbEntityToneGenerator::wire_stream_callbacks()
 {
     host_.set_advertise_streams([this](TimePoint time) { advertise_talker_streams(time); });
     host_.set_withdraw_streams([this](TimePoint time) {
-        for (uint16_t const idx : {AM824_STREAM_INDEX, AAF_STREAM_INDEX, CRF_STREAM_INDEX}) {
+        for (uint16_t const idx : active_stream_indices()) {
             (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info(idx).stream_id, time);
         }
     });
@@ -315,15 +325,15 @@ auto AvbEntityToneGenerator::acquire_maap_addresses(net::MessageReactor& reactor
     }
 
     statusbar::tsn::StreamId maap_sid{};
-    if (auto const* s = host_.components().acmp_talker.get_stream(AM824_STREAM_INDEX); s != nullptr) {
+    if (auto const* s = host_.components().acmp_talker.get_stream(active_stream_indices().front()); s != nullptr) {
         (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &maap_sid);
     }
     maap_handler_ = std::make_unique<avtp::MaapHandler>(our_mac, maap_sid, our_mac.to_uint64());
 
-    constexpr uint16_t kBlockCount = 3;  // AM824 (+0), AAF (+1), CRF (+2)
+    uint16_t const block_count = aaf_only_ ? uint16_t{1} : uint16_t{3};  // AM824(+0), AAF(+1), CRF(+2)
     maap_addresses_ready_.store(false, std::memory_order_release);
 
-    maap_handler_->set_on_acquired([this](ieee::Eui48 const& block_start, uint16_t /*count*/) {
+    maap_handler_->set_on_acquired([this, block_count](ieee::Eui48 const& block_start, uint16_t /*count*/) {
         auto assign = [this, &block_start](uint16_t idx, uint16_t offset, ieee::Eui48& tx_cache) {
             ieee::Eui48 const dest = avtp::maap_block_address(block_start, offset);
             if (auto const* s = host_.components().acmp_talker.get_stream(idx); s != nullptr) {
@@ -331,11 +341,15 @@ auto AvbEntityToneGenerator::acquire_maap_addresses(net::MessageReactor& reactor
             }
             tx_cache = dest;
         };
-        assign(AM824_STREAM_INDEX, 0, talker_->am824_dest_mac_);
-        assign(AAF_STREAM_INDEX, 1, talker_->aaf_dest_mac_);
-        assign(CRF_STREAM_INDEX, 2, talker_->crf_dest_mac_);
+        if (aaf_only_) {
+            assign(aaf_idx_, 0, talker_->aaf_dest_mac_);
+        } else {
+            assign(AM824_STREAM_INDEX, 0, talker_->am824_dest_mac_);
+            assign(AAF_STREAM_INDEX, 1, talker_->aaf_dest_mac_);
+            assign(CRF_STREAM_INDEX, 2, talker_->crf_dest_mac_);
+        }
         maap_addresses_ready_.store(true, std::memory_order_release);
-        std::print(stderr, "MAAP: acquired 3 stream addresses from {}\n", ieee::to_string(block_start).view());
+        std::print(stderr, "MAAP: acquired {} stream address(es) from {}\n", block_count, ieee::to_string(block_start).view());
         if (host_.is_ready()) {
             advertise_talker_streams(sm::Clock::now());
         }
@@ -355,7 +369,7 @@ auto AvbEntityToneGenerator::acquire_maap_addresses(net::MessageReactor& reactor
     }
 
     reactor.add(std::move(net_handler));
-    maap_handler_->acquire(kBlockCount, net::monotonic_ns());
+    maap_handler_->acquire(block_count, net::monotonic_ns());
     return {};
 }
 
@@ -372,21 +386,11 @@ auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
         }
     }
 
-    // Resolve the three talker stream identities (id + dest MAC) from ACMP.
-    statusbar::tsn::StreamId am824_sid{};
-    if (auto const* s = host_.components().acmp_talker.get_stream(AM824_STREAM_INDEX); s != nullptr) {
-        (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &am824_sid);
-        talker_->am824_dest_mac_ = s->stream_dest_mac;
-    }
+    // Resolve the talker stream id (+ dest MAC) for the AAF stream (always present).
     statusbar::tsn::StreamId aaf_sid{};
-    if (auto const* s = host_.components().acmp_talker.get_stream(AAF_STREAM_INDEX); s != nullptr) {
+    if (auto const* s = host_.components().acmp_talker.get_stream(aaf_idx_); s != nullptr) {
         (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &aaf_sid);
         talker_->aaf_dest_mac_ = s->stream_dest_mac;
-    }
-    statusbar::tsn::StreamId crf_sid{};
-    if (auto const* s = host_.components().acmp_talker.get_stream(CRF_STREAM_INDEX); s != nullptr) {
-        (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &crf_sid);
-        talker_->crf_dest_mac_ = s->stream_dest_mac;
     }
 
     // Deterministic media clock owns the presentation offset; the stream-output
@@ -394,18 +398,32 @@ auto AvbEntityToneGenerator::start(net::MessageReactor& reactor) -> Status
     media_clock_ = ptpclient::MediaClockGenerator{ptpclient::MediaClockGenerator::Config{
         .sample_rate_hz = static_cast<double>(SAMPLE_RATE), .presentation_offset_ns = config_.presentation_offset_ns}};
 
-    talker_->am824_out_.emplace(
-        am824_sid, avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_), /*presentation_offset_ns=*/0);
     talker_->aaf_out_.emplace(
         aaf_sid, AAF_FORMAT, AAF_SAMPLE_RATE, static_cast<uint16_t>(channels_), AAF_BIT_DEPTH, /*presentation_offset_ns=*/0);
-    talker_->crf_out_.emplace(
-        crf_sid,
-        avtp::CrfType::audio_sample,
-        CRF_BASE_FREQUENCY,
-        avtp::CrfPull::multiply_1_0,
-        config_.crf_timestamp_interval,
-        config_.crf_timestamps_per_packet);
-    talker_->crf_event_ = 0;
+
+    if (!aaf_only_) {
+        // AM824 (stream 0) + CRF (stream 2) in the full model.
+        statusbar::tsn::StreamId am824_sid{};
+        if (auto const* s = host_.components().acmp_talker.get_stream(AM824_STREAM_INDEX); s != nullptr) {
+            (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &am824_sid);
+            talker_->am824_dest_mac_ = s->stream_dest_mac;
+        }
+        statusbar::tsn::StreamId crf_sid{};
+        if (auto const* s = host_.components().acmp_talker.get_stream(CRF_STREAM_INDEX); s != nullptr) {
+            (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &crf_sid);
+            talker_->crf_dest_mac_ = s->stream_dest_mac;
+        }
+        talker_->am824_out_.emplace(
+            am824_sid, avtp::Am824SampleRate::rate_96_khz, static_cast<uint8_t>(channels_), /*presentation_offset_ns=*/0);
+        talker_->crf_out_.emplace(
+            crf_sid,
+            avtp::CrfType::audio_sample,
+            CRF_BASE_FREQUENCY,
+            avtp::CrfPull::multiply_1_0,
+            config_.crf_timestamp_interval,
+            config_.crf_timestamps_per_packet);
+        talker_->crf_event_ = 0;
+    }
 
     // One TX socket (qdisc-bypass so our own egress is not re-received).
     (void)talker_->stream_tx_.open(config_.interface_name, avtp::AVTP_ETHERTYPE, nullptr, /*qdisc_bypass=*/true);
@@ -453,6 +471,14 @@ void AvbEntityToneGenerator::print_state() const
 // MSRP talker reservation
 //
 
+auto AvbEntityToneGenerator::active_stream_indices() const -> std::vector<uint16_t>
+{
+    if (aaf_only_) {
+        return {aaf_idx_};
+    }
+    return {AM824_STREAM_INDEX, AAF_STREAM_INDEX, CRF_STREAM_INDEX};
+}
+
 auto AvbEntityToneGenerator::make_talker_srp_info(uint16_t stream_index) const -> nanoavb::TalkerStreamSrpInfo
 {
     nanoavb::TalkerStreamSrpInfo info{};
@@ -465,11 +491,13 @@ auto AvbEntityToneGenerator::make_talker_srp_info(uint16_t stream_index) const -
     }
     info.max_interval_frames = 1;
     constexpr uint16_t QUADLET_BYTES = 4;
-    if (stream_index == CRF_STREAM_INDEX) {
+    bool const is_crf = !aaf_only_ && stream_index == CRF_STREAM_INDEX;
+    bool const is_aaf = aaf_only_ ? (stream_index == aaf_idx_) : (stream_index == AAF_STREAM_INDEX);
+    if (is_crf) {
         info.max_frame_size =
             static_cast<uint16_t>(avtp::CrfPdu::HEADER_LENGTH + (config_.crf_timestamps_per_packet * avtp::CrfPdu::TIMESTAMP_SIZE));
     } else {
-        uint16_t const header_bytes = (stream_index == AAF_STREAM_INDEX) ? avtp::AafPdu::HEADER_LENGTH : uint16_t{32};
+        uint16_t const header_bytes = is_aaf ? avtp::AafPdu::HEADER_LENGTH : uint16_t{32};
         info.max_frame_size = static_cast<uint16_t>(header_bytes + ((SAMPLES_PER_PACKET + 1) * channels_ * QUADLET_BYTES));
     }
     info.accumulated_latency = 0;
@@ -481,7 +509,7 @@ void AvbEntityToneGenerator::advertise_talker_streams(TimePoint const time)
     if (!maap_addresses_ready_.load(std::memory_order_acquire)) {
         return;
     }
-    for (uint16_t const idx : {AM824_STREAM_INDEX, AAF_STREAM_INDEX, CRF_STREAM_INDEX}) {
+    for (uint16_t const idx : active_stream_indices()) {
         auto result = host_.components().msrp_handler.talker_advertise(make_talker_srp_info(idx), time);
         if (!result) {
             std::print(stderr, "Warning: MSRP talker_advertise (stream {}) failed: {}\n", idx, result.error().message());
@@ -541,8 +569,8 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
         uint64_t const pts_base = media_clock_.timestamp_for(tick.first_index);
         int64_t const now_steady_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        bool const tx_am824 = talker_should_transmit(AM824_STREAM_INDEX, now_steady_ns);
-        bool const tx_aaf = talker_should_transmit(AAF_STREAM_INDEX, now_steady_ns);
+        bool const tx_aaf = talker_should_transmit(aaf_idx_, now_steady_ns);
+        bool const tx_am824 = !aaf_only_ && talker_should_transmit(AM824_STREAM_INDEX, now_steady_ns);
         if (tx_am824) {
             talker_->transmit_am824(pts_base, tick.samples);
         }
@@ -556,6 +584,9 @@ void AvbEntityToneGenerator::process_audio(TimePoint time)
             aaf_reframer_.clear();
         }
 
+        if (aaf_only_) {
+            continue;  // no CRF / AM824 in AafOnly mode
+        }
         // CRF media-clock PDU, decimated to its declared rate.
         if (tx_am824 || tx_aaf || talker_should_transmit(CRF_STREAM_INDEX, now_steady_ns)) {
             uint32_t const sample_stride = static_cast<uint32_t>(config_.crf_timestamp_interval) * SAMPLE_RATE / CRF_BASE_FREQUENCY;
@@ -586,18 +617,25 @@ auto AvbEntityToneGenerator::fill_stream_output_counters(
     uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const -> bool
 {
     uint64_t frames_tx = 0;
-    switch (descriptor_index) {
-        case AM824_STREAM_INDEX:
-            frames_tx = talker_->am824_tx_packets_;
-            break;
-        case AAF_STREAM_INDEX:
-            frames_tx = talker_->aaf_tx_packets_;
-            break;
-        case CRF_STREAM_INDEX:
-            frames_tx = talker_->crf_out_ ? talker_->crf_out_->packets_sent : 0;
-            break;
-        default:
+    if (aaf_only_) {
+        if (descriptor_index != aaf_idx_) {
             return false;
+        }
+        frames_tx = talker_->aaf_tx_packets_;
+    } else {
+        switch (descriptor_index) {
+            case AM824_STREAM_INDEX:
+                frames_tx = talker_->am824_tx_packets_;
+                break;
+            case AAF_STREAM_INDEX:
+                frames_tx = talker_->aaf_tx_packets_;
+                break;
+            case CRF_STREAM_INDEX:
+                frames_tx = talker_->crf_out_ ? talker_->crf_out_->packets_sent : 0;
+                break;
+            default:
+                return false;
+        }
     }
     valid |= (1U << 6U);  // FRAMES_TX (IEEE 1722.1 Clause 7.4.43)
     out[6] = static_cast<uint32_t>(frames_tx);

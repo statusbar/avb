@@ -82,18 +82,30 @@ class AvbEntityToneGenerator
     static constexpr avtp::AafSampleRate AAF_SAMPLE_RATE = avtp::AafSampleRate::rate_96_khz;
     static constexpr uint8_t AAF_BIT_DEPTH = 32;
 
-    /// Stream (STREAM_OUTPUT) descriptor indices.
+    /// Stream (STREAM_OUTPUT) descriptor indices for the full (All) model.
     static constexpr uint16_t AM824_STREAM_INDEX = 0;
     static constexpr uint16_t AAF_STREAM_INDEX = 1;
     static constexpr uint16_t CRF_STREAM_INDEX = 2;
 
+    /// Which stream set this entity exposes + transmits.
+    ///   All     = AM824 (idx 0) + AAF (idx 1) + CRF (idx 2) — the full generator.
+    ///   AafOnly = a single AAF stream at index 0 — a clean 8-ch AAF device, for a
+    ///             listener that stalls on the mixed AM824+AAF 16-ch aggregate
+    ///             (e.g. macOS). Pairs with `aem-entity-blob --tone-aaf`.
+    enum class StreamSet
+    {
+        All,
+        AafOnly
+    };
+
     /// Factory — constructs and validates the entity from configuration. Parses
-    /// the descriptor-storage blob (which must declare >= 3 stream outputs) for
-    /// the channel count + entity model. `base_midi_note` selects the lowest
-    /// white-key tone (default C2); each channel takes the next white key up.
+    /// the descriptor-storage blob (channel count + model) and exposes the
+    /// requested `streams` set. `base_midi_note` selects the lowest white-key tone
+    /// (default C2); each channel takes the next white key up.
     [[nodiscard]] static auto create(
         AvbEntityAudioIOConfig config,
         uint8_t base_midi_note = TONE_DEFAULT_BASE_MIDI_NOTE,
+        StreamSet streams = StreamSet::All,
         std::pmr::memory_resource* memory_resource = nullptr) -> StatusValue<std::unique_ptr<AvbEntityToneGenerator>>;
 
     ~AvbEntityToneGenerator();
@@ -116,6 +128,7 @@ class AvbEntityToneGenerator
         std::unique_ptr<nanoavb::AemEntityHandler> handler,
         size_t channels,
         uint8_t base_midi_note,
+        StreamSet streams,
         std::pmr::memory_resource* memory_resource);
 
     [[nodiscard]] auto start(net::MessageReactor& reactor) -> Status;
@@ -153,6 +166,8 @@ class AvbEntityToneGenerator
 
   private:
     auto wire_stream_callbacks() -> void;
+    /// The active STREAM_OUTPUT indices: {0,1,2} in All mode, {0} (AAF) in AafOnly.
+    [[nodiscard]] auto active_stream_indices() const -> std::vector<uint16_t>;
     [[nodiscard]] auto make_talker_srp_info(uint16_t stream_index) const -> nanoavb::TalkerStreamSrpInfo;
     void advertise_talker_streams(TimePoint time);
     [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor) -> Status;
@@ -163,9 +178,14 @@ class AvbEntityToneGenerator
 
     AvbEntityAudioIOConfig config_;
 
-    /// Reusable AVB control plane: 3 talker streams, 4 max listeners each, 0
-    /// listener streams (talker-only).
+    /// Reusable AVB control plane: N talker streams (3 for All, 1 for AafOnly),
+    /// 4 max listeners each, 0 listener streams (talker-only).
     AvbEntityHost host_;
+
+    /// AafOnly mode: a single AAF stream output at index 0 (no AM824 / CRF).
+    bool aaf_only_{false};
+    /// Descriptor/ACMP index of the AAF stream: 1 in All mode, 0 in AafOnly.
+    uint16_t aaf_idx_{AAF_STREAM_INDEX};
 
     /// Per-stream transmit gate (ACMP-AND-MSRP + grace). Binds config_ + components.
     TalkerGate gate_{config_, host_.components()};

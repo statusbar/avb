@@ -119,6 +119,10 @@ struct Config
 #else
     std::string descriptor_storage_path;
 #endif
+    /// Stream set: "all" = AM824 + AAF + CRF (3 outputs); "aaf" = a single AAF
+    /// 8-ch stream (diagnostic — a clean device for listeners that stall on the
+    /// mixed AM824+AAF aggregate). "aaf" auto-selects the entity_tone_aaf.bin blob.
+    std::string streams_mode{"all"};
     bool verbose{true};
     bool dump_stats_on_exit{true};
     bool require_ptp{false};
@@ -226,9 +230,16 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "Dump the media-timer callback-DURATION histogram to this CSV at exit",
         config.media_timer_duration_csv_path,
         [&](auto v) { config.media_timer_duration_csv_path = v; });
+    specs.add_choice(
+        "streams",
+        "Stream set: 'all' = AM824 + AAF + CRF (3 outputs); 'aaf' = a single 8-ch AAF stream (diagnostic clean "
+        "device; auto-selects entity_tone_aaf.bin unless --descriptor-storage is given)",
+        {"all", "aaf"},
+        "all",
+        [&](auto v) { config.streams_mode = std::string{v}; });
     specs.add<std::string>(
         "descriptor-storage",
-        "Path to descriptor storage .bin file (0 in + 3 out; defaults to the packaged entity_tone.bin)",
+        "Path to descriptor storage .bin file (defaults to entity_tone.bin, or entity_tone_aaf.bin for --streams=aaf)",
         config.descriptor_storage_path,
         [&](auto v) { config.descriptor_storage_path = v; });
     specs.add<bool>("verbose", "Enable verbose output", config.verbose, [&](auto v) { config.verbose = v; });
@@ -493,6 +504,16 @@ auto main(int argc, char** argv) -> int
         print_usage(argv[0], specs);
         return EXIT_FAILURE;
     }
+    // AAF-only: pick the matching blob unless the user gave an explicit path.
+    auto const stream_set =
+        (config.streams_mode == "aaf") ? Entity::StreamSet::AafOnly : Entity::StreamSet::All;
+#ifdef STATUSBAR_AVB_DEFAULT_TONE_BLOB
+#ifdef STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB
+    if (stream_set == Entity::StreamSet::AafOnly && config.descriptor_storage_path == STATUSBAR_AVB_DEFAULT_TONE_BLOB) {
+        config.descriptor_storage_path = STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB;
+    }
+#endif
+#endif
     if (config.descriptor_storage_path.empty()) {
         std::print(stderr, "Error: --descriptor-storage=<path> is required\n");
         print_usage(argv[0], specs);
@@ -516,7 +537,7 @@ auto main(int argc, char** argv) -> int
     realtime::setup_shutdown_signal_handlers();
 
     auto const base_midi_note = config.base_midi_note;
-    auto entity_result = avb_entity::AvbEntityToneGenerator::create(std::move(config.entity), base_midi_note);
+    auto entity_result = avb_entity::AvbEntityToneGenerator::create(std::move(config.entity), base_midi_note, stream_set);
     if (!entity_result) {
         std::print(stderr, "Error: Failed to create entity: {}\n", entity_result.error().message());
         return EXIT_FAILURE;
