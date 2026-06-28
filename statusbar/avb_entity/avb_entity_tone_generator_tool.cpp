@@ -232,9 +232,10 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         [&](auto v) { config.media_timer_duration_csv_path = v; });
     specs.add_choice(
         "streams",
-        "Stream set: 'all' = AM824 + AAF + CRF (3 outputs); 'aaf' = a single 8-ch AAF stream (diagnostic clean "
-        "device; auto-selects entity_tone_aaf.bin unless --descriptor-storage is given)",
-        {"all", "aaf"},
+        "Stream set: 'all' = AM824 + AAF + CRF (3 outputs); 'aaf' = a single 8-ch AAF stream; 'aaf+crf' = AAF audio "
+        "+ CRF media clock (clean 8-ch device WITH a clock reference for the listener). 'aaf'/'aaf+crf' auto-select "
+        "their blob unless --descriptor-storage is given",
+        {"all", "aaf", "aaf+crf"},
         "all",
         [&](auto v) { config.streams_mode = std::string{v}; });
     specs.add<std::string>(
@@ -504,15 +505,24 @@ auto main(int argc, char** argv) -> int
         print_usage(argv[0], specs);
         return EXIT_FAILURE;
     }
-    // AAF-only: pick the matching blob unless the user gave an explicit path.
-    auto const stream_set =
-        (config.streams_mode == "aaf") ? Entity::StreamSet::AafOnly : Entity::StreamSet::All;
+    // Map --streams to the entity's StreamSet, and pick the matching default blob
+    // unless the user gave an explicit --descriptor-storage path.
+    auto const stream_set = (config.streams_mode == "aaf")       ? Entity::StreamSet::AafOnly
+                            : (config.streams_mode == "aaf+crf") ? Entity::StreamSet::AafCrf
+                                                                 : Entity::StreamSet::All;
 #ifdef STATUSBAR_AVB_DEFAULT_TONE_BLOB
+    if (config.descriptor_storage_path == STATUSBAR_AVB_DEFAULT_TONE_BLOB) {
 #ifdef STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB
-    if (stream_set == Entity::StreamSet::AafOnly && config.descriptor_storage_path == STATUSBAR_AVB_DEFAULT_TONE_BLOB) {
-        config.descriptor_storage_path = STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB;
-    }
+        if (stream_set == Entity::StreamSet::AafOnly) {
+            config.descriptor_storage_path = STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB;
+        }
 #endif
+#ifdef STATUSBAR_AVB_DEFAULT_TONE_AAF_CRF_BLOB
+        if (stream_set == Entity::StreamSet::AafCrf) {
+            config.descriptor_storage_path = STATUSBAR_AVB_DEFAULT_TONE_AAF_CRF_BLOB;
+        }
+#endif
+    }
 #endif
     if (config.descriptor_storage_path.empty()) {
         std::print(stderr, "Error: --descriptor-storage=<path> is required\n");

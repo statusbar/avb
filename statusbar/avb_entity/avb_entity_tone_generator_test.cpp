@@ -311,4 +311,55 @@ TEST(tone_aaf_create, aaf_only_gate_disabled_transmits_index0)
     EXPECT_TRUE((*result)->talker_should_transmit(0, 0));  // AAF at index 0
 }
 
+//
+// AAF + CRF variant (AAF audio idx0 + CRF media clock idx1).
+//
+
+TEST(tone_aafcrf_model, declares_aaf_plus_crf_no_inputs)
+{
+    auto blob = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_tone_aaf_crf.bin");
+    auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage.has_value());
+    auto const count = [&](uint16_t type) -> size_t {
+        size_t n = 0;
+        while (storage->get_descriptor(0, type, static_cast<uint16_t>(n)).has_value()) {
+            ++n;
+        }
+        return n;
+    };
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 0u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 2u);  // AAF + CRF
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 1u);  // AAF audio only
+    // STREAM_OUTPUT[0] = AAF, STREAM_OUTPUT[1] = Milan CRF.
+    auto const aaf = storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0);
+    auto const crf = storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 1);
+    EXPECT_TRUE(aaf.has_value() && crf.has_value());
+    if (aaf.has_value() && crf.has_value()) {
+        atdecc::aem::DescriptorStream a{};
+        atdecc::aem::DescriptorStream c{};
+        span_load_padded(a, *aaf);
+        span_load_padded(c, *crf);
+        EXPECT_EQ(a.current_format.span()[0], 0x02);  // AAF subtype
+        EXPECT_EQ(c.current_format.span()[0], 0x04);  // CRF subtype
+    }
+}
+
+TEST(tone_aafcrf_create, aaf_at_0_crf_at_1_transmit_when_ungated)
+{
+    auto blob = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_tone_aaf_crf.bin");
+    auto config = make_config_with_blob(std::move(blob));
+    config.gate_talker_on_listener = false;
+    auto result = AvbEntityToneGenerator::create(
+        std::move(config), TONE_DEFAULT_BASE_MIDI_NOTE, AvbEntityToneGenerator::StreamSet::AafCrf);
+    EXPECT_TRUE(result.has_value());
+    if (!result.has_value()) {
+        return;
+    }
+    EXPECT_EQ((*result)->channels(), 8U);
+    EXPECT_TRUE((*result)->talker_should_transmit(0, 0));  // AAF at index 0
+    EXPECT_TRUE((*result)->talker_should_transmit(1, 0));  // CRF at index 1
+    (*result)->process_audio(sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()});
+    EXPECT_FALSE((*result)->is_running());
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_tone_generator_test)

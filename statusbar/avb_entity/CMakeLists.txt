@@ -86,6 +86,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     PRIVATE
       STATUSBAR_AVB_DEFAULT_TONE_BLOB="${CMAKE_INSTALL_FULL_DATADIR}/statusbar-avb/entity_tone.bin"
       STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB="${CMAKE_INSTALL_FULL_DATADIR}/statusbar-avb/entity_tone_aaf.bin"
+      STATUSBAR_AVB_DEFAULT_TONE_AAF_CRF_BLOB="${CMAKE_INSTALL_FULL_DATADIR}/statusbar-avb/entity_tone_aaf_crf.bin"
   )
   set_target_properties(avb_entity_tone_generator_tool
                         PROPERTIES OUTPUT_NAME statusbar-avb-tone-generator)

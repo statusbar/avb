@@ -90,12 +90,16 @@ class AvbEntityToneGenerator
     /// Which stream set this entity exposes + transmits.
     ///   All     = AM824 (idx 0) + AAF (idx 1) + CRF (idx 2) — the full generator.
     ///   AafOnly = a single AAF stream at index 0 — a clean 8-ch AAF device, for a
-    ///             listener that stalls on the mixed AM824+AAF 16-ch aggregate
-    ///             (e.g. macOS). Pairs with `aem-entity-blob --tone-aaf`.
+    ///             listener that stalls on the mixed AM824+AAF 16-ch aggregate.
+    ///             Pairs with `aem-entity-blob --tone-aaf`.
+    ///   AafCrf  = AAF (idx 0) + CRF (idx 1) — a clean 8-ch AAF device PLUS a CRF
+    ///             media-clock stream, so a listener (e.g. macOS) has a clock
+    ///             reference to recover. Pairs with `aem-entity-blob --tone-aaf-crf`.
     enum class StreamSet
     {
         All,
-        AafOnly
+        AafOnly,
+        AafCrf
     };
 
     /// Factory — constructs and validates the entity from configuration. Parses
@@ -182,10 +186,13 @@ class AvbEntityToneGenerator
     /// 4 max listeners each, 0 listener streams (talker-only).
     AvbEntityHost host_;
 
-    /// AafOnly mode: a single AAF stream output at index 0 (no AM824 / CRF).
-    bool aaf_only_{false};
-    /// Descriptor/ACMP index of the AAF stream: 1 in All mode, 0 in AafOnly.
+    /// Active stream kinds + their descriptor/ACMP indices. AAF is always present.
+    ///   All:     AM824@0, AAF@1, CRF@2.   AafCrf: AAF@0, CRF@1.   AafOnly: AAF@0.
+    bool has_am824_{true};
+    bool has_crf_{true};
+    uint16_t am824_idx_{AM824_STREAM_INDEX};
     uint16_t aaf_idx_{AAF_STREAM_INDEX};
+    uint16_t crf_idx_{CRF_STREAM_INDEX};
 
     /// Per-stream transmit gate (ACMP-AND-MSRP + grace). Binds config_ + components.
     TalkerGate gate_{config_, host_.components()};
