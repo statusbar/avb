@@ -1061,12 +1061,15 @@ using statusbar::tools::AemEntityBlob;
         b.add(CFG, d);
     }
 
-    // LOCALE + STRINGS (7 names: 0=entity, 1=Internal, 2=ClockDomain,
-    // 3=AAF Audio, 4=CRF Media Clock, 5=Audio Unit, 6=Output).
+    // LOCALE + STRINGS (one STRINGS descriptor holding 7 names: 0=entity,
+    // 1=Internal, 2=ClockDomain, 3=AAF Audio, 4=CRF Media Clock, 5=Audio Unit,
+    // 6=Output). number_of_strings is the count of STRINGS DESCRIPTORS (1), not
+    // the number of strings -- setting it to 7 makes a controller read STRINGS
+    // descriptors 1..6 (which don't exist) and abort enumeration.
     {
         DescriptorLocale d{};
         d.locale_identifier = AtdeccString{"en"};
-        d.number_of_strings = 7;
+        d.number_of_strings = 1;
         d.base_strings = 0;
         b.add(CFG, d);
     }
