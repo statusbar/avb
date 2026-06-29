@@ -941,11 +941,14 @@ using statusbar::tools::AemEntityBlob;
         b.add(CFG, d);
     }
 
-    // AUDIO_UNIT — one output port (AAF).
+    // AUDIO_UNIT — one output port (AAF). Localized strings (STRINGS desc 0)
+    // name the clock/stream objects so a controller (macOS Audio MIDI Setup)
+    // can label + select them; string indices: 1=Internal 2=ClockDomain
+    // 3=AAF Audio 4=CRF Media Clock 5=Audio Unit 6=Output.
     {
         DescriptorAudioUnit d{};
         d.object_name = AtdeccString{"AudioUnit"};
-        d.localized_description = NO_LOCALIZED;
+        d.localized_description = 5;
         d.clock_domain_index = 0;
         d.number_of_stream_input_ports = 0;
         d.base_stream_input_port = 0;
@@ -962,7 +965,7 @@ using statusbar::tools::AemEntityBlob;
         d.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
         d.descriptor_index = 0;
         d.object_name = AtdeccString{"StreamOutputAAF"};
-        d.localized_description = NO_LOCALIZED;
+        d.localized_description = 3;
         d.clock_domain_index = 0;
         d.stream_flags = STREAM_FLAG_CLASS_A;
         d.current_format = aaf_8ch_96k_32bit();
@@ -977,7 +980,7 @@ using statusbar::tools::AemEntityBlob;
         d.descriptor_type = DESCRIPTOR_STREAM_OUTPUT;
         d.descriptor_index = 1;
         d.object_name = AtdeccString{"StreamOutputCRF"};
-        d.localized_description = NO_LOCALIZED;
+        d.localized_description = 4;
         d.clock_domain_index = 0;
         d.stream_flags = STREAM_FLAG_CLASS_A;
         d.current_format = crf_audio_48k();
@@ -1004,7 +1007,7 @@ using statusbar::tools::AemEntityBlob;
         DescriptorAudioCluster d{};
         d.descriptor_index = 0;
         d.object_name = AtdeccString{"OutputCluster"};
-        d.localized_description = NO_LOCALIZED;
+        d.localized_description = 6;
         d.channel_count = channels;
         d.format = AUDIO_CLUSTER_FORMAT_MBLA;
         b.add(CFG, d);
@@ -1035,11 +1038,13 @@ using statusbar::tools::AemEntityBlob;
     }
 
     // CLOCK_SOURCE 0 — INTERNAL (gPTP-derived); distributed via the CRF stream.
+    // localized name (string 1) so a controller labels it "Internal" -- distinct
+    // from the CRF stream a listener may pick as its recovered media clock.
     {
         DescriptorClockSource d{};
         d.descriptor_index = 0;
         d.object_name = AtdeccString{"Internal"};
-        d.localized_description = NO_LOCALIZED;
+        d.localized_description = 1;
         d.clock_source_type = CLOCK_SOURCE_TYPE_INTERNAL;
         d.clock_source_location_type = DESCRIPTOR_AUDIO_UNIT;
         d.clock_source_location_index = 0;
@@ -1050,23 +1055,30 @@ using statusbar::tools::AemEntityBlob;
     {
         DescriptorClockDomain d{};
         d.object_name = AtdeccString{"ClockDomain"};
-        d.localized_description = NO_LOCALIZED;
+        d.localized_description = 2;
         d.clock_source_index = 0;
         ok = (d.push_clock_source(0)) && ok;
         b.add(CFG, d);
     }
 
-    // LOCALE + STRINGS.
+    // LOCALE + STRINGS (7 names: 0=entity, 1=Internal, 2=ClockDomain,
+    // 3=AAF Audio, 4=CRF Media Clock, 5=Audio Unit, 6=Output).
     {
         DescriptorLocale d{};
         d.locale_identifier = AtdeccString{"en"};
-        d.number_of_strings = 1;
+        d.number_of_strings = 7;
         d.base_strings = 0;
         b.add(CFG, d);
     }
     {
         DescriptorStrings d{};
         d.string_0 = AtdeccString{std::string{name}.c_str()};
+        d.string_1 = AtdeccString{"Internal"};
+        d.string_2 = AtdeccString{"Clock Domain"};
+        d.string_3 = AtdeccString{"AAF Audio"};
+        d.string_4 = AtdeccString{"CRF Media Clock"};
+        d.string_5 = AtdeccString{"Audio Unit"};
+        d.string_6 = AtdeccString{"Output"};
         b.add(CFG, d);
     }
 
