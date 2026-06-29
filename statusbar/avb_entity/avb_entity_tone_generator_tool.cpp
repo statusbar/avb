@@ -97,7 +97,9 @@ struct Config
 
     avb_entity::AvbEntityAudioIOConfig entity{
         .entity_id = ieee::Eui64{},
-        .entity_model_id = ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x03},
+        // Well-formed EUI-64 model id: OUI-24 70:b3:d5 + FF:FE insertion + device
+        // bits (NOT OUI-36 bits jammed in right after the OUI-24, which is malformed).
+        .entity_model_id = ieee::Eui64{0x70, 0xB3, 0xD5, 0xFF, 0xFE, 0xED, 0xC0, 0x00},
         // JDKS OUI-36 multicast (NOT the 91:E0:F0 MAAP pool). CRF = top of range.
         .am824_talker_dest_mac = {0x71, 0xB3, 0xD5, 0xED, 0xCF, 0xFD},
         .aaf_talker_dest_mac = {0x71, 0xB3, 0xD5, 0xED, 0xCF, 0xFE},
