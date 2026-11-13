@@ -568,7 +568,7 @@ if (controller_has_timeout(ctx, later)) {
 | `ACMP_STATUS_LISTENER_TALKER_TIMEOUT` | 7 | Listener timed out waiting for Talker |
 | `ACMP_STATUS_LISTENER_EXCLUSIVE` | 8 | Listener already exclusively bound |
 | `ACMP_STATUS_STATE_UNAVAILABLE` | 9 | Listener/Talker state unavailable |
-| `ACMP_STATUS_NOT_CONNECTED` | 10 | Stream not currently connected |
+| `ACMP_STATUS_NOT_CONNECTED` | 10 | DISCONNECT_RX for a sink not connected, or not to the talker named (Table 8-3) |
 | `ACMP_STATUS_NO_SUCH_CONNECTION` | 11 | GET_TX_CONNECTION index invalid |
 | `ACMP_STATUS_COULD_NOT_SEND_MESSAGE` | 12 | Could not send PDU |
 | `ACMP_STATUS_TALKER_MISBEHAVING` | 13 | Talker misbehaving |

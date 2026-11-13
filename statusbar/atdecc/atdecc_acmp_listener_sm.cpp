@@ -121,18 +121,17 @@ void answer_already_connected(ListenerContext<>& ctx, AcmpCommandResponse const&
     if (ctx.is_authorized && !ctx.is_authorized(cmd.controller_entity_id)) {
         return ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED;
     }
-    if (!stream->connected) {
-        // Not connected - send success anyway (idempotent)
-        return ACMP_STATUS_SUCCESS;
-    }
-    // The DISCONNECT_RX must name the talker this sink is actually connected to
-    // (IEEE 1722.1 Clause 8.2.2.6.2). Otherwise a command for a different talker
-    // would tear down the live connection to the one we ARE connected to. Reject a
-    // mismatch with NO_SUCH_CONNECTION rather than disconnecting.
+    // IEEE 1722.1-2021 Figure 8-3: the disconnect proceeds only when
+    // listenerIsConnectedTo(command) holds (8.2.4.2.3: connected, and to the
+    // talker_entity_id and talker_unique_id the command names); otherwise the
+    // answer is NOT_CONNECTED, which Table 8-3 defines as "trying to disconnect
+    // when not connected or not connected to the ATDECC Talker specified". A
+    // command for a different talker therefore never tears down the live
+    // connection to the one this sink is connected to.
     bool const same_talker =
         stream->talker_entity_id == cmd.talker_entity_id && stream->talker_unique_id == cmd.talker_unique_id.get();
-    if (!same_talker) {
-        return ACMP_STATUS_NO_SUCH_CONNECTION;
+    if (!stream->connected || !same_talker) {
+        return ACMP_STATUS_NOT_CONNECTED;
     }
     return std::nullopt;
 }

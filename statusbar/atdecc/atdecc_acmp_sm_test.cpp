@@ -1051,8 +1051,9 @@ TEST(listener_sm, connect_listener_exclusive)
 }
 
 // Regression (acmp#4): a DISCONNECT_RX must name the talker the sink is actually
-// connected to. A command naming a different talker is rejected with
-// NO_SUCH_CONNECTION and must NOT tear down the live connection.
+// connected to. A command naming a different talker is answered NOT_CONNECTED
+// (Table 8-3: "not connected to the ATDECC Talker specified"; Figure 8-3's
+// listenerIsConnectedTo branch) and must NOT tear down the live connection.
 TEST(listener_sm, disconnect_rx_wrong_talker_rejected)
 {
     ListenerContext ctx(4);
@@ -1078,7 +1079,7 @@ TEST(listener_sm, disconnect_rx_wrong_talker_rejected)
     AcmpListenerStateMachine<> sm;
     sm.handle_event(ctx, ListenerEvent::UCT, test_time(0));
 
-    // DISCONNECT_RX naming a DIFFERENT talker -> NO_SUCH_CONNECTION, no teardown.
+    // DISCONNECT_RX naming a DIFFERENT talker -> NOT_CONNECTED, no teardown.
     Eui64 const OTHER_TALKER{0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33};
     ctx.rcvd_cmd_resp = {};
     ctx.rcvd_cmd_resp.init_command(ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND);
@@ -1089,7 +1090,7 @@ TEST(listener_sm, disconnect_rx_wrong_talker_rejected)
     sm.handle_event(ctx, ListenerEvent::RcvdDisconnectRx, test_time(0));
 
     EXPECT_EQ(sent_responses.size(), 1U);
-    EXPECT_EQ(sent_responses[0].status(), ACMP_STATUS_NO_SUCH_CONNECTION);
+    EXPECT_EQ(sent_responses[0].status(), ACMP_STATUS_NOT_CONNECTED);
     EXPECT_TRUE(sent_commands.empty());         // no DISCONNECT_TX to any talker
     EXPECT_TRUE(ctx.get_stream(0)->connected);  // live connection to TALKER_ID preserved
 
@@ -1370,12 +1371,19 @@ TEST(listener_sm, connect_response_after_retry)
     EXPECT_FALSE(ctx.has_pending);
 }
 
+// IEEE 1722.1-2021 Figure 8-3: a DISCONNECT_RX_COMMAND for a sink that is not
+// connected is answered NOT_CONNECTED (Table 8-3), with no talker exchange.
 TEST(listener_sm, disconnect_not_connected)
 {
     ListenerContext ctx(4);
     ctx.my_id = LISTENER_ID;
 
+    std::vector<AcmpCommandResponse> sent_commands;
     std::vector<AcmpCommandResponse> sent_responses;
+    ctx.tx_command = [&](AcmpCommandResponse const& c) {
+        sent_commands.push_back(c);
+        return true;
+    };
     ctx.tx_response = [&](AcmpCommandResponse const& resp) {
         sent_responses.push_back(resp);
         return true;
@@ -1390,10 +1398,11 @@ TEST(listener_sm, disconnect_not_connected)
     sm.handle_event(ctx, ListenerEvent::UCT, test_time(0));
     sm.handle_event(ctx, ListenerEvent::RcvdDisconnectRx, test_time(0));
 
-    // Not connected - should return success anyway (idempotent)
     EXPECT_EQ(sent_responses.size(), 1U);
     EXPECT_EQ(sent_responses[0].message_type(), ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE);
-    EXPECT_EQ(sent_responses[0].status(), ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(sent_responses[0].status(), ACMP_STATUS_NOT_CONNECTED);
+    EXPECT_TRUE(sent_commands.empty());  // no DISCONNECT_TX to any talker
+    EXPECT_FALSE(ctx.has_pending);
 }
 
 namespace {
@@ -1506,11 +1515,13 @@ TEST(listener_sm, disconnect_relays_the_talker_status_with_the_sink_already_free
     EXPECT_FALSE(l.ctx.has_pending);
     EXPECT_FALSE(l.ctx.get_stream(0)->connected);
 
-    // The freed sink accepts a new disconnect idempotently and a new connect.
+    // The freed sink answers a new disconnect NOT_CONNECTED (Table 8-3), with
+    // no talker exchange: it is free for a new connect.
     l.disconnect_rx(8, 100);
     EXPECT_EQ(l.sent_responses.size(), 2U);
-    EXPECT_EQ(l.sent_responses[1].status(), ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(l.sent_responses[1].status(), ACMP_STATUS_NOT_CONNECTED);
     EXPECT_EQ(l.sent_commands.size(), 1U);
+    EXPECT_FALSE(l.ctx.has_pending);
 }
 
 TEST(listener_sm, get_rx_state)
