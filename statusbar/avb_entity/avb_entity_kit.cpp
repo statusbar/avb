@@ -318,8 +318,10 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
         return status;
     }
     wire_stream_callbacks();
-    // The VID, registered on every start: stop() withdraws it with the rest.
-    (void)host_.components().mvrp_handler.register_vlan(config_.vlan_id, now);
+    // The VID in force, registered on every start: stop() withdraws it with
+    // the rest, but the Domain adopted from the wire outlives a stop, and
+    // MVRP must say what the MSRP Domain declares.
+    (void)host_.components().mvrp_handler.register_vlan(current_vlan_id(), now);
 
     // The stream port, backend by name. Not fatal: an entity whose port
     // would not open keeps its control plane and has no streams, which is

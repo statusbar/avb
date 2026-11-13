@@ -227,6 +227,28 @@ TEST(avb_entity_kit_domain, a_started_kit_follows_the_domain_it_adopts)
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
 }
 
+TEST(avb_entity_kit_domain, after_a_restart_mvrp_registers_the_vlan_the_domain_declares)
+{
+    // stop() withdraws the VLAN and the Domain; start() registers the VLAN
+    // again. It must be the one the Domain in force names, whatever that
+    // is after an adoption, or MVRP and the declared Domain disagree until
+    // the next adoption.
+    KitUnderTest kit{make_config(7, "milan13")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    bridge_declares_domain(kit, DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{3}}));
+
+    auto const& domain = kit->host().components().msrp_handler.domain();
+    auto const& mvrp = kit->host().components().mvrp_handler;
+    EXPECT_EQ(kit->talker().vlan_id(), domain.sr_class_vid);
+    for (uint16_t const vlan_id : {uint16_t{5}, uint16_t{7}}) {
+        auto const want = vlan_id == domain.sr_class_vid ? nanoavb::VlanState::Pending : nanoavb::VlanState::Unregistered;
+        EXPECT_EQ(mvrp.get_vlan_state(vlan_id), want);
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{4}}));
+}
+
 TEST(avb_entity_kit_domain, a_classic_kit_keeps_its_configured_domain)
 {
     KitUnderTest kit{make_config(7, "classic")};
