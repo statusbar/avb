@@ -216,6 +216,36 @@ TEST(stream_spec_tspec, aaf_is_sized_by_its_format_word_then_by_table_18)
     EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 440);                    // unchanged
 }
 
+// Milan v1.3 Table 4.4 (4.3.3.2): the Talker's TSpec MaxFrameSize is the
+// AVTPDU header plus the nominal payload, exactly. AAF PCM32 at 48/44.1 kHz
+// is 24N + 24 bytes for N channels, at 96/88.2 kHz 48N + 24, CRF with one
+// timestamp per PDU 28. The classic size keeps its one sample of headroom.
+TEST(stream_spec_tspec, milan_frame_sizes_follow_table_4_4_exactly)
+{
+    constexpr uint64_t AAF_48K_INT32_2CH = 0x0205022000806000ULL;   // 48k, 2ch, 6 named
+    constexpr uint64_t AAF_48K_INT32_8CH = 0x0205022002006000ULL;   // 48k, 8ch, 6 named
+    constexpr uint64_t AAF_96K_INT32_2CH = 0x020702200080C000ULL;   // 96k, 2ch, 12 named
+    constexpr uint64_t AAF_44K1_INT32_8CH = 0x0204022002000000ULL;  // 44.1k, 8ch, sized by Table 18
+    EXPECT_EQ(decode_stream_format(AAF_48K_INT32_2CH).channels, 2U);
+    EXPECT_EQ(decode_stream_format(AAF_96K_INT32_2CH).channels, 2U);
+
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(AAF_48K_INT32_2CH)), (24 * 2) + 24);   // 72
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(AAF_48K_INT32_8CH)), (24 * 8) + 24);   // 216
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(AAF_44K1_INT32_8CH)), (24 * 8) + 24);  // 216
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(AAF_96K_INT32_2CH)), (48 * 2) + 24);   // 120
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), (48 * 8) + 24);   // 408
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(CRF_MILAN_48K)), 28);
+
+    // AM824 is not in Table 4.4: sized the same exact way, 32 + 6 * 8 * 4.
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(AM824_48K_8CH)), 224);
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(0)), 0);
+
+    // Classic is unchanged: one extra sample per channel.
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_48K_INT32_8CH)), (28 * 8) + 24);  // 248
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 440);
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AM824_48K_8CH)), 256);
+}
+
 TEST(stream_spec_rate, mixed_audio_rates_rejected)
 {
     StreamSpecs specs{};

@@ -187,4 +187,25 @@ TEST(avb_entity_kit_domain, a_classic_kit_keeps_its_configured_domain)
     }
 }
 
+TEST(avb_entity_kit_tspec, a_milan_kit_declares_table_4_4_frame_sizes_and_a_classic_kit_its_headroom)
+{
+    // Milan v1.3 Table 4.4 sizes the Talker Advertise's TSpec exactly; the
+    // classic profile keeps one sample of headroom per channel.
+    KitUnderTest milan{make_config(2, "milan13")};
+    KitUnderTest classic{make_config(2, "classic")};
+    EXPECT_FALSE(milan.talker_specs().empty());
+    for (auto const& spec : milan.talker_specs()) {
+        auto const info = milan->make_talker_srp_info(spec);
+        EXPECT_EQ(info.max_frame_size, milan_srp_max_frame_size(spec.format));
+        EXPECT_EQ(info.max_interval_frames, 1U);
+    }
+    for (auto const& spec : classic.talker_specs()) {
+        auto const info = classic->make_talker_srp_info(spec);
+        EXPECT_EQ(info.max_frame_size, srp_max_frame_size(spec.format));
+        if (spec.format.kind != StreamKind::crf) {  // CRF is exact under both
+            EXPECT_NE(info.max_frame_size, milan_srp_max_frame_size(spec.format));
+        }
+    }
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)

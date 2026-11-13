@@ -52,7 +52,12 @@ auto listener_stream_specs(atdecc::aem::DescriptorStorage const& storage, uint16
     return stream_specs(storage, config_idx, atdecc::aem::DESCRIPTOR_STREAM_INPUT);
 }
 
-auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t
+namespace {
+
+/// The TSpec frame of @p format at the Class A cadence with @p extra_samples
+/// per channel over the nominal count: the classic headroom is one, Milan's
+/// Table 4.4 is none.
+auto tspec_frame_size(StreamFormatFields const& format, uint32_t const extra_samples) noexcept -> uint16_t
 {
     switch (format.kind) {
         case StreamKind::aaf: {
@@ -60,14 +65,14 @@ auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t
             if (per_pdu == 0) {
                 return 0;
             }
-            auto const samples = per_pdu + 1;
+            auto const samples = per_pdu + extra_samples;
             return static_cast<uint16_t>(avtp::aaf_packet_size(format.aaf_format, format.channels, static_cast<uint16_t>(samples)));
         }
         case StreamKind::am824: {
             if (format.sample_rate_hz == 0) {
                 return 0;
             }
-            auto const samples = class_a_samples_per_packet(format.sample_rate_hz) + 1;
+            auto const samples = class_a_samples_per_packet(format.sample_rate_hz) + extra_samples;
             return static_cast<uint16_t>(
                 avtp::am824_packet_size(static_cast<uint8_t>(format.channels), static_cast<uint8_t>(samples)));
         }
@@ -78,6 +83,18 @@ auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t
         default:
             return 0;
     }
+}
+
+}  // namespace
+
+auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t
+{
+    return tspec_frame_size(format, 1);
+}
+
+auto milan_srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t
+{
+    return tspec_frame_size(format, 0);
 }
 
 auto common_audio_sample_rate(StreamSpecs const& specs, uint32_t const fallback_hz) -> StatusValue<uint32_t>

@@ -460,8 +460,10 @@ auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb
     fill_talker_srp_identity(spec.index, info);
     info.max_interval_frames = 1;
     // TSpec frame size from the format word (kit phase 1) — no per-entity
-    // byte math to keep in step with the model.
-    info.max_frame_size = srp_max_frame_size(spec.format);
+    // byte math to keep in step with the model. Milan v1.3 Table 4.4 sizes
+    // the frame exactly; classic keeps one sample of headroom.
+    info.max_frame_size =
+        config_.atdecc_profile == "milan13" ? milan_srp_max_frame_size(spec.format) : srp_max_frame_size(spec.format);
     info.accumulated_latency = 0;
     return info;
 }

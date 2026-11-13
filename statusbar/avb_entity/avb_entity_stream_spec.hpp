@@ -209,6 +209,15 @@ inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
 /// format with an unknown rate.
 [[nodiscard]] auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t;
 
+/// The MSRP TSpec max_frame_size for @p format under Milan v1.3: Table 4.4
+/// sizes the frame exactly, AVTPDU header plus the nominal payload (AAF
+/// PCM32 at 48 kHz is 24N + 24 for N channels, at 96 kHz 48N + 24, CRF with
+/// one timestamp 28), with no extra sample; a +1 sample TSpec keeps some
+/// 96 kHz and high-channel formats from fitting a Class A reservation. AM824
+/// is not a Milan format (Table 6.3 lists AAF and CRF alone) and is sized
+/// the same exact way. Returns 0 for StreamKind::other or an unknown rate.
+[[nodiscard]] auto milan_srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t;
+
 /// The single audio sample rate shared by every AM824/AAF stream in @p specs
 /// — the rate the entity's one media clock must run at. CRF streams don't
 /// constrain it (a 48 kHz CRF base is routinely advertised under 96 kHz
