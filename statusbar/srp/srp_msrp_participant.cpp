@@ -703,6 +703,18 @@ auto MsrpParticipantT<Limits>::withdraw_domain(uint8_t sr_class_id, TimePoint no
     return success();
 }
 
+template <class Limits>
+void MsrpParticipantT<Limits>::forget_registered_domains()
+{
+    detail_msrp::erase_if(domains_, [](auto const& rec) { return rec.operation == Operation::Register; });
+    for (auto& rec : domains_) {
+        rec.registrar_sm.reset();  // BEGIN!: Mt once the next event runs the UCT chain
+        rec.registrar_ctx.clear_outputs();
+        rec.leave_deadline.reset();
+    }
+    rearm_leave_timer();
+}
+
 // ============================================================
 // Event loop — tick / next_deadline
 // ============================================================

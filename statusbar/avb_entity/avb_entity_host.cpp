@@ -452,6 +452,12 @@ void AvbEntityHost::wire_supervisor_callbacks()
 
     supervisor_ctx_.callbacks.start_protocols = [this](auto& /*ctx*/, TimePoint time) -> void {
         gptp_.handle_event(gptp_ctx_, nanoavb::gptp_sm::Def::Event::AsCapableUp, time);
+        // Milan v1.3 4.2.7.2.1: after a Link Up the Class A Domain is the
+        // configured one again and is declared at once; "Transmission of MSRP
+        // Domain Messages shall not be dependent on the state of gPTP on the
+        // port". An adoption follows from what the wire then says.
+        (void)components_.msrp_handler.return_to_configured_domain(time);
+        (void)components_.msrp_handler.declare_domain(time);
         auto result = components_.adp_advertiser.start(time);
         if (!result) {
             ctl_log().error("ADP start failed: errno {}", result.error().value());

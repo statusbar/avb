@@ -70,7 +70,7 @@ AvbEntityKit::AvbEntityKit(
     host_.components().msrp_handler.set_adopt_domain(milan);
     host_.components().msrp_handler.set_instant_leave(milan);
     host_.components().msrp_handler.set_on_domain_adopted(
-        [this](DomainInfo const& domain, TimePoint const now) { adopt_domain(domain, now); });
+        [this](DomainInfo const& domain, TimePoint const now) { follow_domain(domain, now); });
 
     // Base the talker stream_ids on the NIC MAC (globally unique per box), and
     // seed the static dest MACs by kind (MAAP mode reassigns after acquisition).
@@ -166,11 +166,12 @@ auto AvbEntityKit::talker_kind_of(uint16_t const index) const noexcept -> Stream
     return StreamKind::other;
 }
 
-void AvbEntityKit::adopt_domain(DomainInfo const& domain, TimePoint const now)
+void AvbEntityKit::follow_domain(DomainInfo const& domain, TimePoint const now)
 {
     // Milan v1.3 4.2.7.2.1: the Class A Domain registered from the wire has
-    // replaced ours and the SRP handler has re-declared it. MVRP follows the
-    // VLAN, the streams move (move_talker_streams_to), and the registered
+    // replaced ours, or a startup or Link Up has brought the configured one
+    // back, and the SRP handler has re-declared it. MVRP follows the VLAN,
+    // the streams move (move_talker_streams_to), and the registered
     // controllers hear the new mapping (GET_AVB_INFO, Table 5.20).
     uint16_t const old_vlan = current_vlan_id();
     if (domain.sr_class_vid != old_vlan) {
@@ -180,7 +181,10 @@ void AvbEntityKit::adopt_domain(DomainInfo const& domain, TimePoint const now)
     move_talker_streams_to(domain, now);
     (void)host_.components().aem_handler.notify_avb_info_changed(0);
     host_.ctl_log().status(
-        "msrp: adopted the Class A domain from the wire: priority {} vlan {}", domain.sr_class_priority, domain.sr_class_vid);
+        "msrp: the Class A domain in force: priority {} vlan {} ({})",
+        domain.sr_class_priority,
+        domain.sr_class_vid,
+        active_vlan_id_ == 0 && domain.sr_class_priority == 3 ? logging::lit("configured") : logging::lit("adopted from the wire"));
 }
 
 void AvbEntityKit::move_talker_streams_to(DomainInfo const& domain, TimePoint const now)
@@ -191,7 +195,7 @@ void AvbEntityKit::move_talker_streams_to(DomainInfo const& domain, TimePoint co
     // new VLAN and priority, the participant leaving its old value first
     // (IEEE 802.1Q 10.7). A host not yet advertising declares them when it
     // does, from the same picture (make_talker_srp_info).
-    active_vlan_id_ = domain.sr_class_vid;
+    active_vlan_id_ = domain.sr_class_vid == config_.vlan_id ? 0 : domain.sr_class_vid;
     talker_->set_vlan(domain.sr_class_vid, domain.sr_class_priority);
     for (auto const& spec : talker_specs_) {
         if (auto const* stream = host_.components().acmp_talker.get_stream(spec.index); stream != nullptr) {
@@ -317,6 +321,11 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
     if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
         return status;
     }
+    // Milan v1.3 4.2.7.2.1: after startup the Class A Domain is the
+    // configured one again, whatever was adopted before the stop; the
+    // streams, MVRP and GET_AVB_INFO follow (follow_domain). The Link Up
+    // that follows a start declares it.
+    (void)host_.components().msrp_handler.return_to_configured_domain(now);
     wire_stream_callbacks();
     // The VID in force, registered on every start: stop() withdraws it with
     // the rest, but the Domain adopted from the wire outlives a stop, and

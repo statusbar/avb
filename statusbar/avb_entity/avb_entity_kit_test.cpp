@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <memory>
 #include <memory_resource>
@@ -246,6 +247,50 @@ TEST(avb_entity_kit_domain, after_a_restart_mvrp_registers_the_vlan_the_domain_d
         auto const want = vlan_id == domain.sr_class_vid ? nanoavb::VlanState::Pending : nanoavb::VlanState::Unregistered;
         EXPECT_EQ(mvrp.get_vlan_state(vlan_id), want);
     }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{4}}));
+}
+
+/// MVRP's registrations, from the kit's point of view: @p registered Pending
+/// (or Registered), every other VLAN in @p others Unregistered.
+void expect_mvrp_on(KitUnderTest& kit, uint16_t const registered, std::initializer_list<uint16_t> const others)
+{
+    auto const& mvrp = kit->host().components().mvrp_handler;
+    EXPECT_NE(mvrp.get_vlan_state(registered), nanoavb::VlanState::Unregistered);
+    for (uint16_t const other : others) {
+        EXPECT_EQ(mvrp.get_vlan_state(other), nanoavb::VlanState::Unregistered);
+    }
+}
+
+TEST(avb_entity_kit_domain, start_returns_to_the_configured_domain)
+{
+    // Milan v1.3 4.2.7.2.1: "After startup ... a PAAD shall use SR Class
+    // Priority 3 and Default VLAN ID 2 for Class A" (the configured Domain).
+    // Whatever was adopted before, start() brings the frames, ACMP, the
+    // Talker Advertise and MVRP back to it.
+    KitUnderTest kit{make_config(7, "milan13")};
+    bridge_declares_domain(kit, DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    expect_kit_on_vlan(kit, 5, 5);
+
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    expect_kit_on_vlan(kit, 7, 3);
+    expect_mvrp_on(kit, 7, {5});
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
+TEST(avb_entity_kit_domain, a_link_up_returns_to_the_configured_domain)
+{
+    // Milan v1.3 4.2.7.2.1: "... or a Link Up event". A link that bounces
+    // onto another bridge starts from the configured Domain and adopts what
+    // that bridge declares, not what the last one did.
+    KitUnderTest kit{make_config(7, "milan13")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    bridge_declares_domain(kit, DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    expect_kit_on_vlan(kit, 5, 5);
+    expect_mvrp_on(kit, 5, {7});
+
+    kit->on_link_up(TimePoint{std::chrono::seconds{3}});
+    expect_kit_on_vlan(kit, 7, 3);
+    expect_mvrp_on(kit, 7, {5});
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{4}}));
 }
 

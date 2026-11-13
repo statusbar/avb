@@ -663,6 +663,47 @@ TEST(nanoavb_srp_msrp, installing_the_sender_alone_keeps_the_hooks_installed_bef
     EXPECT_TRUE(sent > 0);  // the PDUs left through the sender installed on its own
 }
 
+TEST(nanoavb_srp_msrp, a_link_up_returns_to_the_configured_domain_and_adopts_afresh)
+{
+    // Milan v1.3 4.2.7.2.1: after startup or a Link Up the PAAD declares its
+    // configured Class A Domain again. The peer's Domain is forgotten with
+    // it, so the one the wire then carries, the same or another bridge's,
+    // is adopted as on a first contact rather than taken for one already
+    // registered.
+    DomainWire wire;
+    wire.device.set_adopt_domain(true);
+    std::vector<DomainInfo> changes;
+    wire.device.set_on_domain_adopted([&](DomainInfo const& d, TimePoint) { changes.push_back(d); });
+    wire.bridge.set_domain(DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    (void)wire.bridge.declare_domain(wire.now);
+    (void)wire.device.declare_domain(wire.now);
+    wire.run(6);
+    EXPECT_EQ(changes.size(), 1U);
+    EXPECT_EQ(wire.device.domain().sr_class_vid, 5);
+
+    // Link Up: the configured Domain is in force and declared again, and the
+    // entity hears it at that instant.
+    EXPECT_TRUE(wire.device.return_to_configured_domain(wire.now));
+    EXPECT_EQ(wire.device.domain().sr_class_priority, 3);
+    EXPECT_EQ(wire.device.domain().sr_class_vid, 2);
+    EXPECT_EQ(changes.size(), 2U);
+    DomainInfo const configured{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = 2};
+    EXPECT_TRUE(changes.size() == 2 && changes.back() == configured);
+
+    // The bridge is still there, still declaring: adopted afresh.
+    wire.run(12);
+    EXPECT_EQ(changes.size(), 3U);
+    EXPECT_EQ(wire.device.domain().sr_class_vid, 5);
+    EXPECT_EQ(wire.device.domain().sr_class_priority, 5);
+
+    // Nothing adopted: nothing to return from, nothing reported.
+    MsrpHandler<> fresh{statusbar::srp::msrp::MsrpConfig{}};
+    bool reported = false;
+    fresh.set_on_domain_adopted([&](DomainInfo const&, TimePoint) { reported = true; });
+    EXPECT_FALSE(fresh.return_to_configured_domain(wire.now));
+    EXPECT_FALSE(reported);
+}
+
 TEST(nanoavb_srp_msrp, a_classic_handler_keeps_its_own_domain)
 {
     DomainWire wire;

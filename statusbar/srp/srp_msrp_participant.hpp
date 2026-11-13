@@ -337,6 +337,15 @@ class MsrpParticipantT
     /// Withdraw an SR class Domain by its sr_class_id.
     auto withdraw_domain(uint8_t sr_class_id, TimePoint now) -> Status;
 
+    /// Forget every Domain the peers registered, as a Link Up leaves them: a
+    /// Domain only ever registered from the wire goes from the database, and
+    /// a Domain we declare keeps its Applicant and forgets what its Registrar
+    /// saw. The next Domain received registers as new and is reported to
+    /// the observers as such, where a Domain still registered would be a
+    /// silent refresh (Milan v1.3 4.2.7.2.1: after startup or a Link Up the
+    /// PAAD declares the default Domain again and adopts afresh).
+    void forget_registered_domains();
+
     // -------------------- Query API --------------------
 
     /// Look up a locally known Talker Advertise by tsn::StreamId.

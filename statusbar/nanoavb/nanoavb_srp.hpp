@@ -109,6 +109,8 @@ struct DomainInfo
     uint8_t sr_class_id = 6;  // Class A
     uint8_t sr_class_priority = 3;
     uint16_t sr_class_vid = 2;
+
+    [[nodiscard]] constexpr auto operator==(DomainInfo const&) const noexcept -> bool = default;
 };
 
 //
@@ -263,10 +265,12 @@ struct MsrpCallbacks
     /// told that call's time: the talker drives its own SM from it.
     statusbar::sg14::inplace_function<void(StreamId const& stream_id, bool ready, TimePoint now), 64> on_talker_listener;
 
-    /// Called when the handler adopted a Class A Domain registered from the
-    /// wire (Milan v1.3 4.2.7.2.1, see MsrpHandler::set_adopt_domain): the
-    /// Domain now declared, and the time of the receive_packet() that brought
-    /// the peer's. The entity takes the new VLAN and priority to its streams.
+    /// Called when the Class A Domain in force changed: adopted from the
+    /// wire (Milan v1.3 4.2.7.2.1, see MsrpHandler::set_adopt_domain), told
+    /// the time of the receive_packet() that brought the peer's; or back to
+    /// the configured one (MsrpHandler::return_to_configured_domain), told
+    /// the time of the startup or Link Up. The Domain now declared; the
+    /// entity takes its VLAN and priority to its streams.
     statusbar::sg14::inplace_function<void(DomainInfo const& domain, TimePoint now), 64> on_domain_adopted;
 };
 
@@ -379,8 +383,33 @@ class MsrpHandler
     {
         return participant_.listener_permit_debug(stream_id);
     }
-    void set_domain(DomainInfo const& domain) noexcept { domain_ = domain; }
+    /// The configured Domain: declared until an adoption replaces it, and
+    /// declared again after return_to_configured_domain().
+    void set_domain(DomainInfo const& domain) noexcept
+    {
+        configured_domain_ = domain;
+        domain_ = domain;
+    }
+    /// The Domain in force: the configured one, or the one adopted from the wire.
     [[nodiscard]] auto domain() const noexcept -> DomainInfo const& { return domain_; }
+
+    /// Milan v1.3 4.2.7.2.1: "After startup or a Link Up event, a PAAD shall
+    /// use SR Class Priority 3 and Default VLAN ID 2 for Class A" (here: the
+    /// Domain set_domain() gave) "and send MSRPDUs declaring an MSRP Domain
+    /// for Class A using these parameters". The peers' registered Domains are
+    /// forgotten, so the next Class A Domain received is adopted afresh rather
+    /// than taken for one already registered. When the adopted Domain differed,
+    /// the configured one is declared again (the adopted value leaves first,
+    /// 802.1Q 10.7) and on_domain_adopted hears it; returns whether it did.
+    auto return_to_configured_domain(TimePoint const now) -> bool
+    {
+        participant_.forget_registered_domains();
+        if (domain_ == configured_domain_) {
+            return false;
+        }
+        take_domain(configured_domain_, now);
+        return true;
+    }
 
     /// Sticky-Listener workaround passthrough. When enabled, registered Listener
     /// attributes are re-declared on every periodic/LeaveAll pass so a bridge
@@ -722,13 +751,24 @@ class MsrpHandler
         if (!adopt_domain_ || op != statusbar::srp::msrp::Operation::Register || !class_a || same) {
             return;
         }
-        domain_ = DomainInfo{
-            .sr_class_id = domain_.sr_class_id,
-            .sr_class_priority = fv.sr_class_priority.get(),
-            .sr_class_vid = fv.sr_class_vid.get()};
-        (void)declare_domain(last_event_time_);  // the old values leave first (10.7)
+        take_domain(
+            DomainInfo{
+                .sr_class_id = domain_.sr_class_id,
+                .sr_class_priority = fv.sr_class_priority.get(),
+                .sr_class_vid = fv.sr_class_vid.get()},
+            last_event_time_);
+    }
+
+    /// @p domain is the Class A Domain in force from @p now: declared (the
+    /// value it replaces leaves first, 802.1Q 10.7) and reported to
+    /// on_domain_adopted, told @p now.
+    void take_domain(DomainInfo const& domain, TimePoint const now)
+    {
+        domain_ = domain;
+        last_event_time_ = now;
+        (void)declare_domain(now);
         if (callbacks_.on_domain_adopted) {
-            callbacks_.on_domain_adopted(domain_, last_event_time_);
+            callbacks_.on_domain_adopted(domain_, now);
         }
     }
 
@@ -769,8 +809,9 @@ class MsrpHandler
     }
 
     MsrpCallbacks callbacks_;
-    DomainInfo domain_;
-    bool adopt_domain_{false};  ///< Milan v1.3 4.2.7.2.1 Domain adoption (set_adopt_domain)
+    DomainInfo domain_;             ///< the Domain in force (configured, or adopted from the wire)
+    DomainInfo configured_domain_;  ///< what set_domain() gave; return_to_configured_domain() goes back to it
+    bool adopt_domain_{false};      ///< Milan v1.3 4.2.7.2.1 Domain adoption (set_adopt_domain)
     statusbar::sg14::inplace_vector<TalkerStreamSrpInfo, MaxStreams> talker_streams_;
     statusbar::sg14::inplace_vector<ListenerStreamSrpInfo, MaxStreams> listener_streams_;
     statusbar::srp::msrp::MsrpParticipant participant_;

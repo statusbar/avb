@@ -208,12 +208,13 @@ class AvbEntityKit
     /// GET_COUNTERS / GET_STREAM_INFO fills.
     void wire_stream_callbacks();
 
-    /// The SRP handler adopted a Class A Domain from the wire (Milan v1.3
-    /// 4.2.7.2.1): move the stream frames, MVRP and GET_AVB_INFO to it.
-    void adopt_domain(nanoavb::DomainInfo const& domain, TimePoint now);
+    /// The SRP handler's Class A Domain in force changed: adopted from the
+    /// wire, or back to the configured one after a startup or Link Up (Milan
+    /// v1.3 4.2.7.2.1). Move the stream frames, MVRP and GET_AVB_INFO to it.
+    void follow_domain(nanoavb::DomainInfo const& domain, TimePoint now);
 
     /// Move the data plane, ACMP's stream picture and the Talker Advertises
-    /// to @p domain's VLAN and priority (the adopt_domain half that is the
+    /// to @p domain's VLAN and priority (the follow_domain half that is the
     /// streams'; MVRP and GET_AVB_INFO are the caller's).
     void move_talker_streams_to(nanoavb::DomainInfo const& domain, TimePoint now);
 
