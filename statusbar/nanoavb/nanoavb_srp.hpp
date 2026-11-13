@@ -172,10 +172,16 @@ class MvrpHandler
     /// @param callbacks The new callback interface
     void set_callbacks(MvrpCallbacks callbacks) { callbacks_ = std::move(callbacks); }
 
-    /// Forget the sender: nothing goes out until set_callbacks() installs
-    /// another. For the owner of the network path to call before it takes
-    /// that path away, so a Leave or re-declaration that falls due in
-    /// between has nowhere stale to go.
+    /// Install just the sender, leaving the other hooks as they are
+    /// (set_callbacks replaces the whole struct; this updates one field).
+    /// For the owner of the network path, which comes and goes with the
+    /// run, while the hooks are the entity's and are installed once.
+    void set_send_packet(decltype(MvrpCallbacks::send_packet) send) { callbacks_.send_packet = std::move(send); }
+
+    /// Forget the sender: nothing goes out until set_send_packet() or
+    /// set_callbacks() installs another. For the owner of the network path
+    /// to call before it takes that path away, so a Leave or re-declaration
+    /// that falls due in between has nowhere stale to go. The other hooks stay.
     void drop_sender() noexcept { callbacks_.send_packet = {}; }
 
     /// Register a VLAN
@@ -323,10 +329,17 @@ class MsrpHandler
 
     void set_callbacks(MsrpCallbacks callbacks) { callbacks_ = std::move(callbacks); }
 
-    /// Forget the sender: nothing goes out until set_callbacks() installs
-    /// another. For the owner of the network path to call before it takes
-    /// that path away, so a Leave or re-declaration that falls due in
-    /// between has nowhere stale to go. The other hooks stay.
+    /// Install just the sender, leaving the other hooks as they are
+    /// (set_callbacks replaces the whole struct; this updates one field).
+    /// For the owner of the network path, which comes and goes with the
+    /// run, while the hooks (on_domain_adopted, on_talker_listener, ...)
+    /// are the entity's and are installed once, before the first start.
+    void set_send_packet(decltype(MsrpCallbacks::send_packet) send) { callbacks_.send_packet = std::move(send); }
+
+    /// Forget the sender: nothing goes out until set_send_packet() or
+    /// set_callbacks() installs another. For the owner of the network path
+    /// to call before it takes that path away, so a Leave or re-declaration
+    /// that falls due in between has nowhere stale to go. The other hooks stay.
     void drop_sender() noexcept { callbacks_.send_packet = {}; }
 
     /// Forward a reactor-thread logger to the MSRP participant (Debug-level

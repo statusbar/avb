@@ -624,6 +624,45 @@ TEST(nanoavb_srp_msrp, a_milan_handler_adopts_the_class_a_domain_registered_from
     EXPECT_FALSE(adopted.has_value());
 }
 
+TEST(nanoavb_srp_msrp, installing_the_sender_alone_keeps_the_hooks_installed_before_it)
+{
+    // The entity installs its hooks once, at construction; the network path
+    // comes with the run and installs the sender then. The sender's
+    // installation must leave the hooks alone, or the Domain adopted after
+    // start is never followed.
+    DomainWire wire;
+    MsrpHandler<> device{statusbar::srp::msrp::MsrpConfig{}};  // no callbacks yet
+    device.set_adopt_domain(true);
+    std::optional<DomainInfo> adopted{};
+    device.set_on_domain_adopted([&](DomainInfo const& d, TimePoint) { adopted = d; });
+    size_t sent = 0;
+    device.set_send_packet([&](std::span<uint8_t const> p) {
+        ++sent;
+        wire.device_out.emplace_back(p.begin(), p.end());
+        return true;
+    });
+
+    wire.bridge.set_domain(DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    (void)wire.bridge.declare_domain(wire.now);
+    (void)device.declare_domain(wire.now);
+    for (int round = 0; round < 6; ++round) {
+        wire.now += std::chrono::milliseconds{120};
+        wire.bridge.tick(wire.now);
+        device.tick(wire.now);
+        for (auto const& p : wire.bridge_out) {
+            device.receive_packet(p, wire.now);
+        }
+        for (auto const& p : wire.device_out) {
+            wire.bridge.receive_packet(p, wire.now);
+        }
+        wire.bridge_out.clear();
+        wire.device_out.clear();
+    }
+    EXPECT_TRUE(adopted.has_value());
+    EXPECT_TRUE(adopted.has_value() && adopted->sr_class_vid == 5 && adopted->sr_class_priority == 5);
+    EXPECT_TRUE(sent > 0);  // the PDUs left through the sender installed on its own
+}
+
 TEST(nanoavb_srp_msrp, a_classic_handler_keeps_its_own_domain)
 {
     DomainWire wire;

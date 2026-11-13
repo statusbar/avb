@@ -13,7 +13,9 @@
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
+#include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/test/test.hpp"
@@ -54,8 +56,18 @@ auto entity_tone_bin_path() -> std::filesystem::path
     return std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_tone.bin";
 }
 
+/// The reactor's clock for a kit started in a test: deterministic, 1 ms a read.
+struct FakeClock
+{
+    std::atomic<int64_t>* now_ns;
+    auto operator()() noexcept -> int64_t { return now_ns->fetch_add(1'000'000LL); }
+};
+
 /// A kit over the tone blob, the way the tone generator builds its own, with
-/// the collaborators the kit binds declared before it.
+/// the collaborators the kit binds declared before it. start() brings up its
+/// control plane on an interface that does not exist: every socket fails to
+/// open (the handlers say so and carry on), so no frame leaves the test, and
+/// the protocol handlers are fed by hand.
 class KitUnderTest
 {
   public:
@@ -82,8 +94,15 @@ class KitUnderTest
     auto operator->() noexcept -> AvbEntityKit* { return &kit_; }
     [[nodiscard]] auto talker_specs() const noexcept -> StreamSpecs const& { return talker_specs_; }
 
+    /// Bring the control plane up (or up again), as the tool does at @p now.
+    [[nodiscard]] auto start(TimePoint const now) -> bool { return kit_.start(reactor_, now).has_value(); }
+    [[nodiscard]] auto stop(TimePoint const now) -> bool { return kit_.stop(now).has_value(); }
+
   private:
     AvbEntityAudioIOConfig config_;
+    itc::StopToken stop_{};
+    std::atomic<int64_t> now_ns_{1};
+    net::MessageReactor reactor_{stop_, FakeClock{&now_ns_}, 5};
     atdecc::aem::DescriptorStorage storage_;
     EntityIdentityDescriptorHandler handler_;
     StreamSpecs talker_specs_;
@@ -101,7 +120,27 @@ auto make_config(uint16_t const vlan_id, std::string_view const profile) -> AvbE
     config.descriptor_storage_blob = load_file(entity_tone_bin_path());
     config.vlan_id = vlan_id;
     config.atdecc_profile = std::string{profile};
+    config.interface_name = "no-such-interface-0";
     return config;
+}
+
+/// What the kit says the Class A VLAN is, from every place it is said:
+/// the SRP handler's Domain, the frames, ACMP's picture of each stream.
+void expect_kit_on_vlan(KitUnderTest& kit, uint16_t const vlan_id, uint8_t const priority)
+{
+    EXPECT_EQ(kit->host().components().msrp_handler.domain().sr_class_vid, vlan_id);
+    EXPECT_EQ(kit->host().components().msrp_handler.domain().sr_class_priority, priority);
+    EXPECT_EQ(kit->talker().vlan_id(), vlan_id);
+    for (auto const& spec : kit.talker_specs()) {
+        auto const* stream = kit->host().components().acmp_talker.get_stream(spec.index);
+        EXPECT_NE(stream, nullptr);
+        if (stream != nullptr) {
+            EXPECT_EQ(stream->stream_vlan_id, vlan_id);
+        }
+        auto const info = kit->make_talker_srp_info(spec);
+        EXPECT_EQ(info.vlan_id, vlan_id);
+        EXPECT_EQ(info.priority, priority);
+    }
 }
 
 /// A bridge on the wire declaring a Class A Domain, its PDUs handed to the
@@ -173,6 +212,19 @@ TEST(avb_entity_kit_domain, an_adopted_domain_moves_acmp_and_the_talker_advertis
         EXPECT_EQ(info.vlan_id, 5U);
         EXPECT_EQ(info.priority, 5U);
     }
+}
+
+TEST(avb_entity_kit_domain, a_started_kit_follows_the_domain_it_adopts)
+{
+    // The adoption hook is installed at construction; bringing the control
+    // plane up installs the senders. A Domain adopted after start must still
+    // move the frames, ACMP and the Talker Advertise, or the SRP handler
+    // declares VLAN 5 for frames that go out on VLAN 7.
+    KitUnderTest kit{make_config(7, "milan13")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    bridge_declares_domain(kit, DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    expect_kit_on_vlan(kit, 5, 5);
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
 }
 
 TEST(avb_entity_kit_domain, a_classic_kit_keeps_its_configured_domain)

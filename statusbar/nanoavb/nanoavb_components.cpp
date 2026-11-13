@@ -527,23 +527,25 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
     // current thereafter.
     components.aem_handler.set_entity_id(components.adp_advertiser.adpdu().entity_id);
 
-    // MVRP: send packets to multicast
-    components.mvrp_handler.set_callbacks(MvrpCallbacks{.send_packet = [&handlers](std::span<uint8_t const> packet) -> bool {
+    // MVRP and MSRP: send packets to multicast. Field setters, NOT
+    // set_callbacks: replacing the whole struct would wipe the hooks the
+    // entity installed before start (on_domain_adopted, on_talker_listener),
+    // and the entity would stop following the Domain it adopts.
+    components.mvrp_handler.set_send_packet([&handlers](std::span<uint8_t const> packet) -> bool {
         auto& mvrp = handlers.mvrp_handler();
         if (!mvrp.valid()) {
             return false;
         }
         return mvrp.send(MVRP_MULTICAST_MAC, packet).has_value();
-    }});
+    });
 
-    // MSRP: send packets to multicast
-    components.msrp_handler.set_callbacks(MsrpCallbacks{.send_packet = [&handlers](std::span<uint8_t const> packet) -> bool {
+    components.msrp_handler.set_send_packet([&handlers](std::span<uint8_t const> packet) -> bool {
         auto& msrp = handlers.msrp_handler();
         if (!msrp.valid()) {
             return false;
         }
         return msrp.send(MSRP_MULTICAST_MAC, packet).has_value();
-    }});
+    });
 
     // gPTP Announce: the grandmaster in force, gained, changed or lost, is
     // reported the same way to ADP and to the registered controllers.
