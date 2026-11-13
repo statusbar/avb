@@ -881,7 +881,7 @@ class AemCommandHandler
         -> std::span<uint8_t const>;
 
     /// emit_unsolicited() for a deferred command's answer, with @p requester
-    /// (its controller) left out under milan13 as handle_command() would.
+    /// (its controller) left out as handle_command() would (7.5.2).
     void emit_unsolicited_for(Eui64 const& requester, uint16_t command_type, std::span<uint8_t const> body);
 
     /// The one switch over the command codes behind handle_command().
@@ -889,7 +889,7 @@ class AemCommandHandler
         -> AemCommandResponse;
 
     /// The controller whose command is being answered, for the unsolicited
-    /// fan-out to leave out under milan13. Set for the span of one dispatch
+    /// fan-out to leave out (7.5.2). Set for the span of one dispatch
     /// (handle_command, answer_completed) and zero between: a notification
     /// the entity originates itself has no requester to leave out.
     Eui64 requester_{};

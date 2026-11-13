@@ -111,7 +111,7 @@ auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t co
     -> AemCommandResponse
 {
     // The command's controller is the requester for the unsolicited fan-out
-    // this dispatch makes (Milan v1.3 5.4.5.3), and for that alone: what the
+    // this dispatch makes (IEEE 1722.1-2021 7.5.2), and for that alone: what the
     // entity notifies later on its own (a lock expiring, a front-panel change,
     // a timer) is for every registered controller, this one included. A
     // dispatch nested in another (read_back's GET twin) hands back the
@@ -1571,17 +1571,19 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
     }
 
     for (auto const& reg : unsolicited_registrations_) {
-        // Milan v1.3 5.4.5.3: every registered controller except the one whose
-        // command this is. (1722.1 7.5.2 says the same; the classic profile
-        // keeps sending it, as this entity always has, until told otherwise.)
-        if (profile_ == Profile::milan13 && reg.controller_entity_id == requester_) {
+        // IEEE 1722.1-2021 7.5.2: the unsolicited response goes to the acquired
+        // and every registered controller "without sending the unsolicited
+        // response back to the ATDECC Controller which executed the command",
+        // under either profile (Milan v1.3 5.4.5.3 asks the same).
+        if (reg.controller_entity_id == requester_) {
             continue;
         }
         send_unsolicited_to(reg.controller_mac, reg.controller_entity_id, command_type, body);
     }
 
-    // IEEE 1722.1 7.5.2: the acquiring controller is implicitly registered.
-    if (acquired_) {
+    // IEEE 1722.1 7.5.2: the acquiring controller is implicitly registered,
+    // and like any registered controller hears nothing of its own command.
+    if (acquired_ && acquiring_controller_ != requester_) {
         auto const registered = unsolicited_registrations_.find_if(
             [&](UnsolicitedRegistration const& r) { return r.controller_entity_id == acquiring_controller_; });
         if (registered >= unsolicited_registrations_.capacity()) {

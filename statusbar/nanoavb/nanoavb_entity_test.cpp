@@ -2014,19 +2014,29 @@ TEST(nanoavb_entity_notify_cor1, acquire_notifies_registered_and_acquirer)
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ACQUIRE_ENTITY, acquire);
     EXPECT_TRUE(handler.is_acquired());
 
-    // Solicited SUCCESS to A, unsolicited ACQUIRE_ENTITY to registered B, and to
-    // A as well: the acquiring controller is implicitly registered (7.5.2).
+    // Solicited SUCCESS to A and unsolicited ACQUIRE_ENTITY to registered B.
+    // A is now implicitly registered (7.5.2) but executed this command, so
+    // it hears nothing more of it.
     auto const* reply = solicited(sends);
     EXPECT_TRUE(reply != nullptr);
     EXPECT_EQ(header_of(*reply).status(), AEM_STATUS_SUCCESS);
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_ACQUIRE_ENTITY, kMacB), 1);
-    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_ACQUIRE_ENTITY, kMacA), 1);
-    EXPECT_EQ(sends.size(), size_t{3});
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_ACQUIRE_ENTITY, kMacA), 0);
+    EXPECT_EQ(sends.size(), size_t{2});
     for (auto const& s : sends) {
         AemAcquireEntityPayload payload{};
         span_load(payload, body_of(s).first(AemAcquireEntityPayload::LENGTH));
         EXPECT_EQ(payload.owner_entity_id, kControllerA);
     }
+
+    // The acquirer's implicit registration is for what others do: B's own
+    // DEREGISTER is notified to A (7.5.2 lists it) and not back to B.
+    sends.clear();
+    inject_command(
+        handler, kEntity, kControllerB, kMacB, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, std::array<uint8_t, 0>{});
+    EXPECT_EQ(header_of(*solicited(sends)).status(), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacA), 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacB), 0);
 }
 
 TEST(nanoavb_entity_notify_cor1, lock_expiry_notifies_unlock)
@@ -2842,12 +2852,13 @@ TEST(nanoavb_entity_profile, milan13_locked_entity_refuses_a_local_identify)
     }
 }
 
-TEST(nanoavb_entity_profile, milan13_leaves_the_requesting_controller_out_of_the_fan_out)
+TEST(nanoavb_entity_profile, the_requesting_controller_is_left_out_of_the_fan_out_under_both_profiles)
 {
-    // Milan v1.3 5.4.5.3: the unsolicited notification goes to all registered
-    // controllers except the requesting one. Classic keeps sending it to all.
+    // IEEE 1722.1-2021 7.5.2: the unsolicited response goes to the acquired
+    // and registered controllers "without sending the unsolicited response
+    // back to the ATDECC Controller which executed the command". Milan v1.3
+    // 5.4.5.3 says the same, so the profile makes no difference here.
     for (auto const profile : {AemCommandHandler::Profile::classic, AemCommandHandler::Profile::milan13}) {
-        bool const milan = profile == AemCommandHandler::Profile::milan13;
         StoringControlHandler app;
         AemCommandHandler handler{app};
         handler.set_profile(profile);
@@ -2862,7 +2873,7 @@ TEST(nanoavb_entity_profile, milan13_leaves_the_requesting_controller_out_of_the
         inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, changed, 5);
         EXPECT_EQ(header_of(*solicited(sends)).status(), AEM_STATUS_SUCCESS);
         EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
-        EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacA), milan ? 0 : 1);
+        EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacA), 0);
 
         // A change nobody asked for over ATDECC reaches every registered controller.
         sends.clear();
