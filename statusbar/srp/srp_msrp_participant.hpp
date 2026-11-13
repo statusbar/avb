@@ -264,8 +264,9 @@ class MsrpParticipantT
     /// participant whenever it needs to transmit an MSRPDU.
     void set_send_pdu(SendPduFn fn);
 
-    /// Run BEGIN! on the LeaveAll and Periodic FSMs and arm the
-    /// initial timers. Must be called once after construction.
+    /// Run BEGIN! on the LeaveAll and Periodic FSMs and arm the initial
+    /// timers. Call once after construction, and again after stop() for the
+    /// next run; the attribute database is kept across the two.
     void start(TimePoint now);
 
     /// Stop all timers. FSMs retain their current state; attribute

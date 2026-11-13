@@ -727,6 +727,33 @@ TEST(nanoavb_srp_msrp, receive_short_packet)
     handler.receive_packet(short_packet, TimePoint{std::chrono::seconds{1}});  // Should not crash
 }
 
+TEST(nanoavb_srp_msrp, withdraw_all_ends_the_run_and_the_next_use_begins_again)
+{
+    // The first use of a run starts the participant (BEGIN!); withdraw_all
+    // ends the run and stops it; the next use starts it again rather than
+    // carrying on with the timers of a run that is over.
+    MsrpHandler<> handler{statusbar::srp::msrp::MsrpConfig{}};
+    EXPECT_FALSE(handler.started());
+    handler.tick(TimePoint{std::chrono::seconds{1}});
+    EXPECT_TRUE(handler.started());
+    handler.withdraw_all(TimePoint{std::chrono::seconds{2}});
+    EXPECT_FALSE(handler.started());
+    handler.tick(TimePoint{std::chrono::seconds{3}});
+    EXPECT_TRUE(handler.started());
+}
+
+TEST(nanoavb_srp_mvrp, withdraw_all_ends_the_run_and_the_next_use_begins_again)
+{
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}};
+    EXPECT_FALSE(handler.started());
+    (void)handler.register_vlan(2, TimePoint{std::chrono::seconds{1}});
+    EXPECT_TRUE(handler.started());
+    handler.withdraw_all(TimePoint{std::chrono::seconds{2}});
+    EXPECT_FALSE(handler.started());
+    handler.tick(TimePoint{std::chrono::seconds{3}});
+    EXPECT_TRUE(handler.started());
+}
+
 TEST(nanoavb_srp_msrp, withdraw_all_sends_the_leaves_at_once)
 {
     size_t sent = 0;

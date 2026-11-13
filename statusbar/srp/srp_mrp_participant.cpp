@@ -11,9 +11,14 @@ PortState::PortState(uint64_t rng_seed)
 
 void PortState::start(TimePoint now)
 {
-    // The first handle_event() call processes the UCT chain from
-    // Start, which fires a_init on both FSMs. That sets
-    // timer_restart=true, which we forward to the TimerScheduler.
+    // BEGIN!: both FSMs back at Start, so that a start after a stop runs
+    // their initialisation again rather than leaving them where the last
+    // run ended (an Active LeaveAll FSM with no timer behind it). The first
+    // handle_event() call then processes the UCT chain from Start, which
+    // fires a_init on both FSMs. That sets timer_restart=true, which we
+    // forward to the TimerScheduler.
+    lva_sm_.reset();
+    periodic_sm_.reset();
     dispatch_leaveall(leaveall_sm::Def::Event::UCT, now);
     dispatch_periodic(periodic_sm::Def::Event::UCT, now);
 }

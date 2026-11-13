@@ -42,8 +42,10 @@ class PortState
     /// Construct with optional deterministic RNG seed for tests.
     explicit PortState(uint64_t rng_seed = 0);
 
-    /// Run BEGIN! on the LeaveAll and Periodic FSMs and arm the
-    /// initial LeaveAll + Periodic timers. Call once during startup.
+    /// Run BEGIN! on the LeaveAll and Periodic FSMs and arm the initial
+    /// LeaveAll + Periodic timers. Call once during startup, and again after
+    /// stop() for the next run: BEGIN! (IEEE 802.1Q-2022 10.7.5.1) takes
+    /// both FSMs from their initial state, not from where stop() left them.
     void start(TimePoint now);
 
     /// Stop all timers. The FSMs retain their current state.

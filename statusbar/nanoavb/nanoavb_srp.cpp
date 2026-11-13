@@ -86,6 +86,9 @@ void MvrpHandler::withdraw_all(TimePoint now)
         }
     }
     participant_.transmit_pending(now);
+    // The end of the run: the next use starts the participant again (BEGIN!).
+    participant_.stop();
+    started_ = false;
 }
 
 auto MvrpHandler::get_vlan_state(uint16_t vlan_id) const noexcept -> VlanState

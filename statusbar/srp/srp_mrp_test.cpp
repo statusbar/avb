@@ -708,6 +708,30 @@ TEST(tsn_error, category_message_non_empty)
 }
 
 //
+TEST(mrp_port_state, start_after_stop_begins_again)
+{
+    // IEEE 802.1Q-2022 10.7.5.1: BEGIN! initialises the FSMs. A port stopped
+    // with its LeaveAll FSM Active (timer expired, LeaveAll not yet sent)
+    // and started again must be Passive with its timers running, not Active
+    // with none, or the run that follows never originates a LeaveAll.
+    PortState port{1};
+    TimePoint const t{std::chrono::seconds{1}};
+    port.start(t);
+    EXPECT_EQ(port.leaveall_state(), leaveall_sm::Def::State::Passive);
+    port.dispatch_leaveall(leaveall_sm::Def::Event::LvaTimer, t);
+    EXPECT_EQ(port.leaveall_state(), leaveall_sm::Def::State::Active);
+
+    port.stop();
+    EXPECT_FALSE(port.timers().leaveall_running());
+    EXPECT_FALSE(port.timers().periodic_running());
+
+    port.start(t + std::chrono::seconds{1});
+    EXPECT_EQ(port.leaveall_state(), leaveall_sm::Def::State::Passive);
+    EXPECT_EQ(port.periodic_state(), periodic_sm::Def::State::Active);
+    EXPECT_TRUE(port.timers().leaveall_running());
+    EXPECT_TRUE(port.timers().periodic_running());
+}
+
 // Main test runner
 //
 

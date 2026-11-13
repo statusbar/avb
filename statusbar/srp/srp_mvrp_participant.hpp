@@ -193,7 +193,8 @@ class MvrpParticipantT
     /// Set or replace the outbound PDU callback.
     void set_send_pdu(SendPduFn fn) { send_pdu_ = std::move(fn); }
 
-    /// Run BEGIN! on the per-port FSMs and arm initial timers.
+    /// Run BEGIN! on the per-port FSMs and arm initial timers. Call once
+    /// after construction, and again after stop() for the next run.
     void start(TimePoint now)
     {
         port_.start(now);

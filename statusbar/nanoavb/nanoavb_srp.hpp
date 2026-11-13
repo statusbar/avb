@@ -216,6 +216,10 @@ class MvrpHandler
     /// Get all registered VLANs
     [[nodiscard]] auto vlans() const noexcept -> std::span<VlanInfo const> { return vlans_; }
 
+    /// Whether the participant is running: started (BEGIN!) by the first use
+    /// of a run, stopped by withdraw_all() at its end.
+    [[nodiscard]] auto started() const noexcept -> bool { return started_; }
+
   private:
     /// The one way a PDU leaves: through the send_packet in force now.
     auto send(std::span<uint8_t const> const packet) -> bool
@@ -574,7 +578,9 @@ class MsrpHandler
     /// alone only queues its Leave for the next join timer, which a
     /// stopping reactor never reaches, and the bridge would then keep this
     /// port's reservations until its own LeaveAll lapsed. Nothing declared:
-    /// nothing sent.
+    /// nothing sent. The participant then stops; the next use of this
+    /// handler starts it again (BEGIN!, IEEE 802.1Q-2022 10.7.5.1), as the
+    /// first did.
     void withdraw_all(TimePoint now)
     {
         if (!started_) {
@@ -582,10 +588,13 @@ class MsrpHandler
         }
         withdraw_talkers(now);
         withdraw_listeners(now);
-        (void)participant_.withdraw_domain(statusbar::srp::msrp::SR_CLASS_A, now);
-        (void)participant_.withdraw_domain(statusbar::srp::msrp::SR_CLASS_B, now);
-        transmit_now(now);
+        withdraw_domains_and_send(now);
+        stop_participant();
     }
+
+    /// Whether the participant is running: started (BEGIN!) by the first use
+    /// of a run, stopped by withdraw_all() at its end.
+    [[nodiscard]] auto started() const noexcept -> bool { return started_; }
 
     [[nodiscard]] auto get_listener_stream(StreamId const& stream_id) const noexcept -> ListenerStreamSrpInfo const*
     {
@@ -713,6 +722,23 @@ class MsrpHandler
             participant_.start(now);
             started_ = true;
         }
+    }
+
+    /// The Domains this port declared, withdrawn, and every Leave pending
+    /// sent now (withdraw_all).
+    void withdraw_domains_and_send(TimePoint now)
+    {
+        (void)participant_.withdraw_domain(statusbar::srp::msrp::SR_CLASS_A, now);
+        (void)participant_.withdraw_domain(statusbar::srp::msrp::SR_CLASS_B, now);
+        transmit_now(now);
+    }
+
+    /// The end of the run for the participant: its timers stopped, and the
+    /// next receive_packet()/tick()/declaration starts it again from BEGIN!.
+    void stop_participant() noexcept
+    {
+        participant_.stop();
+        started_ = false;
     }
 
     /// What the applicants have pending, sent now through the send_packet in
