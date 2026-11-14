@@ -8,9 +8,13 @@
 
 # --- packet-capture / dump tools (consume core's bpf + pcap) ---
 
-# bpf_dump_tool consumes statusbar-bpf directly; skip it when the bpf module
-# isn't built. Same gate the core package uses.
-if(STATUSBAR_ENABLE_BPF)
+# bpf_dump_tool consumes core's bpf module directly, so it is built whenever
+# that module is there: statusbar::bpf is core's in-tree alias under the
+# aggregate build and its imported target under find_package(statusbar-core).
+# STATUSBAR_ENABLE_BPF is core's own configure option and is not defined in a
+# standalone avb configure, so gating on it here built the tool only under the
+# aggregate.
+if(TARGET statusbar::bpf)
   add_executable(bpf_dump_tool bpf_dump_tool.cpp)
   target_link_libraries(bpf_dump_tool PRIVATE statusbar)
   set_target_properties(bpf_dump_tool PROPERTIES OUTPUT_NAME statusbar-bpf-dump)
