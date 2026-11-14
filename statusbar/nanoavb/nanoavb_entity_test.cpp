@@ -2967,6 +2967,221 @@ TEST(nanoavb_entity_avb_info, notify_pushes_unsolicited_get_avb_info)
 //
 // Test Runner
 //
+// ──────────────────────────────────────────────
+// Milan vendor unique (MVU) - Milan v1.3 5.4.3, 5.4.4
+// ──────────────────────────────────────────────
+
+namespace {
+
+/// Inject one MVU command for kEntity from (controller_id, src_mac): the
+/// header, then @p body as the command-specific data; @p protocol_id for a
+/// vendor-unique message that is not Milan's.
+auto inject_mvu(
+    AemCommandHandler& handler,
+    Eui64 const& controller_id,
+    Eui48 const& src_mac,
+    uint16_t const command,
+    std::span<uint8_t const> body,
+    uint16_t const sequence = 1,
+    Eui48 const& protocol_id = MVU_PROTOCOL_ID) -> bool
+{
+    AecpMvuDu cmd{};
+    cmd.init_command(command, static_cast<uint16_t>(body.size()));
+    cmd.protocol_id = protocol_id;
+    cmd.common.target_entity_id = kEntity;
+    cmd.common.controller_entity_id = controller_id;
+    cmd.common.sequence_id = statusbar::ieee::doublet_t{sequence};
+    std::vector<uint8_t> packet(AecpMvuDu::LENGTH + body.size());
+    span_copy(std::span<uint8_t>{packet}.first(AecpMvuDu::LENGTH), make_const_span(cmd));
+    std::copy(body.begin(), body.end(), packet.begin() + static_cast<std::ptrdiff_t>(AecpMvuDu::LENGTH));
+    return handler.process_packet(src_mac, packet, kEntity);
+}
+
+auto mvu_header_of(CapturedSend const& s) -> AecpMvuDu
+{
+    AecpMvuDu hdr{};
+    span_load(hdr, std::span<uint8_t const>(s.bytes).first(AecpMvuDu::LENGTH));
+    return hdr;
+}
+
+auto mvu_body_of(CapturedSend const& s) -> std::span<uint8_t const>
+{
+    return std::span<uint8_t const>(s.bytes).subspan(AecpMvuDu::LENGTH);
+}
+
+AemCommandHandler::MilanInfo const kMilanInfo{
+    .features_flags = MVU_FEATURE_REDUNDANCY | MVU_FEATURE_TALKER_SIGNAL_PRESENCE,
+    .certification_version = mvu_version(1, 2),
+    .specification_version = mvu_version(1, 3)};
+
+std::array<uint8_t, MVU_GET_MILAN_INFO_COMMAND_LENGTH> const kGetMilanInfo{};
+
+}  // namespace
+
+TEST(nanoavb_entity_mvu, a_plain_entity_lets_get_milan_info_pass_unanswered)
+{
+    // Milan v1.3 5.4.4.1 Note: a Configuration that is not Milan does not reply.
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    EXPECT_FALSE(handler.milan_info().has_value());
+    EXPECT_FALSE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_MILAN_INFO, kGetMilanInfo, 60));
+    EXPECT_TRUE(sends.empty());
+}
+
+TEST(nanoavb_entity_mvu, a_milan_entity_answers_get_milan_info_as_figure_5_6)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_MILAN_INFO, kGetMilanInfo, 60));
+    EXPECT_EQ(sends.size(), size_t{1});
+    if (sends.size() != 1) {
+        return;
+    }
+    EXPECT_EQ(sends[0].dest, kMacA);
+    auto const hdr = mvu_header_of(sends[0]);
+    EXPECT_TRUE(hdr.is_valid());
+    EXPECT_TRUE(hdr.is_response());
+    EXPECT_FALSE(hdr.is_unsolicited());
+    EXPECT_EQ(hdr.common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(hdr.command_type(), MVU_COMMAND_GET_MILAN_INFO);
+    EXPECT_EQ(hdr.common.control_data_length(), 36);
+    EXPECT_EQ(hdr.common.sequence_id.get(), 60);
+    EXPECT_EQ(hdr.common.target_entity_id, kEntity);
+    EXPECT_EQ(hdr.common.controller_entity_id, kControllerA);
+    EXPECT_EQ(sends[0].bytes.size(), AecpMvuDu::LENGTH + MvuGetMilanInfoResponse::LENGTH);
+
+    MvuGetMilanInfoResponse info{};
+    span_load(info, mvu_body_of(sends[0]));
+    EXPECT_EQ(info.reserved.get(), 0);
+    EXPECT_EQ(info.protocol_version.get(), MVU_PROTOCOL_VERSION);
+    EXPECT_EQ(info.features_flags.get(), kMilanInfo.features_flags);
+    EXPECT_EQ(info.certification_version.get(), mvu_version(1, 2));
+    EXPECT_EQ(info.specification_version.get(), mvu_version(1, 3));
+}
+
+TEST(nanoavb_entity_mvu, the_other_mvu_commands_are_not_implemented_and_echo_their_data)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    std::array<uint8_t, 10> const unique_id{0x00, 0x00, 0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x51, 0x1D};
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, unique_id, 61));
+    EXPECT_EQ(sends.size(), size_t{1});
+    if (sends.size() != 1) {
+        return;
+    }
+    auto const hdr = mvu_header_of(sends[0]);
+    EXPECT_TRUE(hdr.is_response());
+    EXPECT_EQ(hdr.common.status(), MVU_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(hdr.command_type(), MVU_COMMAND_GET_SYSTEM_UNIQUE_ID);
+    EXPECT_EQ(hdr.common.sequence_id.get(), 61);
+    EXPECT_EQ(hdr.common.control_data_length(), AecpMvuDu::MVU_DATA_LENGTH + unique_id.size());
+    auto const body = mvu_body_of(sends[0]);
+    EXPECT_TRUE(std::equal(unique_id.begin(), unique_id.end(), body.begin(), body.end()));
+}
+
+TEST(nanoavb_entity_mvu, another_vendors_protocol_and_a_response_are_not_ours)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    Eui48 const other_protocol{0x00, 0x1B, 0xC5, 0x0A, 0xC2, 0x00};
+    EXPECT_FALSE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_MILAN_INFO, kGetMilanInfo, 62, other_protocol));
+    EXPECT_TRUE(sends.empty());
+
+    // A Milan response (another entity's answer, seen on the wire) is not a command for us.
+    AecpMvuDu response{};
+    response.init_response(MVU_COMMAND_GET_MILAN_INFO, MVU_STATUS_SUCCESS, 0);
+    response.common.target_entity_id = kEntity;
+    std::array<uint8_t, AecpMvuDu::LENGTH> packet{};
+    span_store(std::span<uint8_t>{packet}, response);
+    EXPECT_FALSE(handler.process_packet(kMacA, packet, kEntity));
+    EXPECT_TRUE(sends.empty());
+}
+
+TEST(nanoavb_entity_mvu, a_get_milan_info_without_its_reserved_octets_is_payload_too_short)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_MILAN_INFO, std::span<uint8_t const>{}, 63));
+    EXPECT_EQ(sends.size(), size_t{1});
+    if (sends.size() != 1) {
+        return;
+    }
+    auto const hdr = mvu_header_of(sends[0]);
+    EXPECT_EQ(hdr.common.status(), MVU_STATUS_PAYLOAD_TOO_SHORT);
+    EXPECT_EQ(hdr.common.control_data_length(), AecpMvuDu::MVU_DATA_LENGTH);
+    EXPECT_EQ(sends[0].bytes.size(), AecpMvuDu::LENGTH);
+}
+
+TEST(nanoavb_entity_mvu, ethernet_padding_is_not_command_data)
+{
+    // A 32-octet command arrives in a 60-octet frame: the padding behind
+    // control_data_length is not echoed back.
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    std::array<uint8_t, 2> const data{0xAB, 0xCD};
+    AecpMvuDu cmd{};
+    cmd.init_command(MVU_COMMAND_BIND_STREAM, static_cast<uint16_t>(data.size()));
+    cmd.common.target_entity_id = kEntity;
+    cmd.common.controller_entity_id = kControllerA;
+    std::array<uint8_t, 46> padded{};  // the AECP payload of a minimum-length frame
+    span_store(std::span<uint8_t>{padded}.first(AecpMvuDu::LENGTH), cmd);
+    padded[AecpMvuDu::LENGTH] = data[0];
+    padded[AecpMvuDu::LENGTH + 1] = data[1];
+    EXPECT_TRUE(handler.process_packet(kMacA, padded, kEntity));
+    EXPECT_EQ(sends.size(), size_t{1});
+    if (sends.size() != 1) {
+        return;
+    }
+    EXPECT_EQ(mvu_header_of(sends[0]).common.status(), MVU_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(mvu_body_of(sends[0]).size(), data.size());
+}
+
+TEST(nanoavb_entity_mvu, aem_commands_are_answered_as_before_beside_the_mvu_ones)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ENTITY_AVAILABLE, std::span<uint8_t const>{}, 5);
+    auto const* reply = solicited(sends);
+    EXPECT_TRUE(reply != nullptr);
+    if (reply != nullptr) {
+        EXPECT_EQ(header_of(*reply).status(), AEM_STATUS_SUCCESS);
+        EXPECT_EQ(header_of(*reply).command_code(), AEM_COMMAND_ENTITY_AVAILABLE);
+    }
+}
+
 int statusbar_nanoavb_nanoavb_entity_test(int argc, char** argv)
 {
     (void)argc;

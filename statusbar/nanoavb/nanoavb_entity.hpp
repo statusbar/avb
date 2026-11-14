@@ -273,6 +273,22 @@ class AemCommandHandler
     void set_profile(Profile const profile) noexcept { profile_ = profile; }
     [[nodiscard]] auto profile() const noexcept -> Profile { return profile_; }
 
+    /// What a Milan PAAD-AE says of itself in GET_MILAN_INFO (Milan v1.3
+    /// 5.4.4.1), for the currently active Configuration. Set, the entity is a
+    /// Milan device: it answers the MVU commands (GET_MILAN_INFO with these
+    /// fields, the rest NOT_IMPLEMENTED). Unset, it is a plain 1722.1 entity
+    /// and lets every MVU command pass unanswered, as 5.4.4.1 recommends of
+    /// a Configuration that is not Milan.
+    struct MilanInfo
+    {
+        uint32_t features_flags{0};                                 ///< Table 5.17
+        uint32_t certification_version{0};                          ///< mvu_version(); 0 for none passed
+        uint32_t specification_version{atdecc::mvu_version(1, 3)};  ///< the Milan version supported
+        auto operator==(MilanInfo const&) const noexcept -> bool = default;
+    };
+    void set_milan_info(std::optional<MilanInfo> const info) noexcept { milan_info_ = info; }
+    [[nodiscard]] auto milan_info() const noexcept -> std::optional<MilanInfo> const& { return milan_info_; }
+
     /// Set only the GET_STREAM_INFO provider, without disturbing the others.
     /// The application owns the dynamic per-stream parameters.
     void set_get_stream_info(GetStreamInfoFn fn) { callbacks_.get_stream_info = std::move(fn); }
@@ -299,9 +315,11 @@ class AemCommandHandler
     /// this callback's captures are similarly small in practice.
     statusbar::sg14::inplace_function<bool(Eui64 const& owner_entity_id), 64> send_controller_available;
 
-    /// Process an incoming AECP AEM packet and send response
+    /// Process an incoming AECP packet and send the response: an AEM command
+    /// through the AEM dispatch, a VENDOR_UNIQUE command through the Milan
+    /// MVU one when the entity has Milan info to answer with.
     /// @param src_mac Source MAC address (for unicast response)
-    /// @param payload The AECP packet payload (starting with AemDu header)
+    /// @param payload The AECP packet payload (starting with the AECP common header)
     /// @param our_entity_id Our entity ID (for target validation)
     /// @return true if packet was processed and response sent, false if ignored
     [[nodiscard]] auto process_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id) -> bool;
@@ -796,6 +814,39 @@ class AemCommandHandler
     [[nodiscard]] auto send_response(
         Eui48 const& dest_mac, AemDu const& cmd_header, uint8_t status, std::span<uint8_t const> response_body) const -> bool;
 
+    /// A Milan vendor-unique command addressed to this entity: the MVU header
+    /// and the command-specific data its control_data_length covers, when
+    /// @p payload is one; nullopt for anything else (another vendor's protocol,
+    /// a response, a truncated header, another target).
+    struct MvuCommand
+    {
+        AecpMvuDu header{};
+        std::span<uint8_t const> data{};
+    };
+    [[nodiscard]] static auto mvu_command_for(std::span<uint8_t const> payload, Eui64 const& our_entity_id) noexcept
+        -> std::optional<MvuCommand>;
+
+    /// An AEM command addressed to us arrived: dispatch it and send the response.
+    [[nodiscard]] auto process_aem_command(
+        Eui48 const& src_mac, AemDu const& header, std::span<uint8_t const> command_data, Eui64 const& our_entity_id) -> bool;
+
+    /// A VENDOR_UNIQUE command arrived: answer it if it is Milan's and this is a Milan device.
+    [[nodiscard]] auto process_mvu_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id)
+        -> bool;
+
+    /// Dispatch one MVU command (Milan v1.3 5.4.4): GET_MILAN_INFO is answered
+    /// from milan_info_, every other command NOT_IMPLEMENTED with its data
+    /// given back. Writes the response's command-specific data into @p out_buffer.
+    [[nodiscard]] auto handle_mvu_command(MvuCommand const& command, std::span<uint8_t> out_buffer) const -> AemCommandResponse;
+
+    /// The GET_MILAN_INFO response data for milan_info_ (which must be set).
+    [[nodiscard]] auto milan_info_response() const noexcept -> MvuGetMilanInfoResponse;
+
+    /// Send the MVU response to @p cmd_header: its header with @p status and
+    /// @p response_body as the command-specific data, through send_response.
+    [[nodiscard]] auto send_mvu_response(
+        Eui48 const& dest_mac, AecpMvuDu const& cmd_header, uint8_t status, std::span<uint8_t const> response_body) const -> bool;
+
     AemCommandHandlerCallbacks callbacks_;
 
     // One of two code paths:
@@ -822,6 +873,9 @@ class AemCommandHandler
 
     // Which specification settles the points where 1722.1 and Milan differ.
     Profile profile_ = Profile::classic;
+
+    // The GET_MILAN_INFO answer; nullopt for an entity that is not a Milan device.
+    std::optional<MilanInfo> milan_info_{};
 
     // Acquisition state. The acquirer's MAC is kept because IEEE 1722.1 7.5.2
     // implicitly registers the acquiring controller for unsolicited notifications.

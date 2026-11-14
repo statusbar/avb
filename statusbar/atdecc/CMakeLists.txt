@@ -11,6 +11,7 @@ statusbar_add_module(
   atdecc_aecp.cpp
   atdecc_aecp_aem.cpp
   atdecc_aecp_aa.cpp
+  atdecc_aecp_mvu.cpp
   atdecc_aecp_aa_analysis.cpp
   atdecc_aem_control_types.cpp
   atdecc_aem_control_values.cpp
@@ -38,6 +39,7 @@ statusbar_add_module(
   atdecc_adp_test.cpp
   atdecc_aecp_test.cpp
   atdecc_aecp_aa_test.cpp
+  atdecc_aecp_mvu_test.cpp
   atdecc_aem_control_accessors_test.cpp
   atdecc_aem_control_command_test.cpp
   atdecc_aem_control_types_test.cpp

@@ -1,0 +1,218 @@
+#pragma once
+
+// Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+// SPDX-License-Identifier: MIT
+
+/// Milan Vendor Unique (MVU) AECP messages - Milan v1.3 5.4.3 and 5.4.4.
+///
+/// Milan rides the AECP vendor-unique extensibility of IEEE 1722.1-2021 9.6:
+/// a VENDOR_UNIQUE command or response whose protocol_id is Avnu's MVU id,
+/// followed by a 16-bit u/command_type word and the command's own data. The
+/// one every PAAD-AE must answer is GET_MILAN_INFO (5.4.4.1), which is how a
+/// Milan controller tells a Milan device from any other ATDECC entity.
+
+#include "statusbar/atdecc/atdecc_aecp.hpp"
+#include "statusbar/ieee/ieee.hpp"
+
+#include <compare>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string_view>
+
+namespace statusbar::atdecc {
+
+using ieee::doublet_t;
+using ieee::Eui48;
+using ieee::quadlet_t;
+
+//
+// MVU protocol_id - 5.4.3.2.1: Avnu's OUI-36 00-1B-C5-0A-C with protocol 0x100
+//
+inline constexpr Eui48 MVU_PROTOCOL_ID{0x00, 0x1B, 0xC5, 0x0A, 0xC1, 0x00};
+
+//
+// MVU command types - Table 5.15
+//
+constexpr uint16_t MVU_COMMAND_GET_MILAN_INFO = 0x0000;
+constexpr uint16_t MVU_COMMAND_SET_SYSTEM_UNIQUE_ID = 0x0001;
+constexpr uint16_t MVU_COMMAND_GET_SYSTEM_UNIQUE_ID = 0x0002;
+constexpr uint16_t MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO = 0x0003;
+constexpr uint16_t MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO = 0x0004;
+constexpr uint16_t MVU_COMMAND_BIND_STREAM = 0x0005;
+constexpr uint16_t MVU_COMMAND_UNBIND_STREAM = 0x0006;
+constexpr uint16_t MVU_COMMAND_GET_STREAM_INPUT_INFO_EX = 0x0007;
+
+//
+// MVU status codes - Table 5.16
+//
+constexpr uint8_t MVU_STATUS_SUCCESS = 0;
+constexpr uint8_t MVU_STATUS_NOT_IMPLEMENTED = 1;
+constexpr uint8_t MVU_STATUS_NO_SUCH_DESCRIPTOR = 2;
+constexpr uint8_t MVU_STATUS_ENTITY_LOCKED = 3;
+constexpr uint8_t MVU_STATUS_BAD_ARGUMENTS = 7;
+constexpr uint8_t MVU_STATUS_ENTITY_MISBEHAVING = 10;
+constexpr uint8_t MVU_STATUS_PAYLOAD_TOO_SHORT = 13;
+
+/// 5.4.3.4: every MVU command times out after 250 ms; an entity answers within 240.
+constexpr uint32_t MVU_TIMEOUT_MS = 250;
+
+//
+// GET_MILAN_INFO - 5.4.4.1
+//
+
+/// The one Milan protocol version there is.
+constexpr uint32_t MVU_PROTOCOL_VERSION = 1;
+
+/// features_flags - Table 5.17
+constexpr uint32_t MVU_FEATURE_REDUNDANCY = 0x00000001;
+constexpr uint32_t MVU_FEATURE_TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING = 0x00000002;
+constexpr uint32_t MVU_FEATURE_MVU_BINDING = 0x00000004;
+constexpr uint32_t MVU_FEATURE_TALKER_SIGNAL_PRESENCE = 0x00000008;
+
+/// The name of an MVU command type, "Unknown" for one Table 5.15 lacks.
+[[nodiscard]] auto mvu_command_name(uint16_t command_type) noexcept -> std::string_view;
+
+/// The name of an MVU status code, "Unknown" for one Table 5.16 lacks.
+[[nodiscard]] auto mvu_status_name(uint8_t status) noexcept -> std::string_view;
+
+/// A certification_version or specification_version word: four 8-bit numbers,
+/// most significant first, read as dot-separated decimals (5.4.4.1).
+[[nodiscard]] constexpr auto mvu_version(uint8_t const a, uint8_t const b, uint8_t const c = 0, uint8_t const d = 0) noexcept
+    -> uint32_t
+{
+    return (static_cast<uint32_t>(a) << 24) | (static_cast<uint32_t>(b) << 16) | (static_cast<uint32_t>(c) << 8) | d;
+}
+
+/// The word for a dotted version text: "1.3" or "1.3.0.0", one to four
+/// decimal numbers of at most 255 each. nullopt for anything else.
+[[nodiscard]] auto mvu_version_from_dotted(std::string_view text) noexcept -> std::optional<uint32_t>;
+
+/// The dotted text of a version word, as the specification prints it.
+[[nodiscard]] auto mvu_version_to_dotted(uint32_t version) -> std::string;
+
+//
+// MVU AECPDU header - Figure 5.4: AECP common (22) + protocol_id (6) + u/command_type (2)
+//
+struct AecpMvuDu
+{
+    /// Octets on the wire up to and including command_type.
+    static constexpr size_t LENGTH = 30;
+    /// What control_data_length counts of this header: everything after the
+    /// 12-octet common control header.
+    static constexpr size_t MVU_DATA_LENGTH = LENGTH - AecpDuCommon::HEADER_LENGTH;
+
+    /// The vendor-unique AECP common header.
+    AecpDuCommon common{};
+    /// Bytes 22-27: the protocol, MVU_PROTOCOL_ID for a Milan message.
+    Eui48 protocol_id{};
+    /// Bytes 28-29: u[15] | command_type[14:0]
+    doublet_t u_command_type{0};
+
+    /// The command type, Table 5.15.
+    [[nodiscard]] constexpr auto command_type() const noexcept -> uint16_t { return u_command_type.get_bits<uint16_t>(0x7FFF); }
+
+    /// The u bit, 5.4.3.2.2: set on a response that is a notification, clear
+    /// on a command and on the direct response to it.
+    [[nodiscard]] constexpr auto is_unsolicited() const noexcept -> bool { return u_command_type.has_flag(uint16_t{0x8000}); }
+
+    constexpr void set_command_type(uint16_t const command, bool const unsolicited = false) noexcept
+    {
+        u_command_type = static_cast<uint16_t>((command & 0x7FFF) | (unsolicited ? 0x8000 : 0));
+    }
+
+    /// Whether this is a Milan message at all: a VENDOR_UNIQUE command or
+    /// response carrying the MVU protocol_id.
+    [[nodiscard]] constexpr auto is_mvu() const noexcept -> bool
+    {
+        return common.is_vendor_unique() && protocol_id == MVU_PROTOCOL_ID;
+    }
+
+    [[nodiscard]] constexpr auto is_command() const noexcept -> bool
+    {
+        return common.message_type() == AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND;
+    }
+
+    [[nodiscard]] constexpr auto is_response() const noexcept -> bool
+    {
+        return common.message_type() == AECP_MESSAGE_TYPE_VENDOR_UNIQUE_RESPONSE;
+    }
+
+    /// A well-formed MVU header: a valid AECP common header, the MVU
+    /// protocol, and a control_data_length that covers the command_type.
+    [[nodiscard]] constexpr auto is_valid() const noexcept -> bool
+    {
+        return common.is_valid() && is_mvu() && common.control_data_length() >= MVU_DATA_LENGTH;
+    }
+
+    /// Set up a command of @p command whose command-specific data is @p payload_length octets.
+    constexpr void init_command(uint16_t const command, uint16_t const payload_length) noexcept
+    {
+        common.init_command(AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND, static_cast<uint16_t>(MVU_DATA_LENGTH + payload_length));
+        protocol_id = MVU_PROTOCOL_ID;
+        set_command_type(command);
+    }
+
+    /// Set up a response of @p command and @p status whose command-specific
+    /// data is @p payload_length octets; @p unsolicited sets the u bit.
+    constexpr void init_response(
+        uint16_t const command, uint8_t const status, uint16_t const payload_length, bool const unsolicited = false) noexcept
+    {
+        common.init_response(
+            AECP_MESSAGE_TYPE_VENDOR_UNIQUE_RESPONSE, status, static_cast<uint16_t>(MVU_DATA_LENGTH + payload_length));
+        protocol_id = MVU_PROTOCOL_ID;
+        set_command_type(command, unsolicited);
+    }
+
+    auto operator<=>(AecpMvuDu const& rhs) const noexcept -> std::strong_ordering = default;
+};
+
+static_assert(sizeof(AecpMvuDu) == 30, "AecpMvuDu must be exactly 30 bytes");
+static_assert(alignof(AecpMvuDu) <= 4, "AecpMvuDu alignment must not exceed 4 bytes");
+static_assert(offsetof(AecpMvuDu, common) == 0, "common must be at offset 0");
+static_assert(offsetof(AecpMvuDu, protocol_id) == 22, "protocol_id must be at offset 22");
+static_assert(offsetof(AecpMvuDu, u_command_type) == 28, "u_command_type must be at offset 28");
+
+//
+// GET_MILAN_INFO command-specific data - Figures 5.5 and 5.6
+//
+
+/// The command carries two reserved octets after command_type.
+constexpr size_t MVU_GET_MILAN_INFO_COMMAND_LENGTH = 2;
+
+/// The response's command-specific data: what the PAAD-AE is, for its
+/// currently active Configuration. None of it changes while that
+/// Configuration is active (5.4.4.1, Note).
+struct MvuGetMilanInfoResponse
+{
+    static constexpr size_t LENGTH = 18;
+
+    /// Bytes 30-31: reserved, 0.
+    doublet_t reserved{0};
+    /// Bytes 32-35: MVU_PROTOCOL_VERSION.
+    quadlet_t protocol_version{MVU_PROTOCOL_VERSION};
+    /// Bytes 36-39: Table 5.17 flags.
+    quadlet_t features_flags{0};
+    /// Bytes 40-43: the Milan certification passed, mvu_version(); 0 for none.
+    quadlet_t certification_version{0};
+    /// Bytes 44-47: the Milan specification supported, mvu_version(major, minor).
+    quadlet_t specification_version{0};
+
+    auto operator<=>(MvuGetMilanInfoResponse const& rhs) const noexcept -> std::strong_ordering = default;
+};
+
+static_assert(sizeof(MvuGetMilanInfoResponse) == 18, "MvuGetMilanInfoResponse must be exactly 18 bytes");
+static_assert(offsetof(MvuGetMilanInfoResponse, protocol_version) == 2);
+static_assert(offsetof(MvuGetMilanInfoResponse, features_flags) == 6);
+static_assert(offsetof(MvuGetMilanInfoResponse, certification_version) == 10);
+static_assert(offsetof(MvuGetMilanInfoResponse, specification_version) == 14);
+
+}  // namespace statusbar::atdecc
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::AecpMvuDu> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuGetMilanInfoResponse> : std::true_type
+{};

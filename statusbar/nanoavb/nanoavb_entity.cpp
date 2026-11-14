@@ -61,49 +61,65 @@ namespace {
     }
 }
 
+/// Whether @p payload is an AECP VENDOR_UNIQUE command: its common header says so.
+[[nodiscard]] auto is_vendor_unique_command(std::span<uint8_t const> const payload) noexcept -> bool
+{
+    if (payload.size() < AecpDuCommon::LENGTH) {
+        return false;
+    }
+    AecpDuCommon common{};
+    span_load(common, payload);
+    return common.message_type() == AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND;
+}
+
+/// The AEM header in @p payload when it is a valid AEM command addressed to
+/// @p our_entity_id; nullopt for a response, another target, or a short or
+/// malformed header.
+[[nodiscard]] auto aem_command_for(std::span<uint8_t const> const payload, Eui64 const& our_entity_id) noexcept
+    -> std::optional<AemDu>
+{
+    if (payload.size() < AemDu::LENGTH) {
+        return std::nullopt;
+    }
+    AemDu header{};
+    span_load(header, payload);
+    if (!header.is_valid() || !header.is_command() || header.target_entity_id != our_entity_id) {
+        return std::nullopt;
+    }
+    return header;
+}
+
 }  // namespace
 
 auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id) -> bool
 {
-    // Validate minimum size
-    if (payload.size() < AemDu::LENGTH) {
+    // A vendor-unique command is Milan's to answer, or nobody's (9.6): the
+    // AEM header check would only drop it.
+    if (is_vendor_unique_command(payload)) {
+        return process_mvu_packet(src_mac, payload, our_entity_id);
+    }
+    auto const header = aem_command_for(payload, our_entity_id);
+    if (!header) {
         return false;
     }
+    return process_aem_command(src_mac, *header, payload.subspan(AemDu::LENGTH), our_entity_id);
+}
 
-    // Parse header
-    AemDu header{};
-    span_load(header, payload);
-
-    // Validate header
-    if (!header.is_valid() || !header.is_command()) {
-        return false;
-    }
-
-    // Check target_entity_id matches us
-    if (header.target_entity_id != our_entity_id) {
-        return false;  // Not for us
-    }
-
+auto AemCommandHandler::process_aem_command(
+    Eui48 const& src_mac, AemDu const& header, std::span<uint8_t const> const command_data, Eui64 const& our_entity_id) -> bool
+{
     // Keep our id current for unsolicited notifications (their target_entity_id).
     our_entity_id_ = our_entity_id;
-
     // Stash the source MAC so per-command handlers can retain it if they
     // need to emit an out-of-band late response (e.g. ACQUIRE_ENTITY's
     // CONTROLLER_AVAILABLE handshake). Cleared after dispatch.
     current_src_mac_ = src_mac;
-
-    // Extract command data (after AemDu header)
-    auto const command_data = payload.subspan(AemDu::LENGTH);
-
     // One output buffer per dispatch — handlers write into this and return
     // status + bytes-written, avoiding the per-return 1 KB struct copy that
     // the previous AemCommandResult shape incurred.
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
     auto const response = handle_command(header, command_data, out_buffer);
-
     current_src_mac_ = {};
-
-    // Build and send response
     return send_response(src_mac, header, response.status, std::span<uint8_t const>{out_buffer.data(), response.size});
 }
 
@@ -1466,6 +1482,108 @@ auto AemCommandHandler::send_response(
 
     size_t const total_size = AemDu::LENGTH + response_body.size();
     return callbacks_.send_response(dest_mac, {response_buffer.data(), total_size});
+}
+
+// ──────────────────────────────────────────────
+// Milan vendor unique (MVU) - Milan v1.3 5.4.3, 5.4.4
+// ──────────────────────────────────────────────
+
+namespace {
+
+/// The command-specific data of the MVU command @p header in @p payload: what
+/// its control_data_length covers, not the Ethernet padding behind a short
+/// frame (5.4.3.2).
+[[nodiscard]] auto mvu_command_data(AecpMvuDu const& header, std::span<uint8_t const> const payload) noexcept
+    -> std::span<uint8_t const>
+{
+    size_t const declared = header.common.control_data_length() - AecpMvuDu::MVU_DATA_LENGTH;
+    return payload.subspan(AecpMvuDu::LENGTH, std::min(declared, payload.size() - AecpMvuDu::LENGTH));
+}
+
+/// The header of the direct response to @p cmd_header: its fields with the
+/// response message type, @p status and a length covering @p body_size octets
+/// of data; u stays clear on a direct response (5.4.3.2.2).
+[[nodiscard]] auto mvu_response_header(AecpMvuDu const& cmd_header, uint8_t const status, size_t const body_size) noexcept
+    -> AecpMvuDu
+{
+    AecpMvuDu response = cmd_header;
+    response.init_response(cmd_header.command_type(), status, static_cast<uint16_t>(body_size));
+    return response;
+}
+
+}  // namespace
+
+auto AemCommandHandler::mvu_command_for(std::span<uint8_t const> const payload, Eui64 const& our_entity_id) noexcept
+    -> std::optional<MvuCommand>
+{
+    if (payload.size() < AecpMvuDu::LENGTH) {
+        return std::nullopt;
+    }
+    MvuCommand command{};
+    span_load(command.header, payload);
+    if (!command.header.is_valid() || !command.header.is_command() || command.header.common.target_entity_id != our_entity_id) {
+        return std::nullopt;
+    }
+    command.data = mvu_command_data(command.header, payload);
+    return command;
+}
+
+auto AemCommandHandler::process_mvu_packet(Eui48 const& src_mac, std::span<uint8_t const> const payload, Eui64 const& our_entity_id)
+    -> bool
+{
+    // Not a Milan device: no answer, as 5.4.4.1 recommends of a Configuration
+    // that is not Milan, and as the other MVU commands then have no meaning.
+    if (!milan_info_) {
+        return false;
+    }
+    auto const command = mvu_command_for(payload, our_entity_id);
+    if (!command) {
+        return false;
+    }
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
+    auto const response = handle_mvu_command(*command, out_buffer);
+    return send_mvu_response(src_mac, command->header, response.status, std::span<uint8_t const>{out_buffer.data(), response.size});
+}
+
+auto AemCommandHandler::handle_mvu_command(MvuCommand const& command, std::span<uint8_t> const out_buffer) const
+    -> AemCommandResponse
+{
+    if (command.header.command_type() != MVU_COMMAND_GET_MILAN_INFO) {
+        // Table 5.16 NOT_IMPLEMENTED; the command's data goes back as it came,
+        // as an AEM response to an unimplemented command carries its command's.
+        size_t const echoed = std::min(command.data.size(), out_buffer.size());
+        span_copy(out_buffer.first(echoed), command.data.first(echoed));
+        return {.status = MVU_STATUS_NOT_IMPLEMENTED, .size = echoed};
+    }
+    if (command.data.size() < MVU_GET_MILAN_INFO_COMMAND_LENGTH) {
+        return {.status = MVU_STATUS_PAYLOAD_TOO_SHORT, .size = 0};
+    }
+    span_store(out_buffer, milan_info_response());
+    return {.status = MVU_STATUS_SUCCESS, .size = MvuGetMilanInfoResponse::LENGTH};
+}
+
+auto AemCommandHandler::milan_info_response() const noexcept -> MvuGetMilanInfoResponse
+{
+    MvuGetMilanInfoResponse info{};
+    info.protocol_version = MVU_PROTOCOL_VERSION;
+    info.features_flags = milan_info_->features_flags;
+    info.certification_version = milan_info_->certification_version;
+    info.specification_version = milan_info_->specification_version;
+    return info;
+}
+
+auto AemCommandHandler::send_mvu_response(
+    Eui48 const& dest_mac, AecpMvuDu const& cmd_header, uint8_t const status, std::span<uint8_t const> const response_body) const
+    -> bool
+{
+    if (!callbacks_.send_response) {
+        return false;
+    }
+    std::array<uint8_t, AecpMvuDu::LENGTH + MAX_AEM_RESPONSE_SIZE> response_buffer{};
+    auto const bytes = std::span{response_buffer};
+    span_store(bytes, mvu_response_header(cmd_header, status, response_body.size()));
+    span_copy(bytes.subspan(AecpMvuDu::LENGTH, response_body.size()), response_body);
+    return callbacks_.send_response(dest_mac, bytes.first(AecpMvuDu::LENGTH + response_body.size()));
 }
 
 auto AemCommandHandler::handle_register_unsolicited(AemDu const& header) -> AemCommandResponse
