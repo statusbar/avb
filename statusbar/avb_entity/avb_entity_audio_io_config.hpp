@@ -192,10 +192,27 @@ struct AvbEntityAudioIOConfig
     bool identify_bypasses_lock{false};
 
     /// The specification the entity answers to where IEEE 1722.1-2021 and
-    /// Milan v1.3 differ: "classic" (default) reads 1722.1 as written;
-    /// "milan13" applies Milan v1.3 where it says otherwise (a SET to the
-    /// value already in force is not notified, 5.4.5.3).
-    std::string atdecc_profile{"classic"};
+    /// Milan v1.3 differ: "classic" reads 1722.1 as written; "milan13" applies
+    /// Milan v1.3 where it says otherwise (a SET to the value already in force
+    /// is not notified, 5.4.5.3). Empty (the default), the model decides:
+    /// "milan13" for a Milan model (`milan`), "classic" for any other.
+    std::string atdecc_profile{};
+
+    /// The model is a Milan PAAD-AE. The entity then answers the Milan
+    /// vendor-unique commands: GET_MILAN_INFO (Milan v1.3 5.4.4.1) with the
+    /// three fields below, the others NOT_IMPLEMENTED; and an empty
+    /// atdecc_profile means "milan13". Off, the entity is a plain 1722.1
+    /// entity and lets every MVU command pass unanswered (5.4.4.1, Note).
+    bool milan{false};
+    /// GET_MILAN_INFO features_flags, Table 5.17 (REDUNDANCY 1,
+    /// TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING 2, MVU_BINDING 4,
+    /// TALKER_SIGNAL_PRESENCE 8). None by default: none is implemented.
+    uint32_t milan_features_flags{0};
+    /// The Milan certification the device has passed, as dotted numbers
+    /// ("1.2", "1.3.0.0"); "0.0.0.0" for none.
+    std::string milan_certification_version{"0.0.0.0"};
+    /// The Milan specification the device supports, as dotted numbers.
+    std::string milan_specification_version{"1.3.0.0"};
 
     /// Stream destination address source. "static" (default) uses the
     /// *_talker_dest_mac fields above. "maap" acquires a contiguous block of

@@ -198,6 +198,10 @@ class AvbEntityKit
     /// identity from ACMP's picture of the stream, VLAN and priority from the
     /// SR class domain in force (configured, or adopted from the wire).
     [[nodiscard]] auto make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo;
+    /// Whether the entity answers to Milan v1.3 where it and IEEE 1722.1-2021
+    /// differ: the configured atdecc_profile when there is one, else the
+    /// model's (a Milan model does, any other does not).
+    [[nodiscard]] auto milan_profile() const noexcept -> bool;
     [[nodiscard]] auto listener_specs() const noexcept -> StreamSpecs const& { return listener_specs_; }
     [[nodiscard]] auto sample_rate() const noexcept -> uint32_t { return sample_rate_; }
 
@@ -220,6 +224,12 @@ class AvbEntityKit
 
     /// The VLAN the streams use now: the adopted one, else the configured one.
     [[nodiscard]] auto current_vlan_id() const noexcept -> uint16_t;
+    /// Give the AEM handler the GET_MILAN_INFO answer a Milan model makes, or
+    /// none for any other model.
+    void install_milan_info();
+    /// @p text as a Milan version word, or @p fallback (logged against the
+    /// configuration key @p key) when it is not dotted numbers.
+    [[nodiscard]] auto milan_version_or(std::string const& text, uint32_t fallback, std::string_view key) -> uint32_t;
     /// Let go of the data plane start() built: the RX handler kept for an RX
     /// timer, the talker's and the listener's slots, then the port. What the
     /// next start() opens is then the whole of it, as on a first start.

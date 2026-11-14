@@ -8,6 +8,7 @@
 
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 
+#include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
@@ -113,7 +114,7 @@ class KitUnderTest
     AvbEntityKit kit_;
 };
 
-auto make_config(uint16_t const vlan_id, std::string_view const profile) -> AvbEntityAudioIOConfig
+auto make_config(uint16_t const vlan_id, std::string_view const profile, bool const milan = false) -> AvbEntityAudioIOConfig
 {
     AvbEntityAudioIOConfig config{};
     config.entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
@@ -121,8 +122,21 @@ auto make_config(uint16_t const vlan_id, std::string_view const profile) -> AvbE
     config.descriptor_storage_blob = load_file(entity_tone_bin_path());
     config.vlan_id = vlan_id;
     config.atdecc_profile = std::string{profile};
+    config.milan = milan;
     config.interface_name = "no-such-interface-0";
     return config;
+}
+
+using Profile = nanoavb::AemCommandHandler::Profile;
+
+auto profile_of(KitUnderTest& kit) -> Profile
+{
+    return kit->host().components().aem_handler.profile();
+}
+
+auto milan_info_of(KitUnderTest& kit) -> std::optional<nanoavb::AemCommandHandler::MilanInfo> const&
+{
+    return kit->host().components().aem_handler.milan_info();
 }
 
 /// What the kit says the Class A VLAN is, from every place it is said:
@@ -324,6 +338,70 @@ TEST(avb_entity_kit_tspec, a_milan_kit_declares_table_4_4_frame_sizes_and_a_clas
         if (spec.format.kind != StreamKind::crf) {  // CRF is exact under both
             EXPECT_NE(info.max_frame_size, milan_srp_max_frame_size(spec.format));
         }
+    }
+}
+
+TEST(avb_entity_kit_profile, an_empty_profile_is_the_models_and_an_explicit_one_wins)
+{
+    // Nothing said: a plain 1722.1 model answers to 1722.1 and has no Milan info.
+    KitUnderTest plain{make_config(2, "")};
+    EXPECT_FALSE(plain->milan_profile());
+    EXPECT_EQ(profile_of(plain), Profile::classic);
+    EXPECT_FALSE(milan_info_of(plain).has_value());
+
+    // Nothing said of a Milan model: Milan v1.3, and GET_MILAN_INFO to answer.
+    KitUnderTest milan{make_config(2, "", true)};
+    EXPECT_TRUE(milan->milan_profile());
+    EXPECT_EQ(profile_of(milan), Profile::milan13);
+    EXPECT_TRUE(milan_info_of(milan).has_value());
+
+    // An explicit profile wins; the model stays a Milan device for GET_MILAN_INFO.
+    KitUnderTest pinned{make_config(2, "classic", true)};
+    EXPECT_FALSE(pinned->milan_profile());
+    EXPECT_EQ(profile_of(pinned), Profile::classic);
+    EXPECT_TRUE(milan_info_of(pinned).has_value());
+
+    KitUnderTest opted_in{make_config(2, "milan13")};
+    EXPECT_TRUE(opted_in->milan_profile());
+    EXPECT_EQ(profile_of(opted_in), Profile::milan13);
+    EXPECT_FALSE(milan_info_of(opted_in).has_value());
+}
+
+TEST(avb_entity_kit_profile, the_milan_info_comes_from_the_configuration)
+{
+    auto config = make_config(2, "", true);
+    config.milan_features_flags = atdecc::MVU_FEATURE_TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING;
+    config.milan_certification_version = "1.2";
+    config.milan_specification_version = "1.3.0.0";
+    KitUnderTest kit{config};
+    auto const& info = milan_info_of(kit);
+    EXPECT_TRUE(info.has_value());
+    if (info) {
+        EXPECT_EQ(info->features_flags, atdecc::MVU_FEATURE_TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING);
+        EXPECT_EQ(info->certification_version, atdecc::mvu_version(1, 2));
+        EXPECT_EQ(info->specification_version, atdecc::mvu_version(1, 3));
+    }
+
+    // Defaults: no certification, Milan 1.3, no features.
+    KitUnderTest defaults{make_config(2, "", true)};
+    auto const& given = milan_info_of(defaults);
+    EXPECT_TRUE(given.has_value());
+    if (given) {
+        EXPECT_EQ(given->features_flags, 0U);
+        EXPECT_EQ(given->certification_version, 0U);
+        EXPECT_EQ(given->specification_version, atdecc::mvu_version(1, 3));
+    }
+
+    // A version that is not dotted numbers falls back to the default, and is logged.
+    auto bad = make_config(2, "", true);
+    bad.milan_certification_version = "one point two";
+    bad.milan_specification_version = "1.3.";
+    KitUnderTest fallback{bad};
+    auto const& fell = milan_info_of(fallback);
+    EXPECT_TRUE(fell.has_value());
+    if (fell) {
+        EXPECT_EQ(fell->certification_version, 0U);
+        EXPECT_EQ(fell->specification_version, atdecc::mvu_version(1, 3));
     }
 }
 

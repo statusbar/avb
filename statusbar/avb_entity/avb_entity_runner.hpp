@@ -118,9 +118,32 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "atdecc.profile",
         "Where IEEE 1722.1-2021 and Milan v1.3 differ: 'classic' reads 1722.1 as written (every SET answered SUCCESS "
         "is notified, 7.5.2); 'milan13' applies Milan v1.3 (a SET to the value already in force is not notified, "
-        "5.4.5.3). Default classic.",
+        "5.4.5.3). Default empty: the model decides, milan13 when entity.milan is set, classic otherwise.",
         entity.atdecc_profile,
         [&entity](auto v) { entity.atdecc_profile = std::string{v}; });
+    specs.add<bool>(
+        "entity.milan",
+        "The model is a Milan PAAD-AE: answer GET_MILAN_INFO (Milan v1.3 5.4.4.1) and the other MVU commands, and "
+        "take milan13 as the profile unless atdecc.profile says otherwise. Default off: a plain 1722.1 entity, which "
+        "leaves every MVU command unanswered.",
+        entity.milan,
+        [&entity](auto v) { entity.milan = v; });
+    specs.add<uint32_t>(
+        "milan.features_flags",
+        "GET_MILAN_INFO features_flags (Milan v1.3 Table 5.17): REDUNDANCY 1, TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING 2, "
+        "MVU_BINDING 4, TALKER_SIGNAL_PRESENCE 8. Default 0.",
+        entity.milan_features_flags,
+        [&entity](auto v) { entity.milan_features_flags = v; });
+    specs.add<std::string>(
+        "milan.certification_version",
+        "The Milan certification passed, as dotted numbers ('1.2', '1.3.0.0'). Default 0.0.0.0: none.",
+        entity.milan_certification_version,
+        [&entity](auto v) { entity.milan_certification_version = std::string{v}; });
+    specs.add<std::string>(
+        "milan.specification_version",
+        "The Milan specification supported, as dotted numbers. Default 1.3.0.0.",
+        entity.milan_specification_version,
+        [&entity](auto v) { entity.milan_specification_version = std::string{v}; });
     specs.add<uint16_t>("vlan_id", "VLAN ID for AVB streams", entity.vlan_id, [&entity](auto v) { entity.vlan_id = v; });
     specs.add<std::string>(
         "net.backend",

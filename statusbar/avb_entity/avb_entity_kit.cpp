@@ -7,6 +7,7 @@
 
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 
+#include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/logging/logging.hpp"
@@ -61,12 +62,14 @@ AvbEntityKit::AvbEntityKit(
     host_.components().aem_handler.set_legacy_2016(config_.atdecc_version != "2021");
     // IDENTIFY honours acquire and lock unless the configuration says otherwise.
     host_.components().aem_handler.set_identify_bypasses_exclusive_access(config_.identify_bypasses_lock);
-    // Where 1722.1 and Milan differ, the configured profile decides: the AEM
-    // handler's answers, and on the SRP side the Class A Domain adopted from
-    // the wire (4.2.7.2.1) and the instant leave (4.2.7.2.2).
-    bool const milan = config_.atdecc_profile == "milan13";
+    // Where 1722.1 and Milan differ, the profile decides: the AEM handler's
+    // answers, and on the SRP side the Class A Domain adopted from the wire
+    // (4.2.7.2.1) and the instant leave (4.2.7.2.2). A Milan model also has
+    // GET_MILAN_INFO to answer, whichever profile it is held to.
+    bool const milan = milan_profile();
     host_.components().aem_handler.set_profile(
         milan ? nanoavb::AemCommandHandler::Profile::milan13 : nanoavb::AemCommandHandler::Profile::classic);
+    install_milan_info();
     host_.components().msrp_handler.set_adopt_domain(milan);
     host_.components().msrp_handler.set_instant_leave(milan);
     host_.components().msrp_handler.set_on_domain_adopted(
@@ -465,6 +468,39 @@ void AvbEntityKit::close_streams() noexcept
     stream_port_.close();
 }
 
+auto AvbEntityKit::milan_profile() const noexcept -> bool
+{
+    // The configuration decides; left empty, the model does: a Milan model
+    // answers to Milan v1.3, any other to IEEE 1722.1-2021 as written.
+    return config_.atdecc_profile.empty() ? config_.milan : config_.atdecc_profile == "milan13";
+}
+
+void AvbEntityKit::install_milan_info()
+{
+    if (!config_.milan) {
+        host_.components().aem_handler.set_milan_info(std::nullopt);
+        return;
+    }
+    host_.components().aem_handler.set_milan_info(nanoavb::AemCommandHandler::MilanInfo{
+        .features_flags = config_.milan_features_flags,
+        .certification_version = milan_version_or(config_.milan_certification_version, 0, "milan.certification_version"),
+        .specification_version =
+            milan_version_or(config_.milan_specification_version, atdecc::mvu_version(1, 3), "milan.specification_version")});
+}
+
+auto AvbEntityKit::milan_version_or(std::string const& text, uint32_t const fallback, std::string_view const key) -> uint32_t
+{
+    auto const version = atdecc::mvu_version_from_dotted(text);
+    if (!version) {
+        host_.ctl_log().error(
+            "{}: '{}' is not dotted numbers; using {}",
+            logging::embed<32>(std::string{key}),
+            logging::embed<16>(text),
+            logging::embed<16>(atdecc::mvu_version_to_dotted(fallback)));
+    }
+    return version.value_or(fallback);
+}
+
 auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb::TalkerStreamSrpInfo
 {
     nanoavb::TalkerStreamSrpInfo info{};
@@ -473,8 +509,7 @@ auto AvbEntityKit::make_talker_srp_info(StreamSpec const& spec) const -> nanoavb
     // TSpec frame size from the format word (kit phase 1) — no per-entity
     // byte math to keep in step with the model. Milan v1.3 Table 4.4 sizes
     // the frame exactly; classic keeps one sample of headroom.
-    info.max_frame_size =
-        config_.atdecc_profile == "milan13" ? milan_srp_max_frame_size(spec.format) : srp_max_frame_size(spec.format);
+    info.max_frame_size = milan_profile() ? milan_srp_max_frame_size(spec.format) : srp_max_frame_size(spec.format);
     info.accumulated_latency = 0;
     return info;
 }
