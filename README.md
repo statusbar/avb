@@ -102,9 +102,9 @@ ECC2/ECC3 and Ed25519 ESCF) and the IEEE 1722.1-2021 conformance fixes:
   `statusbar-aem-get-counters`, `statusbar-aem-set-clock-source`,
   `statusbar-aemxml` and `statusbar-aemxml-cross-check` (Python),
   `statusbar-descriptor-storage`, `statusbar-aecp-aa-analyzer`.
-- **Capture / audio**: `statusbar-pcap-dump`, `statusbar-avtp-to-wav`,
-  `statusbar-avtp-retransmit`, `statusbar-rttest-send-avtp-tool` (Linux);
-  `statusbar-bpf-dump` when the build enables core's BPF reader.
+- **Capture / audio**: `statusbar-pcap-dump`, `statusbar-bpf-dump`,
+  `statusbar-avtp-to-wav`, `statusbar-avtp-retransmit`,
+  `statusbar-rttest-send-avtp-tool` (Linux).
 - **Timing** (Linux): `statusbar-gptp-slave`, `statusbar-gptp-ntpshm`,
   `statusbar-ptpclient-wake`, `statusbar-gps-ratio-tracker`.
 - **Inter-site / NAT**: `statusbar-owlm-tool` (Linux) and the Python
@@ -117,7 +117,7 @@ ECC2/ECC3 and Ed25519 ESCF) and the IEEE 1722.1-2021 conformance fixes:
   their output is the committed `docs/sm/` tree.
 
 Every tool documents itself with `--help` (four take positional or
-space-separated arguments instead; `docs/TOOLS.md` marks them);
+space-separated arguments rather than flags; `docs/TOOLS.md` marks them);
 facility-based tools also support `--completion` and a TOML config cascade
 (`--config-load` / `--config-save`).
 

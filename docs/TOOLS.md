@@ -6,11 +6,11 @@ the service units, configuration files and data the package puts beside them.
 This is a reference index: each tool also documents itself.
 
 - `--help` prints usage and the full option list (generated from the tool's
-  argument specs, so it never drifts). Three tools take their arguments
-  another way and have no `--help`; they are marked below:
+  argument specs, so it never drifts). Four tools take their arguments
+  another way and are marked below; each still answers `--help`:
   `statusbar-descriptor-storage` and `statusbar-gptp-ntpshm` take one
   positional argument, `statusbar-gps-ratio-tracker` space-separated
-  `--flag value` pairs. `statusbar-avtp-crypto-tool` takes
+  `--flag value` pairs, and `statusbar-avtp-crypto-tool` takes
   `<command> [hex...]` and prints its command list for `--help` or no
   arguments.
 - Tools built on the shared config facility additionally support shell
@@ -84,7 +84,7 @@ answers GET_MILAN_INFO and takes `milan13` as its default profile; see
 | `statusbar-aem-get-counters` | Poll a target's descriptor counters (GET_COUNTERS) at an interval, printing values and deltas. | all |
 | `statusbar-aem-set-clock-source` | Discover a target and SET (default) or GET its CLOCK_DOMAIN media-clock source. | all |
 | `statusbar-aecp-aa-analyzer` | Offline analysis of AECP Address-Access / Memory-Object firmware-upload sessions in a capture. | all |
-| `statusbar-descriptor-storage` | Dump a `.aem` / `.bin` DescriptorStorage blob (configurations, descriptors, string symbols). One positional `<file>`, no flags. | all |
+| `statusbar-descriptor-storage` | Dump a `.aem` / `.bin` DescriptorStorage blob (configurations, descriptors, string symbols). One positional `<file>`. | all |
 | `statusbar-aemxml` | Compile and convert AEM entity models (Python): `json2bin` builds the descriptor-storage blob the entity tools load from a declarative `examples/*.json` model; `json2xml`, `xml2json`, `xml2bin`, `bin2xml`, `bin2json`, `validate`, `dump`, `upgrade` (2013 → 2021 AEMXML schema) and `downgrade`. | all |
 | `statusbar-aemxml-cross-check` | Python: compile an example model to a blob, read it back with the C++ `statusbar-descriptor-storage` reader (`--tool=` or `--build-dir=`) and check the two agree. | all |
 
@@ -126,7 +126,7 @@ Mac's own virtual entities); `statusbar-atdecc-controller` takes the same
 | `statusbar-avtp-retransmit` | Round-trip an AVTP stream (AM824/AAF/CRF) from a pcap through deserialize→serialize, writing a new pcap (wire round-trip check); can rewrite addresses, stream id, presentation offset and format on the way. | all |
 | `statusbar-avtp-to-wav` | Decode an AVTP AAF or AM824/MBLA audio stream from a pcap into a 32-bit-float BWF wav. | all |
 | `statusbar-pcap-dump` | Print each packet's timestamp and decoded frame from a PCAP/PCAPng file. | all |
-| `statusbar-bpf-dump` | Live-capture frames of one EtherType off an interface through core's BPF reader and print the decoded contents. Built only when the configure defines `STATUSBAR_ENABLE_BPF` (core's switch, which a standalone avb configure does not set); the Debian package does not include it. | all |
+| `statusbar-bpf-dump` | Live-capture frames of one EtherType off an interface through core's BPF reader and print the decoded contents. | all |
 | `statusbar-rttest-send-avtp-tool` | Realtime-timer-driven AVTP/AAF transmitter for TSN egress testing (mmap/bpf/xdp backends, optional PTP scheduling, wake and duration histograms). | Linux-only |
 
 ```sh
@@ -142,9 +142,9 @@ statusbar-rttest-send-avtp-tool --interface=eth0 --backend=mmap
 | Tool | Purpose | Platform |
 |---|---|---|
 | `statusbar-gptp-slave` | gPTP slave-only follower daemon; disciplines to a grandmaster and reports the gPTP↔bridge-clock offset and rate. | Linux-only |
-| `statusbar-gptp-ntpshm` | Read the current PTP time and local offset from linuxptp's NTP SHM segment. One positional argument, the segment number (default 0); no flags. | Linux-only |
+| `statusbar-gptp-ntpshm` | Read the current PTP time and local offset from linuxptp's NTP SHM segment. One positional argument, the segment number (default 0). | Linux-only |
 | `statusbar-ptpclient-wake` | Demonstrate precision periodic wake timing disciplined to a PTP clock; prints wake-error stats. | Linux-only |
-| `statusbar-gps-ratio-tracker` | Track the frequency ratio r = switch_gPTP_rate / GPS_rate (PHC vs GPS-disciplined REALTIME) for the GPS-rate media clock. Space-separated `--flag value` arguments, no `--help`. | Linux-only |
+| `statusbar-gps-ratio-tracker` | Track the frequency ratio r = switch_gPTP_rate / GPS_rate (PHC vs GPS-disciplined REALTIME) for the GPS-rate media clock. Space-separated `--flag value` arguments (`--help` lists them). | Linux-only |
 
 ```sh
 statusbar-gptp-slave --interface=eth0 --profile=standard --verbose
