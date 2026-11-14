@@ -9,8 +9,8 @@ python3 ../python/aemxml/aemxml_tool.py json2bin dual.json dual.aem
 ```
 
 The same tool also converts to/from AEMXML (`json2xml`, `xml2json`, `xml2bin`) — AEMXML
-being the interchange format Hive / la_avdecc speak — so these models are portable, not a
-private schema. `../python/aemxml/model.py` is the underlying Python AEM model (IR) that
+being the interchange format other ATDECC controllers read and write — so these models are
+portable, not a private schema. `../python/aemxml/model.py` is the underlying Python AEM model (IR) that
 all three front-ends (JSON, AEMXML, direct Python) feed.
 
 ## Variables
@@ -154,7 +154,7 @@ elsewhere:
 ## Known gaps
 
 - **`bin2xml` is a stub** (`aemxml_tool.py`: "full model reconstruction not yet implemented
-  (Phase 2)") — so an existing device blob / Hive export can't yet be imported back into
+  (Phase 2)") — so an existing device blob or AEMXML export can't yet be imported back into
   JSON automatically. Finishing it enables round-trip import/export.
 - **`bin2json` flattens locales**: `json_writer.py` emits a single explicit `strings`
   table and does not reconstruct the dict form, so converting a *multi-locale* blob back

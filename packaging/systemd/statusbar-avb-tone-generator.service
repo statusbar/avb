@@ -1,6 +1,6 @@
 [Unit]
 Description=StatusBar AVB tone generator (AVDECC talker: AAF/AM824/CRF piano tones)
-Documentation=man:statusbar-avb-tone-generator
+Documentation=file:/etc/statusbar-avb/tone-generator.toml
 # Order after the network and, if present, the gPTP daemon. Ordering on a unit
 # that does not exist is a harmless no-op, so this works whether or not
 # linuxptp/gptp.service is installed on a given host.

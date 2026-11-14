@@ -78,7 +78,8 @@ Depends on `statusbar-core`, `statusbar-crypto`, and `statusbar-audio`. See the 
 ### Key command-line tools
 
 Full reference with examples: **[`docs/TOOLS.md`](docs/TOOLS.md)** — every
-installed binary, grouped by purpose. Highlights:
+installed program, grouped by purpose, plus the service units, conffiles and
+data the package ships. Highlights:
 
 What 2.3.0 added to the entity data path, and how it measured on a
 Raspberry Pi 5 rig: **[`docs/REPORT_2_3_0_PI5.md`](docs/REPORT_2_3_0_PI5.md)**.
@@ -89,29 +90,36 @@ ECC2/ECC3 and Ed25519 ESCF) and the IEEE 1722.1-2021 conformance fixes:
 **[`docs/RELEASE_2_5_0.md`](docs/RELEASE_2_5_0.md)**.
 
 - **AVB endpoints** (Linux): `statusbar-avb-audio-io` (dual-format
-  AM824 + AAF + CRF), `statusbar-avb-am824-io`, `statusbar-avb-stereo-io`,
-  `statusbar-nanoavb`. `--interface` is **required**.
+  AM824 + AAF + CRF; the `statusbar-avb-entity` service),
+  `statusbar-avb-tone-generator` (talker-only AAF/AM824 + CRF test tones; the
+  `statusbar-avb-tone-generator` service), `statusbar-avb-am824-io`,
+  `statusbar-avb-stereo-io`; `statusbar-nanoavb` on every platform.
+  `--interface` is **required**.
 - **ATDECC**: `statusbar-atdecc-ctl` (scriptable connect / clock-source /
-  batch), `statusbar-acmp-controller` (one-shot connect),
-  `statusbar-atdecc-controller` (interactive TUI), `statusbar-atdecc-monitor`,
+  signal-selector / batch / supervise), `statusbar-acmp-controller` (one-shot
+  connect), `statusbar-atdecc-controller` (interactive TUI),
+  `statusbar-atdecc-monitor`, `statusbar-aem-control`,
   `statusbar-aem-get-counters`, `statusbar-aem-set-clock-source`,
-  `statusbar-aemxml`, `statusbar-descriptor-storage`,
-  `statusbar-aecp-aa-analyzer`.
-- **Capture / audio**: `statusbar-pcap-dump`, `statusbar-bpf-dump`,
-  `statusbar-avtp-to-wav`, `statusbar-avtp-retransmit`,
-  `statusbar-rttest-send-avtp-tool` (Linux).
+  `statusbar-aemxml` and `statusbar-aemxml-cross-check` (Python),
+  `statusbar-descriptor-storage`, `statusbar-aecp-aa-analyzer`.
+- **Capture / audio**: `statusbar-pcap-dump`, `statusbar-avtp-to-wav`,
+  `statusbar-avtp-retransmit`, `statusbar-rttest-send-avtp-tool` (Linux);
+  `statusbar-bpf-dump` when the build enables core's BPF reader.
 - **Timing** (Linux): `statusbar-gptp-slave`, `statusbar-gptp-ntpshm`,
   `statusbar-ptpclient-wake`, `statusbar-gps-ratio-tracker`.
-- **Inter-site / NAT**: `owlm_tool` (Linux), `stun_client_tool`,
-  `stun_server_tool`. **SRP**: `statusbar-msrp-functional-test`.
+- **Inter-site / NAT**: `statusbar-owlm-tool` (Linux) and the Python
+  `statusbar-owlm-analyze` (numpy / pandas / matplotlib) that post-processes
+  its CSV output, `statusbar-stun-client-tool`, `statusbar-stun-server-tool`.
+  **SRP**: `statusbar-msrp-functional-test`.
 - **Crypto**: `statusbar-avtp-crypto-tool`.
 - **State-machine diagrams** (DOT / Markdown):
-  `statusbar-{atdecc,avtp,gptp,srp,nanoavb}-sm`, `stun_sm_tool`.
+  `statusbar-{atdecc,avtp,gptp,srp,nanoavb}-sm`, `statusbar-stun-sm-tool`;
+  their output is the committed `docs/sm/` tree.
 
-Every tool supports `--help`; facility-based tools also support
-`--completion` and a TOML config cascade (`--config-load` / `--config-save`).
-The Python `owlm_analyze` (numpy / pandas / matplotlib) post-processes `owlm`
-CSV output into plots and stats.
+Every tool documents itself with `--help` (four take positional or
+space-separated arguments instead; `docs/TOOLS.md` marks them);
+facility-based tools also support `--completion` and a TOML config cascade
+(`--config-load` / `--config-save`).
 
 ### Modules
 

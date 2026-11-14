@@ -5,12 +5,17 @@
 
 **Implements:** IEEE 802.1Q-2014 Clause 35 (MSRP — Multiple Stream Reservation Protocol, minimal)
 
+| State | Entry | Exit |
+|-------|-------|------|
+| Joining | msrp_listener_ready() | - |
+| Leaving | msrp_listener_leave() | - |
+
 | Event | Start | Idle | Joining | Ready | Failed | Leaving |
 |-------|--------|--------|--------|--------|--------|--------|
 | UCT | init()<br/>-> Idle | -x- | -x- | -x- | -x- | -x- |
-| StartJoin | -x- | msrp_listener_ready()<br/>-> Joining | -x- | -x- | -x- | -x- |
-| StopJoin | -x- | -x- | -x- | msrp_listener_leave()<br/>-> Leaving | msrp_listener_leave()<br/>-> Leaving | -x- |
+| StartJoin | -x- | -> Joining | -x- | -x- | -x- | -x- |
+| StopJoin | -x- | -x- | -x- | -> Leaving | -> Leaving | -x- |
 | Ready | -x- | -x- | mark_ready()<br/>-> Ready | -x- | -x- | -x- |
 | Failed | -x- | -x- | mark_failed()<br/>-> Failed | -x- | -x- | -x- |
-| Lost | -x- | -x- | -x- | msrp_listener_ready()<br/>-> Joining | -x- | -x- |
+| Lost | -x- | -x- | -x- | -> Joining | -x- | -x- |
 | Left | -x- | -x- | -x- | -x- | -x- | mark_idle()<br/>-> Idle |

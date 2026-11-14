@@ -5,6 +5,10 @@
 
 **Implements:** (no standard — application-level audio TX pipeline lifecycle)
 
+| State | Entry | Exit |
+|-------|-------|------|
+| Off | stop_all() | - |
+
 | Event | Start | Off | Priming | Armed | Running | Muted |
 |-------|--------|--------|--------|--------|--------|--------|
 | UCT | init()<br/>-> Off | -x- | -x- | -x- | -x- | -x- |
@@ -14,4 +18,4 @@
 | GateStop | -x- | -x- | -x- | -x- | stop_tx()<br/>-> Armed | stop_tx()<br/>-> Armed |
 | Underrun | -x- | -x- | -x- | -x- | mute_tx()<br/>-> Muted | -x- |
 | Recovered | -x- | -x- | -x- | -x- | -x- | unmute_tx()<br/>-> Running |
-| Fatal | -x- | stop_all()<br/>-> Off | stop_all()<br/>-> Off | stop_all()<br/>-> Off | stop_all()<br/>-> Off | stop_all()<br/>-> Off |
+| Fatal | -x- | -> Off | -> Off | -> Off | -> Off | -> Off |

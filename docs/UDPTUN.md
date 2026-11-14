@@ -11,7 +11,7 @@ The wire packet format is a customization point: callers supply a
 sequence, tx_gptp_ns, app_data}, classify primary vs redundant copies,
 and validate received bytes for the reflector.
 
-The OWLM measurement tool (`statusbar/owlm`, `owlm_tool`) is the
+The OWLM measurement tool (`statusbar/owlm`, `statusbar-owlm-tool`) is the
 reference consumer. A second consumer — IEEE 1722-2025 AAF version 1
 audio carried over IEEE 1722 Annex J UDP encapsulation — lives outside
 this repo (in the AVB tooling that wants to reuse the framework).
@@ -189,7 +189,7 @@ The framework stamps each TX packet with a **presentation time** (PT):
     PT = wire_ns(monotonic_raw_ns()) + worst_case_latency_ns
 
 `worst_case_latency_ns` is `SessionConfig.worst_case_latency_ns`, set by
-the caller (e.g. owlm_tool's `--worst-case-latency-ms`). It is the
+the caller (e.g. statusbar-owlm-tool's `--worst-case-latency-ms`). It is the
 tolerated worst-case one-way latency for the deployment; on-time
 packets land at lateness ≤ 0 and a positive lateness means the packet
 missed its WCL deadline. The receiver:
@@ -241,7 +241,7 @@ response size equals the request size, so the reflector cannot be used
 as a UDP amplification vector.
 
 See `docs/OWLM.md` for the OWLM-specific deployment story
-(`reflex.statusbar.com`).
+(`reflector.example.com`).
 
 ## Reference codecs
 

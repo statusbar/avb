@@ -1,22 +1,36 @@
 <!-- SPDX-License-Identifier: MIT -->
 # AVB command-line tools
 
-Every binary the `statusbar-avb` package installs, grouped by purpose. This is a
-reference index — each tool also documents itself:
+Every program the `statusbar-avb` package installs, grouped by purpose, plus
+the service units, configuration files and data the package puts beside them.
+This is a reference index: each tool also documents itself.
 
 - `--help` prints usage and the full option list (generated from the tool's
-  argument specs, so it never drifts).
+  argument specs, so it never drifts). Three tools take their arguments
+  another way and have no `--help`; they are marked below:
+  `statusbar-descriptor-storage` and `statusbar-gptp-ntpshm` take one
+  positional argument, `statusbar-gps-ratio-tracker` space-separated
+  `--flag value` pairs. `statusbar-avtp-crypto-tool` takes
+  `<command> [hex...]` and prints its command list for `--help` or no
+  arguments.
 - Tools built on the shared config facility additionally support shell
   `--completion=bash|zsh|fish` and a TOML config cascade
-  (`--config-load=FILE`, `--config-save=FILE`, and a default
-  `~/.config/<tool>/config.toml`).
+  (`--config-load=FILE`, `--config-save=FILE`, `--config-dump`, and a default
+  `~/.config/<tool>/config.toml`). Every flag has the same name as a TOML key,
+  so a unit file can carry its whole configuration in one `--config-load`.
+- Every installed name is `statusbar-<target>` with underscores turned into
+  dashes; the build applies the prefix uniformly (`statusbar_prefix_tool_names`
+  in the shared CMake), so a build-tree binary has the same name as the
+  installed one.
 - **Platform** is `all` unless marked `Linux-only` (those depend on raw
   `AF_PACKET` sockets, PHC/`/dev/ptp0`, NTP SHM, or `PACKET_MMAP`/XDP, and are
   gated off non-Linux builds in CMake).
 
-Examples use `eth0`; substitute your interface. Live AVB/raw-socket tools need
-`CAP_NET_RAW` (+ `CAP_NET_ADMIN` for some) — run as root or grant caps with
-`setcap`.
+Examples use `eth0`; substitute your interface. Live AVB and raw-socket tools
+need `CAP_NET_RAW` (plus `CAP_NET_ADMIN` for some). The Debian package's
+postinst grants `cap_net_raw,cap_net_admin,cap_sys_nice,cap_ipc_lock` to every
+installed `statusbar-*` ELF binary with `setcap`, so on a packaged system the
+tools run unprivileged; from a build tree, run as root or `setcap` by hand.
 
 ---
 
@@ -24,46 +38,61 @@ Examples use `eth0`; substitute your interface. Live AVB/raw-socket tools need
 
 | Tool | Purpose | Platform |
 |---|---|---|
-| `statusbar-avb-audio-io` | Dual-format AVB entity (AM824 + AAF stream pair + CRF media clock) streaming an N-ch 96 kHz tone, with optional inter-site UDP tunnel. | Linux-only |
+| `statusbar-avb-audio-io` | Dual-format AVB entity: one AM824 and one AAF stream pair plus a CRF media clock. Streams a built-in test tone when nothing feeds it; optional inter-site UDP tunnel (`--udptun.*`). The entity the `statusbar-avb-entity` service runs. | Linux-only |
+| `statusbar-avb-tone-generator` | Talker-only entity: 8 channels of continuous sine tones (white piano keys from C4 by default) as AAF plus a CRF media clock, or AM824 + AAF + CRF, locked to gPTP. The entity the `statusbar-avb-tone-generator` service runs. | Linux-only |
 | `statusbar-avb-am824-io` | AVB entity: one N-ch 48 kHz AM824 listener/talker pair with a configurable DSP biquad (peak EQ). | Linux-only |
 | `statusbar-avb-stereo-io` | AVB entity: one stereo 48 kHz AM824 listener/talker pair with a configurable DSP biquad (descriptors built in). | Linux-only |
-| `statusbar-nanoavb` | Demonstration entity wiring the nanoavb components (ADP/ACMP/MVRP/MSRP/gPTP) under a state-machine supervisor. | Linux-only |
+| `statusbar-nanoavb` | Demonstration entity wiring the nanoavb components (ADP/ACMP/MVRP/MSRP/gPTP) under a state-machine supervisor. | all |
 
 ```sh
-# Compile the descriptor model from its JSON source, then run the dual-format entity.
-statusbar-aemxml json2bin examples/dual.json entity_audio.bin
-statusbar-avb-audio-io --interface=eth0 --descriptor-storage=entity_audio.bin
+# The packaged entity models live in /usr/local/share/statusbar-avb/; audio-io
+# and the tone generator default to them, am824-io needs one named.
+statusbar-avb-audio-io       --interface=eth0
+statusbar-avb-audio-io       --interface=eth0 --descriptor-storage=my_entity.bin --net.backend=xdp
+statusbar-avb-tone-generator --interface=eth0 --streams=aaf+crf --tone.base_note=60
+statusbar-avb-am824-io       --interface=eth0 --descriptor-storage=entity.bin
+statusbar-avb-stereo-io      --interface=eth0 --ptp.driver=linuxptp --ptp.device=/dev/ptp0
+statusbar-nanoavb            --interface=eth0 --ptp.driver=system
 
-statusbar-avb-am824-io --interface=eth0 --descriptor-storage=entity.bin
-statusbar-avb-stereo-io --interface=eth0 --ptp.driver=linuxptp --ptp.device=/dev/ptp0
-statusbar-nanoavb       --interface=eth0 --ptp.driver=system
+# Compile your own model from its JSON source first:
+statusbar-aemxml json2bin examples/dual.json my_entity.bin
 ```
 
-`--interface` is **required** on all four (no default). `avb-audio-io` and
-`avb-am824-io` also require `--descriptor-storage=<path>`. Useful flags:
-`--ptp.driver=linuxptp|system`, `--ptp.device=/dev/ptp0`, `--vlan_id`,
-`--filter.freq_hz`/`--filter.gain_db`/`--filter.q`, `--entity.id`/`--entity.name`;
-`avb-audio-io` adds `--udptun.*` (peer/egress/listen/wcl_ns), `--tx_pcap.path`,
-`--gate.talker_on_listener`, `--media.*`, `--tone.*`.
+`--interface` is **required** on all five (no default). `--descriptor-storage`
+defaults to the packaged blob on `avb-audio-io` (`entity_audio.bin`) and the
+tone generator (`entity_tone*.bin`, picked by `--streams=all|aaf|aaf+crf`) and
+is required on `avb-am824-io`. Useful flags on the entity tools:
+`--ptp.driver=linuxptp|ntpshm|system`, `--ptp.device=/dev/ptp0`, `--vlan_id`,
+`--entity.id`/`--entity.name`, `--atdecc.version=2016|2021`,
+`--atdecc.profile=classic|milan13` and `--entity.milan` (a Milan model
+answers GET_MILAN_INFO and takes `milan13` as its default profile; see
+`ENTITY_CONSTRUCTION_KIT.md`), `--net.backend=rawnet|mmap|xdp`
+(+ `--net.xdp_queue`), `--filter.freq_hz`/`--filter.gain_db`/`--filter.q`.
+`avb-audio-io` adds `--udptun.*` (peer/egress/listen/wcl_ns/rendezvous),
+`--tx_pcap.path`, `--gate.talker_on_listener`, `--media.*`, `--tone.*`,
+`--srp.*` workarounds and `--stream.address_mode=static|maap`.
 
 ## ATDECC — control & inspection
 
 | Tool | Purpose | Platform |
 |---|---|---|
-| `statusbar-atdecc-ctl` | Scriptable controller: resolve entity names → connect/disconnect, set/get clock source, probe RX/TX state, validate models, run TOML batches. | all |
-| `statusbar-acmp-controller` | One-shot ACMP CONNECT/DISCONNECT (RX-to-listener or TX-direct) to set up/tear down a stream. | all |
+| `statusbar-atdecc-ctl` | Scriptable controller: resolve entity names → connect/disconnect, set/get clock source and signal selector, probe RX/TX state, identify, validate models, run TOML batches, supervise connections. | all |
+| `statusbar-acmp-controller` | One-shot ACMP CONNECT/DISCONNECT (RX, to the listener) or CONNECT_TX/DISCONNECT_TX (direct to the talker) to set up or tear down a stream. | all |
 | `statusbar-atdecc-controller` | Interactive terminal-UI controller (ADP discovery, AEM descriptor read, ACMP connection management). | all |
-| `statusbar-atdecc-monitor` | Passively monitor ADP/AEM/ACMP from a live interface or a pcap; optional active descriptor-tree enumeration. | all |
-| `statusbar-aem-get-counters` | Poll a target's descriptor counters (GET_COUNTERS) at an interval, printing values + deltas. | all |
-| `statusbar-aem-set-clock-source` | Discover a target and SET/GET its CLOCK_DOMAIN media-clock source. | all |
+| `statusbar-atdecc-monitor` | Passively monitor ADP/AEM/ACMP from a live interface or a pcap; optional active descriptor-tree enumeration of one target. | all |
+| `statusbar-aem-control` | GET or SET one CONTROL descriptor's values on a target (`--set=` comma-separated values; omit to GET). | all |
+| `statusbar-aem-get-counters` | Poll a target's descriptor counters (GET_COUNTERS) at an interval, printing values and deltas. | all |
+| `statusbar-aem-set-clock-source` | Discover a target and SET (default) or GET its CLOCK_DOMAIN media-clock source. | all |
 | `statusbar-aecp-aa-analyzer` | Offline analysis of AECP Address-Access / Memory-Object firmware-upload sessions in a capture. | all |
-| `statusbar-descriptor-storage` | Dump a `.aem` DescriptorStorage blob (configs, descriptors, string symbols). Positional `<file.aem>`. | all |
-| `statusbar-aemxml` | Compile/convert AEM entity models: `json2bin` builds the descriptor-storage blob the entity tools consume from a declarative `examples/*.json` model; also `json2xml`/`xml2json`/`xml2bin`/`validate`/`dump` (AEMXML interchange). | all |
+| `statusbar-descriptor-storage` | Dump a `.aem` / `.bin` DescriptorStorage blob (configurations, descriptors, string symbols). One positional `<file>`, no flags. | all |
+| `statusbar-aemxml` | Compile and convert AEM entity models (Python): `json2bin` builds the descriptor-storage blob the entity tools load from a declarative `examples/*.json` model; `json2xml`, `xml2json`, `xml2bin`, `bin2xml`, `bin2json`, `validate`, `dump`, `upgrade` (2013 → 2021 AEMXML schema) and `downgrade`. | all |
+| `statusbar-aemxml-cross-check` | Python: compile an example model to a blob, read it back with the C++ `statusbar-descriptor-storage` reader (`--tool=` or `--build-dir=`) and check the two agree. | all |
 
 ```sh
 statusbar-atdecc-ctl --interface=eth0 --command=list
-statusbar-atdecc-ctl --interface=eth0 --command=connect --talker=node-a:0 --listener=node-d:0
+statusbar-atdecc-ctl --interface=eth0 --command=connect --talker=node-a:0 --listener=node-d:0 --trace
 statusbar-atdecc-ctl --interface=eth0 --command=set-clock-source --entity=MyDevice --clock-domain=0 --clock-source=1
+statusbar-atdecc-ctl --interface=eth0 --command=set-signal-selector --entity=MyDevice --descriptor=0 --signal-type=AUDIO_CLUSTER --signal-index=2
 statusbar-atdecc-ctl --interface=eth0 --command=identify --entity=MyDevice --state=on
 statusbar-acmp-controller --interface=eth0 --action=CONNECT \
   --talker-entity-id=00:11:22:33:44:55:66:77 --talker-uid=0 \
@@ -71,26 +100,34 @@ statusbar-acmp-controller --interface=eth0 --action=CONNECT \
 statusbar-atdecc-controller --interface=eth0
 statusbar-atdecc-monitor --interface=eth0 --show-descriptors
 statusbar-atdecc-monitor --pcap=capture.pcapng --enumerate
+statusbar-aem-control --interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --descriptor-index=1          # GET
+statusbar-aem-control --interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --descriptor-index=1 --set=-3.0
 statusbar-aem-get-counters --interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --descriptor-index=0
 statusbar-aem-set-clock-source --interface=eth0 --target-entity-id=00:11:22:ff:fe:33:44:55 --clock-domain-index=0 --clock-source-index=5
 statusbar-aecp-aa-analyzer --input=capture.pcapng --verbose
 statusbar-descriptor-storage entity.aem
 statusbar-aemxml json2bin examples/dual.json entity.bin
+statusbar-aemxml dump entity.bin
 ```
 
 `atdecc-ctl --command` accepts `list`, `validate`, `connect`, `disconnect`,
 `get-rx-state`, `get-tx-state`, `set-clock-source`, `get-clock-source`,
-`identify` (`--state=on|off`), `batch` (TOML `--file`), and `supervise`.
+`set-signal-selector`, `get-signal-selector`, `identify` (`--state=on|off`),
+`batch` (TOML `--file`) and `supervise` (`--file`, `--watch-ms`).
+`--backend=raw|avb` picks the controller's own state machines over the raw
+socket (default) or, on macOS, the system AVB framework (needed to reach the
+Mac's own virtual entities); `statusbar-atdecc-controller` takes the same
+`--backend`.
 
 ## AVTP, capture & audio
 
 | Tool | Purpose | Platform |
 |---|---|---|
-| `statusbar-avtp-retransmit` | Round-trip an AVTP stream (AM824/AAF/CRF) from a pcap through deserialize→serialize, writing a new pcap (wire round-trip check). | all |
+| `statusbar-avtp-retransmit` | Round-trip an AVTP stream (AM824/AAF/CRF) from a pcap through deserialize→serialize, writing a new pcap (wire round-trip check); can rewrite addresses, stream id, presentation offset and format on the way. | all |
 | `statusbar-avtp-to-wav` | Decode an AVTP AAF or AM824/MBLA audio stream from a pcap into a 32-bit-float BWF wav. | all |
-| `statusbar-pcap-dump` | Print each packet's timestamp + decoded frame from a PCAP/PCAPng file. | all |
-| `statusbar-bpf-dump` | Live-capture frames of a given EtherType off an interface (BPF) and print decoded contents. | all |
-| `statusbar-rttest-send-avtp-tool` | Realtime-timer-driven AVTP/AAF transmitter for TSN egress testing (mmap/bpf/xdp backends, optional PTP scheduling). | Linux-only |
+| `statusbar-pcap-dump` | Print each packet's timestamp and decoded frame from a PCAP/PCAPng file. | all |
+| `statusbar-bpf-dump` | Live-capture frames of one EtherType off an interface through core's BPF reader and print the decoded contents. Built only when the configure defines `STATUSBAR_ENABLE_BPF` (core's switch, which a standalone avb configure does not set); the Debian package does not include it. | all |
+| `statusbar-rttest-send-avtp-tool` | Realtime-timer-driven AVTP/AAF transmitter for TSN egress testing (mmap/bpf/xdp backends, optional PTP scheduling, wake and duration histograms). | Linux-only |
 
 ```sh
 statusbar-avtp-retransmit --input=in.pcap --stream-id=00:11:22:33:44:55:0001 --format=am824 --output=out.pcap
@@ -104,30 +141,29 @@ statusbar-rttest-send-avtp-tool --interface=eth0 --backend=mmap
 
 | Tool | Purpose | Platform |
 |---|---|---|
-| `statusbar-gptp-slave` | gPTP slave-only follower daemon; disciplines to a grandmaster and reports gPTP↔bridge-clock offset/rate. | Linux-only |
-| `statusbar-gptp-ntpshm` | Read current PTP time + local offset from linuxptp's NTP SHM segment. | Linux-only |
+| `statusbar-gptp-slave` | gPTP slave-only follower daemon; disciplines to a grandmaster and reports the gPTP↔bridge-clock offset and rate. | Linux-only |
+| `statusbar-gptp-ntpshm` | Read the current PTP time and local offset from linuxptp's NTP SHM segment. One positional argument, the segment number (default 0); no flags. | Linux-only |
 | `statusbar-ptpclient-wake` | Demonstrate precision periodic wake timing disciplined to a PTP clock; prints wake-error stats. | Linux-only |
-| `statusbar-gps-ratio-tracker` | Track the frequency ratio r = switch_gPTP_rate / GPS_rate (PHC vs GPS-disciplined REALTIME) for the GPS-rate media clock. | Linux-only |
+| `statusbar-gps-ratio-tracker` | Track the frequency ratio r = switch_gPTP_rate / GPS_rate (PHC vs GPS-disciplined REALTIME) for the GPS-rate media clock. Space-separated `--flag value` arguments, no `--help`. | Linux-only |
 
 ```sh
 statusbar-gptp-slave --interface=eth0 --profile=standard --verbose
 statusbar-gptp-ntpshm 0
 statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0 --ptp.period=1000000
-statusbar-gps-ratio-tracker --device /dev/ptp0 --filter kalman
+sudo statusbar-gps-ratio-tracker --device /dev/ptp0 --filter kalman
 ```
 
 `gptp-slave` options: `--profile=standard|automotive`, `--manual-peer-delay=<ns>`,
-`--servo-kp`/`--servo-ki`, `--software`, `--bridge-clock=monotonic_raw|...`
-(`monotonic_raw` is the policy value: the app side of the gPTP time bridge is
-the timing reference, and `udptun` refuses any other; the other values are
-for comparing clocks, not for running on).
-(`gps-ratio-tracker` uses a hand-rolled parser — space-separated `--flag value`.)
+`--phase-jump-threshold=<ns>`, `--servo-kp`/`--servo-ki`, `--software`,
+`--bridge-clock=monotonic_raw|...` (`monotonic_raw` is the policy value: the
+app side of the gPTP time bridge is the timing reference, and `udptun` refuses
+any other; the other values are for comparing clocks, not for running on).
 
 ## SRP / MSRP
 
 | Tool | Purpose | Platform |
 |---|---|---|
-| `statusbar-msrp-functional-test` | Offline harness: replay a pcap's peer frames through MSRP/MVRP and check emitted PDUs/events against optional TOML expectations. | all |
+| `statusbar-msrp-functional-test` | Offline harness: replay a pcap's peer frames through MSRP/MVRP and check the emitted PDUs and events against optional TOML expectations. | all |
 
 ```sh
 statusbar-msrp-functional-test --input=capture.pcapng --peer-mac=a8:20:66:3c:f8:6e --our-mac=11:22:33:44:55:66
@@ -137,30 +173,33 @@ statusbar-msrp-functional-test --input=capture.pcapng --peer-mac=a8:20:66:3c:f8:
 
 | Tool | Purpose | Platform |
 |---|---|---|
-| `owlm_tool` | One-way latency measurement: stamp small UDP datagrams in the gPTP domain and track per-source latency stats. | Linux-only |
-| `stun_client_tool` | STUN rendezvous client — REGISTER to a server, learn the reflexive address, pair with a peer, NAT keepalive. | all |
-| `stun_server_tool` | STUN rendezvous server — pair two clients in a session and return each one's reflexive + peer address. | all |
+| `statusbar-owlm-tool` | One-way latency measurement: stamp small UDP datagrams in the gPTP domain and track per-source latency stats; `--mode=reflect` for a remote reflector; `--csv-output`/`--bin-output` for offline analysis. | Linux-only |
+| `statusbar-owlm-analyze` | Python (numpy / pandas / matplotlib): `summarize`, `plot`, `join`, `events` and `gaps` over the CSV or `.colbin` files `statusbar-owlm-tool` writes. | all |
+| `statusbar-stun-client-tool` | STUN rendezvous client: REGISTER to a server, learn the reflexive address, pair with a peer, NAT keepalive. | all |
+| `statusbar-stun-server-tool` | STUN rendezvous server: pair two clients in a session and return each one's reflexive and peer address. | all |
 
 ```sh
-owlm_tool --gptp-interface=eth0 --owlm-interface=eth1 --peer=10.0.0.5 --tx-interval-us=1000
-stun_server_tool --port=3478 --key=<64-hex>
-stun_client_tool --server=reflex.example.com:3478 --key=<64-hex> --eui64=AA:BB:CC:DD:EE:FF:00:11
+statusbar-owlm-tool --gptp-interface=eth0 --owlm-interface=eth1 --peer=10.0.0.5 --tx-interval-us=1000
+statusbar-owlm-tool --gptp-interface=eth0 --peer=10.0.0.5 --tx-interval-us=1000 --csv-output=a.csv
+statusbar-owlm-analyze summarize a.csv -o a.summary
+statusbar-stun-server-tool --port=3478 --key=<64-hex>
+statusbar-stun-client-tool --server=stun.example.com:3478 --key=<64-hex> --eui64=AA:BB:CC:DD:EE:FF:00:11
 ```
 
 ## Crypto
 
 | Tool | Purpose | Platform |
 |---|---|---|
-| `statusbar-avtp-crypto-tool` | Hex-in/hex-out front end to the crypto primitives (AES, SIV/GCM-SIV, SHA/HMAC, HKDF, Ed25519/X25519, P-256 ECDSA/ECDH, ECIES). | all |
+| `statusbar-avtp-crypto-tool` | Hex-in/hex-out front end to the crypto primitives (AES, SIV/GCM-SIV, SHA/HMAC, HKDF, Ed25519/X25519, P-256 ECDSA/ECDH, ECIES, HPKE, the IEEE 1722 EECF/ESCF payloads). | all |
 
 ```sh
 statusbar-avtp-crypto-tool sha256 <hex-message>
 statusbar-avtp-crypto-tool aes128_encrypt <key-hex> <plaintext-hex>
 ```
 
-Invoked as `<command> [hex_args...]` (not flags). Commands include
-`aes128_encrypt`/`aes256_encrypt`, `aes128_siv_encrypt`,
-`aes256_gcm_siv_encrypt`, `sha256`/`sha512`/`sha256_hmac`,
+Invoked as `<command> [hex_args...]` (not flags); `--help` or no arguments
+prints the command list. Commands include `aes128_encrypt`/`aes256_encrypt`,
+`aes128_siv_encrypt`, `aes256_gcm_siv_encrypt`, `sha256`/`sha512`/`sha256_hmac`,
 `hkdf`/`hkdf_extract`/`hkdf_expand`, `ed25519_sign`/`ed25519_verify`,
 `x25519`, `p256_ecdsa_sign`/`p256_ecdh`, `ecies_encrypt` (the IEEE 1363a-2004
 triple as V||C||T), `eecf_ecc1_encrypt`/`eecf_ecc1_decrypt` (the IEEE
@@ -176,7 +215,7 @@ or 01, ED25519; see `IEEE_1722_CRYPTO_AMENDMENT.md`).
 
 | Tool | Purpose | Platform |
 |---|---|---|
-| `statusbar-adp-l2send-probe` | Raw-socket ADPDU send probe (optionally `PACKET_QDISC_BYPASS`) that reads driver TX counters to localize where frames are dropped before the wire. | Linux-only |
+| `statusbar-adp-l2send-probe` | Raw-socket ADPDU send probe (optionally `PACKET_QDISC_BYPASS`) that reads driver TX counters to localize where frames are dropped before the wire; `--listen` counts what arrives. | Linux-only |
 
 ```sh
 statusbar-adp-l2send-probe --interface=eth0 --compare
@@ -186,7 +225,10 @@ statusbar-adp-l2send-probe --interface=eth0 --compare
 
 Each emits the protocol state machines as Graphviz **DOT** or **Markdown**
 (pipe DOT through `dot -Tpng`/`-Tsvg`). With no `--machine` they emit all
-machines; `--output-dir=DIR` writes one file per machine.
+machines; `--output-dir=DIR` writes one file per machine. The committed
+`docs/sm/` tree is their output: the build's `docs-sm` target regenerates it
+(Markdown plus SVG, `dot` required), and it is regenerated whenever a state
+machine changes.
 
 | Tool | State machines | Platform |
 |---|---|---|
@@ -195,16 +237,38 @@ machines; `--output-dir=DIR` writes one file per machine.
 | `statusbar-gptp-sm` | gPTP slave-role port state machine | all |
 | `statusbar-srp-sm` | MRP applicant / registrar / leaveall / periodic | all |
 | `statusbar-nanoavb-sm` | NanoAVB supervisor, gPTP, MVRP, ADP, ACMP, MSRP, talker/listener engines | all |
-| `stun_sm_tool` | STUN client + server-session | all |
+| `statusbar-stun-sm-tool` | STUN client + server-session | all |
 
 ```sh
 statusbar-atdecc-sm  --format=markdown --machine=acmp_controller_sm
 statusbar-nanoavb-sm --format=dot --machine=supervisor_sm | dot -Tpng -o supervisor.png
-statusbar-srp-sm     --output-dir=docs/sm --format=markdown   # all machines as .md
+statusbar-srp-sm     --output-dir=docs/sm/srp --format=markdown   # all machines as .md
 ```
+
+## What else the package installs
+
+The Debian runtime package (`statusbar-avb`) ships, beside the binaries above:
+
+| Path | What it is |
+|---|---|
+| `/lib/systemd/system/statusbar-avb-entity.service` | Runs `statusbar-avb-audio-io --config-load=/etc/statusbar-avb/entity.toml`. Shipped **disabled**; `systemctl enable --now statusbar-avb-entity` after editing the conffile. |
+| `/lib/systemd/system/statusbar-avb-tone-generator.service` | Runs `statusbar-avb-tone-generator --config-load=/etc/statusbar-avb/tone-generator.toml`. Shipped **disabled**, enabled the same way. |
+| `/etc/statusbar-avb/entity.toml`, `/etc/statusbar-avb/tone-generator.toml` | The two services' configuration; dpkg conffiles, so site edits survive upgrades. Every key is the tool's flag of the same name. The shipped files hold generic defaults only (`interface = "eth0"`, the packaged model, the test tone); peers, keys and CPU pinning are left commented out. |
+| `/usr/local/share/statusbar-avb/entity_audio.bin`, `entity_tone.bin`, `entity_tone_aaf.bin`, `entity_tone_aaf_crf.bin` | The packaged AEM models, compiled at build time from `examples/*.json` by `statusbar-aemxml json2bin`; the defaults of `--descriptor-storage` on the two service entities. |
+| `/lib/udev/rules.d/60-statusbar-ptp.rules` | Makes `/dev/ptp*` world-readable so an unprivileged talker timestamps in the gPTP domain instead of falling back to the system clock. |
+| `/usr/lib/python3/dist-packages/aemxml/` | The Python AEM model package behind `statusbar-aemxml`. |
+
+The postinst grants the capabilities named at the top to every `statusbar-*`
+ELF binary, reloads udev, and across an upgrade restarts each of the two
+services that was running. The `-dev` package installs the headers, the static
+libraries, the CMake package and this `docs/` tree (including `docs/sm/`) under
+`/usr/local/share/doc/statusbar-avb/`. No man pages are shipped; each unit's
+`Documentation=` line points at its conffile, which names the tool and its
+`--help`.
 
 ---
 
-See also: [`OWLM.md`](OWLM.md), [`UDPTUN.md`](UDPTUN.md),
+See also: [`ENTITY_CONSTRUCTION_KIT.md`](ENTITY_CONSTRUCTION_KIT.md) for the
+entity tools' configuration keys, [`OWLM.md`](OWLM.md), [`UDPTUN.md`](UDPTUN.md),
 [`GPS_MEDIA_CLOCK.md`](GPS_MEDIA_CLOCK.md), the `*_STATE_MACHINES.md` docs, and
 [`AEM_ENTITY_MODEL.md`](AEM_ENTITY_MODEL.md) for the concepts behind these tools.

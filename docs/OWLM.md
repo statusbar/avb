@@ -2,7 +2,7 @@
 
 # OWLM — One-Way Latency Measurement Tool
 
-`owlm_tool` measures one-way UDP packet latency between two end
+`statusbar-owlm-tool` measures one-way UDP packet latency between two end
 stations using gPTP-synchronized timestamps. Both sides send and
 receive; each side maintains per-source latency statistics
 (min/mean/p50/p95/p99/max, full histogram, packet loss).
@@ -21,14 +21,14 @@ audio over UDP) plug into the same framework.
 On node A (192.0.2.1):
 
 ```
-sudo setcap cap_net_raw,cap_net_admin=ep ./owlm_tool
-./owlm_tool --gptp-interface=eth0 --peer=192.0.2.2 --tx-interval-us=1000
+sudo setcap cap_net_raw,cap_net_admin=ep ./statusbar-owlm-tool
+./statusbar-owlm-tool --gptp-interface=eth0 --peer=192.0.2.2 --tx-interval-us=1000
 ```
 
 On node B (192.0.2.2):
 
 ```
-./owlm_tool --gptp-interface=eth0 --peer=192.0.2.1 --tx-interval-us=1000
+./statusbar-owlm-tool --gptp-interface=eth0 --peer=192.0.2.1 --tx-interval-us=1000
 ```
 
 After ~10 s each side prints summary lines like:
@@ -46,7 +46,7 @@ histogram per source.
 
 ## Redundant dual-stream mode (default)
 
-By default `owlm_tool` sends every TX opportunity twice: a *primary*
+By default `statusbar-owlm-tool` sends every TX opportunity twice: a *primary*
 packet (EUI-64 mid bytes `00:00`) carrying the current sequence and gPTP
 timestamp, and a *redundant* packet (mid `00:01`) replaying the
 primary packet sent `--temporal-shift-ms` (default 10 ms) earlier. The
@@ -61,7 +61,7 @@ reflector echoes both copies. The receiver:
 The RTT line gains `recovered=R true_loss=Y% (T)` so you can see the
 effective drop rate before and after redundancy.
 
-Caveat: a single-NIC `owlm_tool` only protects against temporal
+Caveat: a single-NIC `statusbar-owlm-tool` only protects against temporal
 decorrelation (bursty losses up to ~`temporal-shift-ms` wide). For
 true path-diversity redundancy (ST 2022-7 style), the two streams must
 go over physically separate paths, which this tool does not yet do.
@@ -71,7 +71,7 @@ Pass `--no-redundant` to fall back to a single legacy stream (uses
 
 ## Presentation-time stamping (`--worst-case-latency-ms`)
 
-`owlm_tool` stamps each packet with a *presentation time* (PT) rather
+`statusbar-owlm-tool` stamps each packet with a *presentation time* (PT) rather
 than the raw acquisition wall:
 
     PT = acquisition_wall + worst_case_latency_ms × 1e6
@@ -120,7 +120,7 @@ ms-scale work; don't expect µs accuracy without gPTP or PTP.
 ## IPv6 unicast
 
 ```
-./owlm_tool --gptp-interface=eth0 --peer=fe80::1%eth1 --tx-interval-us=1000
+./statusbar-owlm-tool --gptp-interface=eth0 --peer=fe80::1%eth1 --tx-interval-us=1000
 ```
 
 The local bind family is inferred from `--peer`. For RX-only mode (no
@@ -134,16 +134,16 @@ between the two endpoints — for example, probing a remote server from a
 NATed home device — run a stateless reflector on the remote and a normal
 sender locally:
 
-On the remote (e.g. `reflex.statusbar.com`):
+On the remote (e.g. `reflector.example.com`):
 
 ```
-./owlm_tool --mode=reflect --local-port=9991
+./statusbar-owlm-tool --mode=reflect --local-port=9991
 ```
 
 On the local sender:
 
 ```
-./owlm_tool --gptp-interface=eth0 --peer=reflex.statusbar.com \
+./statusbar-owlm-tool --gptp-interface=eth0 --peer=reflector.example.com \
             --peer-port=9991 --tx-interval-us=100000
 ```
 
@@ -170,7 +170,7 @@ the rate calibration cancels across each round-trip interval.
 ## Multicast
 
 ```
-./owlm_tool --gptp-interface=eth0 --peer=239.1.2.3 --mcast-ttl=2 \
+./statusbar-owlm-tool --gptp-interface=eth0 --peer=239.1.2.3 --mcast-ttl=2 \
             --tx-interval-us=1000 --dscp=46
 ```
 
@@ -243,7 +243,7 @@ the canonical validation.
 
 ## Smoke test
 
-`scripts/owlm/loopback_smoke.sh` runs two `owlm_tool` instances on
+`scripts/owlm/loopback_smoke.sh` runs two `statusbar-owlm-tool` instances on
 `lo` (with separate ports) for a few seconds and asserts packet
 counts. Hand-run with:
 
@@ -253,7 +253,7 @@ OWLM_TEST_IFACE=eth0 ctest -R owlm_loopback
 
 ## CSV output for offline analysis
 
-Pass `--csv-output=PATH` to `owlm_tool` to write a per-packet CSV at
+Pass `--csv-output=PATH` to `statusbar-owlm-tool` to write a per-packet CSV at
 session end. Schema (header row included):
 
 ```
@@ -277,12 +277,12 @@ ring depth (~3 MB / 65536 records) absorbs ~30 s of writer stalls at
 records to be dropped and counted, and the drop count is printed on
 stderr at exit when non-zero.
 
-Analyze captured CSVs with `python/owlm/owlm_analyze.py`:
+Analyze captured CSVs with `python/owlm/owlm_analyze.py`, installed as `statusbar-owlm-analyze`:
 
 ```
-owlm_analyze.py join A.csv B.csv [--bin-width-us=250]
-owlm_analyze.py plot A.csv [B.csv] -o plot.png [--window-ms=100]
-owlm_analyze.py events A.csv \
+statusbar-owlm-analyze join A.csv B.csv [--bin-width-us=250]
+statusbar-owlm-analyze plot A.csv [B.csv] -o plot.png [--window-ms=100]
+statusbar-owlm-analyze events A.csv \
     [--upper-threshold-ms=5] [--negative-threshold-ms=-1] -o events.csv
 ```
 
@@ -300,17 +300,17 @@ wan-timer diagnostics and per-packet outlier panels. Each is
 independent — pass any subset:
 
 ```
-owlm_analyze.py plot A.parquet B.parquet -o report.pdf \
+statusbar-owlm-analyze plot A.parquet B.parquet -o report.pdf \
     --wake-csv-a A-wake.csv     --wake-csv-b B-wake.csv \
     --duration-csv-a A-dur.csv  --duration-csv-b B-dur.csv \
     --outliers-csv-a A-out.csv  --outliers-csv-b B-out.csv
 ```
 
-The wake / duration CSVs are the outputs of owlm_tool's
+The wake / duration CSVs are the outputs of statusbar-owlm-tool's
 `--wan-timer-wake-stats-csv` / `--wan-timer-duration-stats-csv`. Each
 adds one bar-plot row (bin centres on x in µs, count on symlog y;
 underflow / overflow tail counts shown in the title). The outliers
-CSVs are the outputs of `owlm_analyze.py events`. Each adds two
+CSVs are the outputs of `statusbar-owlm-analyze events`. Each adds two
 rows per device: a scatter of latency vs session-time coloured by
 direction, plus a histogram of outlier latencies split by direction.
 

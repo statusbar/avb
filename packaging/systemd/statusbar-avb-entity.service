@@ -1,6 +1,6 @@
 [Unit]
 Description=StatusBar AVB audio entity (AVDECC talker/listener)
-Documentation=man:statusbar-avb-audio-io
+Documentation=file:/etc/statusbar-avb/entity.toml
 # Order after the network and, if present, the gPTP daemon. Ordering on a unit
 # that does not exist is a harmless no-op, so this works whether or not
 # linuxptp/gptp.service is installed on a given host.
