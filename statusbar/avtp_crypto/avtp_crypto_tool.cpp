@@ -3,7 +3,7 @@
 
 // Command-line interface to statusbar_crypto algorithms.
 //
-// Usage: avtp_crypto_cli <command> [hex_args...]
+// Usage: statusbar-avtp-crypto-tool <command> [hex_args...]
 //
 // All binary data is hex-encoded on input and output.
 // Empty strings represent zero-length data.
@@ -112,7 +112,7 @@ static void usage()
 {
     std::println(
         stderr,
-        "Usage: avtp_crypto_cli <command> [hex_args...]\n"
+        "Usage: statusbar-avtp-crypto-tool <command> [hex_args...]\n"
         "\n"
         "Commands:\n"
         "  aes128_encrypt       <key> <plaintext>           -> ciphertext\n"

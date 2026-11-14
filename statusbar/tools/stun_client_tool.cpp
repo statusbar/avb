@@ -78,11 +78,11 @@ void random_session_id(stun::SessionId& out)
     return true;
 }
 
-auto build_arg_specs(Config& c) -> statusbar::args::ArgumentSpecs
+// The server, the key and the session: what the rendezvous is made of.
+void add_session_args(statusbar::args::ArgumentSpecs& s, Config& c)
 {
-    statusbar::args::ArgumentSpecs s;
     s.add<std::string>(
-        "server", "STUN server as host:port (e.g. reflex.statusbar.com:3478)", std::string{}, [&](auto v) { c.server = v; });
+        "server", "STUN server as host:port (e.g. stun.example.com:3478)", std::string{}, [&](auto v) { c.server = v; });
     s.add<std::string>(
         "key", "64 hex chars = 32-byte AES-128-SIV pre-shared key. Must match the server's --key.", std::string{}, [&](auto v) {
             c.key_hex = v;
@@ -92,9 +92,21 @@ auto build_arg_specs(Config& c) -> statusbar::args::ArgumentSpecs
         "32 hex chars = 16-byte session id. Must match the peer's value. Random if omitted.",
         std::string{},
         [&](auto v) { c.session_id_hex = v; });
+}
+
+// Who this client is in the session, and how loudly it reports.
+void add_identity_args(statusbar::args::ArgumentSpecs& s, Config& c)
+{
     s.add<std::string>("eui64", "8-byte identifier (e.g. AA:BB:CC:DD:EE:FF:00:11)", std::string{}, [&](auto v) { c.eui64 = v; });
     s.add_choice("role", "Role hint", {"initiator", "responder"}, "initiator", [&](auto v) { c.role = std::string{v}; });
     s.add_flag("verbose", "Trace each send / recv / refresh / retransmit", [&](auto v) { c.verbose = v; });
+}
+
+auto build_arg_specs(Config& c) -> statusbar::args::ArgumentSpecs
+{
+    statusbar::args::ArgumentSpecs s;
+    add_session_args(s, c);
+    add_identity_args(s, c);
     return s;
 }
 
