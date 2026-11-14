@@ -25,6 +25,7 @@
 #include <print>
 #include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -235,13 +236,31 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     return specs;
 }
 
+void print_usage(char const* prog, args::ArgumentSpecs const& specs)
+{
+    static constexpr std::array<std::string_view, 3> examples{
+        "--interface=eth0 --backend=mmap",
+        "--interface=eth0 --backend=xdp --xdp_queue_id=1 --packet_timer.cpu=3 --dump_stats_on_exit",
+        "--interface=eth0 --packet_timer.use_ptp_clock --packet_timer.ptp_driver=linuxptp --packet_timer.ptp_device=/dev/ptp0",
+    };
+    config::default_print_usage(
+        prog,
+        specs,
+        "Real-time AVTP/AAF transmitter for TSN egress testing. A realtime timer wakes every\n"
+        "packet_timer.period_ns and sends tx_ops_per_tick frames on each of two AAF streams\n"
+        "(avb_tx0.*, avb_tx1.*) through the mmap, bpf or xdp backend, optionally scheduled on a\n"
+        "PTP clock; the wake-error and duration histograms and the tracer report what the host\n"
+        "did with the deadline. --dump_avtp_only prints the frames and sends nothing.",
+        examples);
+}
+
 auto parse_config(int argc, char** argv) -> StatusValue<Config>
 {
     Config config;
     auto specs = build_arg_specs(config);
 
     // Parse CLI arguments, handle --completion, --help, --config-load, --config-save, apply bindings
-    auto cli_result = config::parse_cli_args(argc, argv, specs, config::default_print_usage, "statusbar-rttest-send-avtp-tool");
+    auto cli_result = config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-rttest-send-avtp-tool");
     if (!cli_result) {
         return failure(cli_result.error());
     }

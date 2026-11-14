@@ -35,6 +35,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -390,13 +391,28 @@ auto run(ToolConfig const& cfg) -> int
 
 }  // namespace
 
-int main(int argc, char** argv)
+void print_usage(char const* prog, args::ArgumentSpecs const& specs)
 {
-    ToolConfig cfg;
-    auto specs = build_arg_specs(cfg);
+    static constexpr std::array<std::string_view, 2> examples{
+        "--input=capture.pcapng --output=out.wav",
+        "--input=capture.pcapng --output=out.wav --stream-id=00:11:22:33:44:55:00:01 --verbose",
+    };
+    statusbar::config::default_print_usage(
+        prog,
+        specs,
+        "Decode one AVTP audio stream (AAF, or AM824 MBLA) from a pcap/pcapng capture into a\n"
+        "32-bit-float Broadcast Wave file. The first matching audio packet fixes the format,\n"
+        "channel count and sample rate; --stream-id picks the stream when the capture holds\n"
+        "more than one. Sequence gaps are reported, not filled.",
+        examples);
+}
 
-    auto const status =
-        statusbar::config::parse_cli_args(argc, argv, specs, statusbar::config::default_print_usage, "statusbar-avtp-to-wav");
+// Parses the command line into cfg. Returns the exit code when the run ends here (a
+// built-in command handled, an argument error, a required option missing); nullopt to go on.
+auto parse_arguments(int argc, char** argv, ToolConfig& cfg) -> std::optional<int>
+{
+    auto specs = build_arg_specs(cfg);
+    auto const status = statusbar::config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-avtp-to-wav");
     if (!status) {
         if (statusbar::config::handled_builtin_command(status)) {
             return EXIT_SUCCESS;
@@ -404,7 +420,6 @@ int main(int argc, char** argv)
         std::print(stderr, "argument error: {}\n", status.error().message());
         return EXIT_FAILURE;
     }
-
     if (cfg.input_path.empty()) {
         std::print(stderr, "error: --input is required\n");
         return EXIT_FAILURE;
@@ -412,6 +427,15 @@ int main(int argc, char** argv)
     if (cfg.output_path.empty()) {
         std::print(stderr, "error: --output is required\n");
         return EXIT_FAILURE;
+    }
+    return std::nullopt;
+}
+
+int main(int argc, char** argv)
+{
+    ToolConfig cfg;
+    if (auto const done = parse_arguments(argc, argv, cfg)) {
+        return *done;
     }
 
     auto const result = statusbar::catch_or_status([&]() -> statusbar::StatusValue<int> { return run(cfg); }, std::errc::io_error);
