@@ -11,18 +11,22 @@
 //
 //   sudo statusbar-gps-ratio-tracker --device /dev/ptp0 --filter kalman
 //   sudo statusbar-gps-ratio-tracker --filter ols --window-s 900
+//   statusbar-gps-ratio-tracker --help
 
-#include "statusbar/ptpclient/ptpclient_freq_ratio.hpp"
+#if defined(__linux__)
 
-#include <fcntl.h>
-#include <unistd.h>
+#    include "statusbar/ptpclient/ptpclient_freq_ratio.hpp"
 
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <ctime>
-#include <optional>
-#include <string>
+#    include <fcntl.h>
+#    include <unistd.h>
+
+#    include <cstdint>
+#    include <cstdio>
+#    include <cstdlib>
+#    include <ctime>
+#    include <optional>
+#    include <string>
+#    include <string_view>
 
 using statusbar::ptpclient::KalmanRatioTracker;
 using statusbar::ptpclient::OlsRatioTracker;
@@ -65,92 +69,201 @@ double dt_seconds(timespec const& now, timespec const& prev)
     return static_cast<double>(now.tv_sec - prev.tv_sec) + (static_cast<double>(now.tv_nsec - prev.tv_nsec) * 1e-9);
 }
 
+struct Options
+{
+    std::string dev = "/dev/ptp0";
+    std::string filter = "kalman";
+    double report_s = 5.0;
+    double sample_hz = 4.0;
+    double fs = 96000.0;
+    double window_s = 900.0;
+    KalmanRatioTracker::Config kc;
+};
+
+auto wants_help(int argc, char** argv) -> bool
+{
+    for (int i = 1; i < argc; ++i) {
+        std::string_view const a = argv[i];
+        if (a == "--help" || a == "-h") {
+            return true;
+        }
+    }
+    return false;
+}
+
+void print_usage(FILE* out, char const* prog)
+{
+    std::fprintf(
+        out,
+        "Usage: %s [--flag value ...]\n"
+        "\n"
+        "Track r = switch_gPTP_rate / GPS_rate: the local PHC against CLOCK_REALTIME\n"
+        "(GPS-disciplined), with the ptpclient frequency-ratio estimators. Prints an\n"
+        "estimate every --report-s seconds. Linux-only; reads the PHC through /dev/ptpN.\n"
+        "\n"
+        "  --device PATH        PHC device (default /dev/ptp0)\n"
+        "  --filter ols|kalman  estimator (default kalman)\n"
+        "  --report-s S         seconds between reports (default 5)\n"
+        "  --sample-hz HZ       PHC/GPS sample rate (default 4)\n"
+        "  --fs HZ              media sample rate the estimate is quoted at (default 96000)\n"
+        "  --window-s S         OLS window length in seconds (default 900)\n"
+        "  --meas-noise-ns NS   Kalman measurement noise, one sigma\n"
+        "  --jerk-psd PSD       Kalman frequency-drift process noise\n"
+        "  --gate SIGMAS        Kalman innovation gate\n"
+        "  --help               this text\n",
+        prog);
+}
+
+// The second half of the option set: the Kalman estimator's own knobs.
+void parse_kalman_option(std::string const& a, char const* value, KalmanRatioTracker::Config& kc)
+{
+    if (a == "--meas-noise-ns") {
+        kc.meas_noise_ns = atof(value);
+    } else if (a == "--jerk-psd") {
+        kc.jerk_psd = atof(value);
+    } else if (a == "--gate") {
+        kc.gate_sigmas = atof(value);
+    }
+}
+
+void parse_option(std::string const& a, char const* value, Options& o)
+{
+    if (a == "--device") {
+        o.dev = value;
+    } else if (a == "--filter") {
+        o.filter = value;
+    } else if (a == "--report-s") {
+        o.report_s = atof(value);
+    } else if (a == "--sample-hz") {
+        o.sample_hz = atof(value);
+    } else if (a == "--fs") {
+        o.fs = atof(value);
+    } else if (a == "--window-s") {
+        o.window_s = atof(value);
+    } else {
+        parse_kalman_option(a, value, o.kc);
+    }
+}
+
+// Space-separated `--flag value` pairs; a flag is read with the value after it.
+auto parse_options(int argc, char** argv) -> Options
+{
+    Options o;
+    for (int i = 1; i < argc - 1; ++i) {
+        parse_option(argv[i], argv[i + 1], o);
+    }
+    return o;
+}
+
+void print_estimate(RatioEstimate const& e, bool const use_kalman, double const fs)
+{
+    printf(
+        "[%s] r=%.9f (%+0.4f ppm)  f_unc=%.3f ppb  drift=%+0.4f ppm/hr  "
+        "PHC-GPS=%lld ns  avtp_ns/sample@%.0f=%.4f\n",
+        use_kalman ? "kalman" : "ols",
+        e.r,
+        e.ppm(),
+        e.freq_uncertainty_ppb,
+        e.drift_ppm_per_hr,
+        static_cast<long long>(e.offset_ns),
+        fs,
+        e.phc_ns_per_sample(fs));
+    fflush(stdout);
+}
+
+// One run of the tracker: samples the PHC against GPS forever, reporting on schedule.
+class RatioRun
+{
+  public:
+    RatioRun(Options const& o, int const fd)
+        : o_(o)
+        , fd_(fd)
+        , phc_clk_(fd_to_clockid(fd))
+        , use_kalman_(o.filter != "ols")
+        , ols_{o.window_s}
+        , kf_{o.kc}
+    {}
+
+    [[noreturn]] void run()
+    {
+        for (;;) {
+            if (auto s = read_sample(fd_, phc_clk_)) {
+                ingest(*s);
+            }
+            timespec ts{.tv_sec = 0, .tv_nsec = static_cast<long>(1e9 / o_.sample_hz)};
+            clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, nullptr);
+        }
+    }
+
+  private:
+    void ingest(Reading const& s)
+    {
+        double const dt = prev_gps_ ? dt_seconds(s.gps, *prev_gps_) : 0.0;
+        prev_gps_ = s.gps;
+        if (use_kalman_) {
+            kf_.add(s.offset_ns, dt);
+        } else {
+            ols_.add(s.offset_ns, dt);
+        }
+        since_report_ += 1.0 / o_.sample_hz;
+        if (first_ || since_report_ >= o_.report_s) {
+            report();
+        }
+    }
+
+    void report()
+    {
+        first_ = false;
+        since_report_ = 0;
+        RatioEstimate const e = use_kalman_ ? kf_.estimate() : ols_.estimate();
+        if (e.valid) {
+            print_estimate(e, use_kalman_, o_.fs);
+        }
+    }
+
+    Options o_;
+    int fd_;
+    clockid_t phc_clk_;
+    bool use_kalman_;
+    OlsRatioTracker ols_;
+    KalmanRatioTracker kf_;
+    std::optional<timespec> prev_gps_;
+    double since_report_ = 0;
+    bool first_ = true;
+};
+
 }  // namespace
 
 int main(int argc, char** argv)
 {
-    std::string dev = "/dev/ptp0";
-    std::string filter = "kalman";
-    double report_s = 5.0, sample_hz = 4.0, fs = 96000.0, window_s = 900.0;
-    KalmanRatioTracker::Config kc;
-
-    for (int i = 1; i < argc - 1; ++i) {
-        std::string const a = argv[i];
-        if (a == "--device") {
-            dev = argv[++i];
-        } else if (a == "--filter") {
-            filter = argv[++i];
-        } else if (a == "--report-s") {
-            report_s = atof(argv[++i]);
-        } else if (a == "--sample-hz") {
-            sample_hz = atof(argv[++i]);
-        } else if (a == "--fs") {
-            fs = atof(argv[++i]);
-        } else if (a == "--window-s") {
-            window_s = atof(argv[++i]);
-        } else if (a == "--meas-noise-ns") {
-            kc.meas_noise_ns = atof(argv[++i]);
-        } else if (a == "--jerk-psd") {
-            kc.jerk_psd = atof(argv[++i]);
-        } else if (a == "--gate") {
-            kc.gate_sigmas = atof(argv[++i]);
-        }
+    if (wants_help(argc, argv)) {
+        print_usage(stdout, argv[0]);
+        return 0;
     }
-
+    Options const o = parse_options(argc, argv);
     // sample_hz drives 1e9/sample_hz (sleep) and 1.0/sample_hz (report accumulator);
     // a non-positive value yields inf/an invalid tv_nsec, so the sleep returns EINVAL
     // and the loop spins. Reject it up front.
-    if (sample_hz <= 0.0) {
+    if (o.sample_hz <= 0.0) {
         std::fprintf(stderr, "Error: --sample-hz must be positive\n");
         return 1;
     }
-
-    int const fd = open(dev.c_str(), O_RDWR);
+    int const fd = open(o.dev.c_str(), O_RDWR);
     if (fd < 0) {
-        perror(("open " + dev).c_str());
+        perror(("open " + o.dev).c_str());
         return 1;
     }
-    clockid_t const phc_clk = fd_to_clockid(fd);
-    bool const use_kalman = (filter != "ols");
-
-    OlsRatioTracker ols{window_s};
-    KalmanRatioTracker kf{kc};
-
-    std::optional<timespec> prev_gps;
-    double since_report = 0;
-    bool first = true;
-
-    for (;;) {
-        if (auto s = read_sample(fd, phc_clk)) {
-            double const dt = prev_gps ? dt_seconds(s->gps, *prev_gps) : 0.0;
-            prev_gps = s->gps;
-            if (use_kalman) {
-                kf.add(s->offset_ns, dt);
-            } else {
-                ols.add(s->offset_ns, dt);
-            }
-            since_report += 1.0 / sample_hz;
-            if (first || since_report >= report_s) {
-                first = false;
-                since_report = 0;
-                RatioEstimate const e = use_kalman ? kf.estimate() : ols.estimate();
-                if (e.valid) {
-                    printf(
-                        "[%s] r=%.9f (%+0.4f ppm)  f_unc=%.3f ppb  drift=%+0.4f ppm/hr  "
-                        "PHC-GPS=%lld ns  avtp_ns/sample@%.0f=%.4f\n",
-                        use_kalman ? "kalman" : "ols",
-                        e.r,
-                        e.ppm(),
-                        e.freq_uncertainty_ppb,
-                        e.drift_ppm_per_hr,
-                        static_cast<long long>(e.offset_ns),
-                        fs,
-                        e.phc_ns_per_sample(fs));
-                    fflush(stdout);
-                }
-            }
-        }
-        timespec ts{.tv_sec = 0, .tv_nsec = static_cast<long>(1e9 / sample_hz)};
-        clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, nullptr);
-    }
+    RatioRun{o, fd}.run();
 }
+
+#else
+
+#    include <print>
+
+int main()
+{
+    std::println(stderr, "statusbar-gps-ratio-tracker is only supported on Linux.");
+    return 1;
+}
+
+#endif
